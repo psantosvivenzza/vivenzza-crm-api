@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
+import { query as dbQuery } from '../lib/db.js'
 
 const router = Router()
+
+const useDb = () => !!process.env.DATABASE_URL
 
 // GET /api/leads — listar com filtros opcionais
 router.get('/', async (req, res) => {
@@ -52,6 +55,16 @@ router.post('/', async (req, res) => {
     const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor_negociacao, observacoes } = req.body
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
+
+    if (useDb()) {
+      const result = await dbQuery(
+        `INSERT INTO leads (nome, email, telefone, empresa, etapa, tipo, valor_negociacao, observacoes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [nome, email || null, telefone || null, empresa || null, etapa, tipo || null, valor_negociacao || null, observacoes || null]
+      )
+      return res.status(201).json(result.rows[0])
+    }
 
     const { data, error } = await supabase
       .from('leads')
