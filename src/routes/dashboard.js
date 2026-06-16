@@ -3,117 +3,97 @@ import { supabase } from '../lib/supabase.js'
 
 const router = Router()
 
-// GET /api/dashboard — métricas consolidadas
+const safe = (promise, fallback) =>
+  promise.then((r) => ({ ok: true, value: r })).catch(() => ({ ok: false, value: fallback }))
+
 router.get('/', async (req, res) => {
-  try {
-    const hoje = new Date()
-    const inicioDia = new Date(hoje.setHours(0, 0, 0, 0)).toISOString()
-    const fimDia = new Date(hoje.setHours(23, 59, 59, 999)).toISOString()
+  const agora = new Date()
+  const inicioDia = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).toISOString()
+  const fimDia   = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 23, 59, 59, 999).toISOString()
+  const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
+  const fimMes    = new Date(agora.getFullYear(), agora.getMonth() + 1, 0, 23, 59, 59, 999).toISOString()
 
-    const inicioMes = new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString()
-    const fimMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0, 23, 59, 59).toISOString()
+  const [r1, r2, r3, r4, r5, r6] = await Promise.all([
+    safe(
+      supabase.from('leads').select('etapa').then(({ data, error }) => {
+        if (error) throw error
+        return (data ?? []).reduce((acc, l) => {
+          acc[l.etapa] = (acc[l.etapa] || 0) + 1
+          return acc
+        }, {})
+      }),
+      {}
+    ),
 
-    const [
-      leadsPorEtapa,
-      totalNegociacao,
-      fechamentosMes,
-      conversasHoje,
-      tarefasVencendo,
-      pedidosMes,
-    ] = await Promise.all([
-      // Contagem de leads agrupados por etapa
-      supabase
-        .from('leads')
-        .select('etapa')
+    safe(
+      supabase.from('leads').select('valor_negociacao').in('etapa', ['contato', 'proposta', 'negociacao'])
         .then(({ data, error }) => {
           if (error) throw error
-          return data.reduce((acc, l) => {
-            acc[l.etapa] = (acc[l.etapa] || 0) + 1
-            return acc
-          }, {})
+          return (data ?? []).reduce((sum, l) => sum + (Number(l.valor_negociacao) || 0), 0)
         }),
+      0
+    ),
 
-      // Soma do valor em negociação (etapas ativas)
-      supabase
-        .from('leads')
-        .select('valor_negociacao')
-        .in('etapa', ['contato', 'proposta', 'negociacao'])
-        .then(({ data, error }) => {
-          if (error) throw error
-          return data.reduce((sum, l) => sum + (Number(l.valor_negociacao) || 0), 0)
-        }),
-
-      // Leads fechados no mês atual
-      supabase
-        .from('leads')
-        .select('id, valor_negociacao', { count: 'exact' })
-        .eq('etapa', 'fechado')
-        .gte('updated_at', inicioMes)
-        .lte('updated_at', fimMes)
+    safe(
+      supabase.from('leads').select('id, valor_negociacao', { count: 'exact' })
+        .eq('etapa', 'fechado').gte('updated_at', inicioMes).lte('updated_at', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
-          const valor = data.reduce((sum, l) => sum + (Number(l.valor_negociacao) || 0), 0)
-          return { quantidade: count, valor }
+          return {
+            quantidade: count ?? 0,
+            valor: (data ?? []).reduce((sum, l) => sum + (Number(l.valor_negociacao) || 0), 0),
+          }
         }),
+      { quantidade: 0, valor: 0 }
+    ),
 
-      // Conversas WhatsApp recebidas hoje
-      supabase
-        .from('whatsapp_mensagens')
-        .select('id', { count: 'exact' })
-        .eq('direcao', 'entrada')
-        .gte('created_at', inicioDia)
-        .lte('created_at', fimDia)
+    safe(
+      supabase.from('whatsapp_mensagens').select('id', { count: 'exact' })
+        .eq('direcao', 'entrada').gte('created_at', inicioDia).lte('created_at', fimDia)
         .then(({ count, error }) => {
           if (error) throw error
-          return count
+          return count ?? 0
         }),
+      0
+    ),
 
-      // Tarefas vencendo hoje ou atrasadas
-      supabase
-        .from('tarefas')
-        .select('id', { count: 'exact' })
-        .lte('data_vencimento', fimDia)
-        .neq('status', 'concluida')
+    safe(
+      supabase.from('tarefas').select('id', { count: 'exact' })
+        .lte('data_vencimento', fimDia).neq('status', 'concluida')
         .then(({ count, error }) => {
           if (error) throw error
-          return count
+          return count ?? 0
         }),
+      0
+    ),
 
-      // Total de pedidos confirmados no mês
-      supabase
-        .from('pedidos')
-        .select('total', { count: 'exact' })
-        .neq('status', 'cancelado')
-        .gte('created_at', inicioMes)
-        .lte('created_at', fimMes)
+    safe(
+      supabase.from('pedidos').select('total', { count: 'exact' })
+        .neq('status', 'cancelado').gte('created_at', inicioMes).lte('created_at', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
-          const valor = data.reduce((sum, p) => sum + (Number(p.total) || 0), 0)
-          return { quantidade: count, valor }
+          return {
+            quantidade: count ?? 0,
+            valor: (data ?? []).reduce((sum, p) => sum + (Number(p.total) || 0), 0),
+          }
         }),
-    ])
+      { quantidade: 0, valor: 0 }
+    ),
+  ])
 
-    res.json({
-      leads: {
-        por_etapa: leadsPorEtapa,
-        total: Object.values(leadsPorEtapa).reduce((a, b) => a + b, 0),
-      },
-      negociacao: {
-        valor_total: totalNegociacao,
-      },
-      fechamentos_mes: fechamentosMes,
-      whatsapp: {
-        conversas_hoje: conversasHoje,
-      },
-      tarefas: {
-        pendentes_ou_atrasadas: tarefasVencendo,
-      },
-      pedidos_mes: pedidosMes,
-      gerado_em: new Date().toISOString(),
-    })
-  } catch (err) {
-    res.status(500).json({ erro: err.message })
-  }
+  const porEtapa = r1.value
+  res.json({
+    leads: {
+      por_etapa: porEtapa,
+      total: Object.values(porEtapa).reduce((a, b) => a + b, 0),
+    },
+    negociacao:     { valor_total: r2.value },
+    fechamentos_mes: r3.value,
+    whatsapp:       { conversas_hoje: r4.value },
+    tarefas:        { pendentes_ou_atrasadas: r5.value },
+    pedidos_mes:    r6.value,
+    gerado_em:      new Date().toISOString(),
+  })
 })
 
 export default router
