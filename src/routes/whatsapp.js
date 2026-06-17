@@ -45,7 +45,9 @@ router.post('/enviar', async (req, res) => {
       return res.status(400).json({ erro: 'Campos "numero" e "mensagem" são obrigatórios' })
     }
 
-    const numero_limpo = destino.replace(/\D/g, '')
+    let numero_limpo = destino.replace(/\D/g, '')
+    // Garante prefixo 55 (Brasil) se não tiver DDI
+    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
       number: numero_limpo,
