@@ -23,11 +23,19 @@ export default async function handleWebhook(req, res) {
     console.log('[webhook] mensagem de:', telefone, '|', texto.slice(0, 50))
 
     // Busca lead pelo telefone com e sem prefixo 55
+    // Cobre formato antigo (8 dígitos) e novo (9 dígitos) de números brasileiros
     const semPrefixo = telefone.replace(/^55/, '')
+    // Se 10 dígitos após 55 (DDD + 8 = formato antigo), tenta com 9 inserido após DDD
+    const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
+    // Se 11 dígitos após 55 (DDD + 9 = formato novo), tenta sem o 9
+    const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
+
+    const candidatos = [telefone, semPrefixo, com9, sem9].filter(Boolean)
+
     const { data: leads } = await supabase
       .from('leads')
       .select('id, telefone')
-      .in('telefone', [telefone, semPrefixo])
+      .in('telefone', candidatos)
       .limit(1)
 
     const lead = leads?.[0] ?? null
