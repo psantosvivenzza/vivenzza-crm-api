@@ -73,44 +73,4 @@ router.post('/enviar', async (req, res) => {
   }
 })
 
-// Handler do webhook exportado — usado diretamente em index.js sem auth
-export async function handleWebhook(req, res) {
-  try {
-    const payload = req.body
-
-    if (payload.event !== 'messages.upsert') return res.sendStatus(200)
-
-    const msg = payload.data?.messages?.[0]
-    if (!msg || msg.key?.fromMe) return res.sendStatus(200)
-
-    const telefone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '') ?? ''
-    const texto = msg.message?.conversation
-      ?? msg.message?.extendedTextMessage?.text
-      ?? '[mídia]'
-
-    // Tenta associar ao lead pelo telefone (com e sem prefixo 55)
-    const { data: lead } = await supabase
-      .from('leads')
-      .select('id')
-      .or(`telefone.eq.${telefone},telefone.eq.${telefone.replace(/^55/, '')}`)
-      .maybeSingle()
-
-    await supabase.from('whatsapp_mensagens').insert({
-      lead_id: lead?.id ?? null,
-      mensagem: texto,
-      direcao: 'entrada',
-      telefone,
-      status: 'recebido',
-      evolution_id: msg.key?.id ?? null,
-    })
-
-    res.sendStatus(200)
-  } catch (err) {
-    console.error('[webhook]', err.message)
-    res.sendStatus(200)
-  }
-}
-
-router.post('/webhook', handleWebhook)
-
 export default router
