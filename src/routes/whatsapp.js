@@ -4,12 +4,14 @@ import { supabase } from '../lib/supabase.js'
 
 const router = Router()
 
-const evolutionApi = axios.create({
-  baseURL: process.env.EVOLUTION_API_URL,
-  headers: { apikey: process.env.EVOLUTION_API_KEY },
-})
+const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'vivenzza2026'
+const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
-const INSTANCE = process.env.EVOLUTION_INSTANCE
+const evolutionApi = axios.create({
+  baseURL: EVOLUTION_URL,
+  headers: { apikey: EVOLUTION_KEY },
+})
 
 // GET /api/whatsapp/:lead_id — histórico de mensagens
 router.get('/:lead_id', async (req, res) => {
@@ -36,16 +38,17 @@ router.get('/:lead_id', async (req, res) => {
 // POST /api/whatsapp/enviar — enviar mensagem via Evolution API
 router.post('/enviar', async (req, res) => {
   try {
-    const { lead_id, telefone, mensagem } = req.body
+    const { lead_id, numero, telefone, mensagem } = req.body
+    const destino = numero || telefone
 
-    if (!telefone || !mensagem) {
-      return res.status(400).json({ erro: 'Campos "telefone" e "mensagem" são obrigatórios' })
+    if (!destino || !mensagem) {
+      return res.status(400).json({ erro: 'Campos "numero" e "mensagem" são obrigatórios' })
     }
 
-    const numero = telefone.replace(/\D/g, '')
+    const numero_limpo = destino.replace(/\D/g, '')
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
-      number: numero,
+      number: numero_limpo,
       text: mensagem,
     })
 
@@ -54,7 +57,7 @@ router.post('/enviar', async (req, res) => {
         lead_id,
         mensagem,
         direcao: 'saida',
-        telefone: numero,
+        telefone: numero_limpo,
         status: 'enviado',
         evolution_id: envio?.key?.id ?? null,
       })
