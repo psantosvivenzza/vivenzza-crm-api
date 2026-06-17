@@ -52,29 +52,29 @@ router.get('/:id', async (req, res) => {
 // POST /api/leads — criar
 router.post('/', async (req, res) => {
   try {
-    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor_negociacao, observacoes } = req.body
+    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor_negociacao, observacoes, origem } = req.body
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
 
-    if (useDb()) {
-      const result = await dbQuery(
-        `INSERT INTO leads (nome, email, telefone, empresa, etapa, tipo, valor_negociacao, observacoes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *`,
-        [nome, email || null, telefone || null, empresa || null, etapa, tipo || null, valor_negociacao || null, observacoes || null]
-      )
-      return res.status(201).json(result.rows[0])
-    }
-
-    const { data, error } = await supabase
+    // Insert na tabela leads (sem email/telefone — ficam em contatos)
+    const { data: lead, error: leadError } = await supabase
       .from('leads')
-      .insert({ nome, email, telefone, empresa, etapa, tipo, valor_negociacao, observacoes })
+      .insert({ nome, empresa, etapa, tipo, valor_negociacao, observacoes, origem })
       .select()
       .single()
 
-    if (error) throw error
+    if (leadError) throw leadError
 
-    res.status(201).json(data)
+    // Se email ou telefone fornecidos, cria contato principal vinculado ao lead
+    if (email || telefone) {
+      const { error: contatoError } = await supabase
+        .from('contatos')
+        .insert({ lead_id: lead.id, nome, telefone: telefone || null, email: email || null, principal: true })
+
+      if (contatoError) throw contatoError
+    }
+
+    res.status(201).json(lead)
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
