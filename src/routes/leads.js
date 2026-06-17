@@ -14,12 +14,17 @@ router.get('/', async (req, res) => {
 
     let query = supabase
       .from('leads')
-      .select('*', { count: 'exact' })
-      .order('created_at', { ascending: false })
+      .select('*, usuarios!leads_responsavel_id_fkey(id, nome)', { count: 'exact' })
+      .order('criado_em', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
 
     if (etapa) query = query.eq('etapa', etapa)
     if (tipo) query = query.eq('tipo', tipo)
+
+    // Vendedor só vê os leads atribuídos a ele
+    if (req.user.role === 'vendedor') {
+      query = query.eq('responsavel_id', req.user.id)
+    }
 
     const { data, error, count } = await query
 

@@ -3,6 +3,8 @@ import express from 'express'
 import { corsMiddleware } from './middleware/cors.js'
 import { auth } from './middleware/auth.js'
 
+import authRouter from './routes/auth.js'
+import usuariosRouter from './routes/usuarios.js'
 import leadsRouter from './routes/leads.js'
 import contatosRouter from './routes/contatos.js'
 import whatsappRouter from './routes/whatsapp.js'
@@ -20,7 +22,11 @@ app.use(express.json())
 // Webhook do WhatsApp sem autenticação (chamado pela Evolution API)
 app.use('/api/whatsapp/webhook', whatsappRouter)
 
+// Login — sem autenticação
+app.use('/api/auth', authRouter)
+
 // Todas as outras rotas exigem autenticação
+app.use('/api/usuarios', auth, usuariosRouter)
 app.use('/api/leads', auth, leadsRouter)
 app.use('/api/contatos', auth, contatosRouter)
 app.use('/api/whatsapp', auth, whatsappRouter)
