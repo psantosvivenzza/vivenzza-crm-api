@@ -1,5 +1,13 @@
 import { supabase } from '../lib/supabase.js'
 
+function detectarCampanha(texto) {
+  const t = (texto || '').toUpperCase()
+  if (t.includes('CIDADESRS')) return 'campanha_cidadesrs'
+  if (t.includes('B2B'))       return 'campanha_b2b'
+  if (t.includes('LISTA'))     return 'campanha_lista'
+  return 'whatsapp'
+}
+
 async function proximoVendedor() {
   // Busca vendedores ativos em ordem alfabética (Ana → Rafaela → Tatiane)
   const { data: vendedores } = await supabase
@@ -70,13 +78,14 @@ export default async function handleWebhook(req, res) {
     // Auto-criação de lead só para mensagens recebidas de números desconhecidos
     if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
+      const origem = detectarCampanha(texto)
       const { data: novoLead, error } = await supabase
         .from('leads')
         .insert({
           nome: `Lead WhatsApp ${semPrefixo}`,
           telefone: semPrefixo,
           etapa: 'novo',
-          origem: 'whatsapp',
+          origem,
           responsavel_id: vendedor?.id ?? null,
         })
         .select('id, nome, responsavel_id')
@@ -84,7 +93,7 @@ export default async function handleWebhook(req, res) {
 
       if (!error && novoLead) {
         lead = novoLead
-        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome)
+        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| campanha:', origem)
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
       }
