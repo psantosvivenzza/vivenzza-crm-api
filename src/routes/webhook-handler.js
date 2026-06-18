@@ -39,8 +39,9 @@ export default async function handleWebhook(req, res) {
 
     // Evolution API v2: payload.data é o objeto da mensagem diretamente
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
-    if (!msg || msg.key?.fromMe) return res.sendStatus(200)
+    if (!msg) return res.sendStatus(200)
 
+    const fromMe = msg.key?.fromMe === true
     const remoteJid = msg.key?.remoteJid ?? ''
     const telefone = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '')
     const texto =
@@ -48,7 +49,9 @@ export default async function handleWebhook(req, res) {
       msg.message?.extendedTextMessage?.text ??
       '[mídia]'
 
-    console.log('[webhook] mensagem de:', telefone, '|', texto.slice(0, 50))
+    const direcao = fromMe ? 'saida' : 'entrada'
+    const status = fromMe ? 'enviado' : 'recebido'
+    console.log('[webhook]', direcao, '| tel:', telefone, '|', texto.slice(0, 50))
 
     // Busca lead pelo telefone — cobre formato antigo (8 dig) e novo (9 dig)
     const semPrefixo = telefone.replace(/^55/, '')
@@ -64,8 +67,8 @@ export default async function handleWebhook(req, res) {
 
     let lead = leads?.[0] ?? null
 
-    // Auto-criação de lead para números desconhecidos
-    if (!lead) {
+    // Auto-criação de lead só para mensagens recebidas de números desconhecidos
+    if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
       const { data: novoLead, error } = await supabase
         .from('leads')
@@ -90,9 +93,9 @@ export default async function handleWebhook(req, res) {
     await supabase.from('whatsapp_mensagens').insert({
       lead_id: lead?.id ?? null,
       mensagem: texto,
-      direcao: 'entrada',
+      direcao,
       telefone,
-      status: 'recebido',
+      status,
       evolution_id: msg.key?.id ?? null,
     })
 
