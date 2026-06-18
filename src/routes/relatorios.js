@@ -46,14 +46,40 @@ router.get('/', adminOnly, async (req, res) => {
       }))
       .sort((a, b) => b.total - a.total)
 
-    // 2. Leads por origem
+    // 2. Leads por origem e por campanha (origens que começam com 'campanha_')
     const mapaOrigens = {}
+    const mapaCampanhas = {}
     for (const lead of leads) {
       const origem = lead.origem || 'manual'
       mapaOrigens[origem] = (mapaOrigens[origem] || 0) + 1
+
+      if (origem.startsWith('campanha_')) {
+        if (!mapaCampanhas[origem]) {
+          mapaCampanhas[origem] = {
+            origem,
+            total: 0,
+            etapas: { novo: 0, contato: 0, proposta: 0, negociacao: 0, fechado: 0, perdido: 0 },
+            valor_negociacao: 0,
+          }
+        }
+        mapaCampanhas[origem].total++
+        const etapa = lead.etapa || 'novo'
+        mapaCampanhas[origem].etapas[etapa] = (mapaCampanhas[origem].etapas[etapa] || 0) + 1
+        if (['contato', 'proposta', 'negociacao'].includes(etapa)) {
+          mapaCampanhas[origem].valor_negociacao += Number(lead.valor_negociacao) || 0
+        }
+      }
     }
+
     const leads_por_origem = Object.entries(mapaOrigens)
       .map(([origem, total]) => ({ origem, total }))
+      .sort((a, b) => b.total - a.total)
+
+    const leads_por_campanha = Object.values(mapaCampanhas)
+      .map((c) => ({
+        ...c,
+        taxa_conversao: c.total > 0 ? Number(((c.etapas.fechado || 0) / c.total) * 100).toFixed(1) : '0.0',
+      }))
       .sort((a, b) => b.total - a.total)
 
     // 3. Evolução temporal — últimos 30 dias (inclui dias sem leads)
@@ -71,7 +97,7 @@ router.get('/', adminOnly, async (req, res) => {
       evolucao_temporal.push({ dia, total: porDia[dia] || 0 })
     }
 
-    res.json({ performance_vendedoras, leads_por_origem, evolucao_temporal, gerado_em: new Date().toISOString() })
+    res.json({ performance_vendedoras, leads_por_campanha, leads_por_origem, evolucao_temporal, gerado_em: new Date().toISOString() })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
