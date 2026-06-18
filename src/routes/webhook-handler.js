@@ -8,8 +8,35 @@ function detectarCampanha(texto) {
   return 'whatsapp'
 }
 
+// Detecta se a mensagem veio de um anúncio do Meta Ads (Click-to-WhatsApp)
+function detectarAnuncio(msg) {
+  // Campo referral — presente em mensagens CtWA (Click-to-WhatsApp)
+  const ref = msg.referral
+  if (ref) {
+    const id = ref.source_id || ref.sourceId || ''
+    const titulo = ref.headline || ref.body || ''
+    const label = (titulo || id || 'ads').slice(0, 60).replace(/\s+/g, '_')
+    console.log('[webhook] Meta Ads referral detectado:', JSON.stringify(ref))
+    return `meta_${label}`
+  }
+
+  // Campo externalAdReply — presente em alguns tipos de mensagem
+  const tipos = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'buttonsMessage']
+  for (const tipo of tipos) {
+    const adReply = msg.message?.[tipo]?.contextInfo?.externalAdReply
+    if (adReply) {
+      const id = adReply.sourceId || ''
+      const titulo = adReply.title || adReply.body || ''
+      const label = (titulo || id || 'ads').slice(0, 60).replace(/\s+/g, '_')
+      console.log('[webhook] Meta Ads externalAdReply detectado:', JSON.stringify(adReply))
+      return `meta_${label}`
+    }
+  }
+
+  return null
+}
+
 async function proximoVendedor() {
-  // Busca vendedores ativos em ordem alfabética (Ana → Rafaela → Tatiane)
   const { data: vendedores } = await supabase
     .from('usuarios')
     .select('id, nome')
@@ -27,7 +54,6 @@ async function proximoVendedor() {
 
   const ultimoId = fila?.ultimo_vendedor_id ?? null
   const idx = vendedores.findIndex(v => v.id === ultimoId)
-  // Próximo na fila; se não encontrou (ou é o último), volta para o índice 0
   const proximo = vendedores[(idx + 1) % vendedores.length]
 
   await supabase
@@ -45,9 +71,11 @@ export default async function handleWebhook(req, res) {
 
     if (payload.event !== 'messages.upsert') return res.sendStatus(200)
 
-    // Evolution API v2: payload.data é o objeto da mensagem diretamente
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
     if (!msg) return res.sendStatus(200)
+
+    // Log completo da mensagem para inspecionar campos de anúncio Meta Ads
+    console.log('[webhook] msg completo:', JSON.stringify(msg).slice(0, 1500))
 
     const fromMe = msg.key?.fromMe === true
     const remoteJid = msg.key?.remoteJid ?? ''
@@ -61,7 +89,6 @@ export default async function handleWebhook(req, res) {
     const status = fromMe ? 'enviado' : 'recebido'
     console.log('[webhook]', direcao, '| tel:', telefone, '|', texto.slice(0, 50))
 
-    // Busca lead pelo telefone — cobre formato antigo (8 dig) e novo (9 dig)
     const semPrefixo = telefone.replace(/^55/, '')
     const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
     const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
@@ -75,10 +102,10 @@ export default async function handleWebhook(req, res) {
 
     let lead = leads?.[0] ?? null
 
-    // Auto-criação de lead só para mensagens recebidas de números desconhecidos
     if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
-      const origem = detectarCampanha(texto)
+      // Anúncio Meta Ads tem prioridade sobre detecção por texto
+      const origem = detectarAnuncio(msg) ?? detectarCampanha(texto)
       const { data: novoLead, error } = await supabase
         .from('leads')
         .insert({
@@ -93,7 +120,7 @@ export default async function handleWebhook(req, res) {
 
       if (!error && novoLead) {
         lead = novoLead
-        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| campanha:', origem)
+        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem)
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
       }
