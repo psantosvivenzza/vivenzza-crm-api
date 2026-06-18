@@ -9,7 +9,7 @@ const useDb = () => !!process.env.DATABASE_URL
 // GET /api/leads — listar com filtros opcionais
 router.get('/', async (req, res) => {
   try {
-    const { etapa, tipo, page = 1, limit = 50 } = req.query
+    const { etapa, tipo, desde, page = 1, limit = 50 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
 
     let query = supabase
@@ -20,6 +20,7 @@ router.get('/', async (req, res) => {
 
     if (etapa) query = query.eq('etapa', etapa)
     if (tipo) query = query.eq('tipo', tipo)
+    if (desde) query = query.gt('criado_em', desde)
 
     // Vendedor só vê os leads atribuídos a ele
     if (req.user.role === 'vendedor') {
