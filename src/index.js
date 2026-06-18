@@ -16,6 +16,7 @@ import dashboardRouter from './routes/dashboard.js'
 import estoqueRouter from './routes/estoque.js'
 import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
+import relatoriosRouter from './routes/relatorios.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -41,6 +42,7 @@ app.use('/api/dashboard', auth, dashboardRouter)
 app.use('/api/estoque', auth, estoqueRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
+app.use('/api/relatorios', auth, relatoriosRouter)
 
 // Health check
 app.get('/health', (req, res) => {
