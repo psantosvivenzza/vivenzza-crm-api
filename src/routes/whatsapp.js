@@ -88,6 +88,43 @@ router.get('/media/:evolution_id', async (req, res) => {
   }
 })
 
+// GET /api/whatsapp/recentes?desde=ISO — mensagens de entrada recentes para polling de notificações
+// DEVE vir antes de /:lead_id
+router.get('/recentes', async (req, res) => {
+  try {
+    const { desde } = req.query
+    if (!desde) return res.status(400).json({ erro: 'Parâmetro "desde" obrigatório' })
+
+    let leadIds = null
+
+    if (req.user.role === 'vendedor') {
+      const { data: meusLeads } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('responsavel_id', req.user.id)
+      leadIds = (meusLeads || []).map(l => l.id)
+      if (leadIds.length === 0) return res.json({ data: [] })
+    }
+
+    let query = supabase
+      .from('whatsapp_mensagens')
+      .select('id, lead_id, mensagem, telefone, direcao, media_tipo, created_at, leads(id, nome)')
+      .eq('direcao', 'entrada')
+      .gt('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(20)
+
+    if (leadIds) query = query.in('lead_id', leadIds)
+
+    const { data, error } = await query
+    if (error) throw error
+
+    res.json({ data: data || [] })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // GET /api/whatsapp/:lead_id — histórico de mensagens
 router.get('/:lead_id', async (req, res) => {
   try {

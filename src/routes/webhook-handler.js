@@ -1,4 +1,15 @@
+import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
+
+const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'vivenzza2026'
+const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
+
+const evolutionApi = axios.create({
+  baseURL: EVOLUTION_URL,
+  headers: { apikey: EVOLUTION_KEY },
+  timeout: 20000,
+})
 
 function detectarCampanha(texto) {
   const t = (texto || '').toUpperCase()
@@ -8,7 +19,6 @@ function detectarCampanha(texto) {
   return 'whatsapp'
 }
 
-// Detecta se a mensagem veio de um anúncio do Meta Ads (Click-to-WhatsApp)
 function detectarAnuncio(msg) {
   const ref = msg.referral
   if (ref) {
@@ -32,22 +42,20 @@ function detectarAnuncio(msg) {
   return null
 }
 
-// Detecta tipo de mídia, texto descritivo e extrai dados para download posterior
 function detectarMidia(msg) {
   const messageType = msg.messageType || Object.keys(msg.message || {}).find(k => k !== 'messageContextInfo') || ''
   const map = {
-    audioMessage:                   { tipo: 'audio',    texto: '[áudio]' },
-    ptvMessage:                     { tipo: 'video',    texto: '[vídeo curto]' },
-    videoMessage:                   { tipo: 'video',    texto: '[vídeo]' },
-    imageMessage:                   { tipo: 'image',    texto: '[imagem]' },
-    stickerMessage:                 { tipo: 'sticker',  texto: '[figurinha]' },
-    documentMessage:                { tipo: 'document', texto: `[arquivo: ${msg.message?.documentMessage?.fileName || 'documento'}]` },
-    documentWithCaptionMessage:     { tipo: 'document', texto: `[arquivo: ${msg.message?.documentWithCaptionMessage?.message?.documentMessage?.fileName || 'documento'}]` },
+    audioMessage:               { tipo: 'audio',    texto: '[áudio]' },
+    ptvMessage:                 { tipo: 'video',    texto: '[vídeo curto]' },
+    videoMessage:               { tipo: 'video',    texto: '[vídeo]' },
+    imageMessage:               { tipo: 'image',    texto: '[imagem]' },
+    stickerMessage:             { tipo: 'sticker',  texto: '[figurinha]' },
+    documentMessage:            { tipo: 'document', texto: `[arquivo: ${msg.message?.documentMessage?.fileName || 'documento'}]` },
+    documentWithCaptionMessage: { tipo: 'document', texto: `[arquivo: ${msg.message?.documentWithCaptionMessage?.message?.documentMessage?.fileName || 'documento'}]` },
   }
   const info = map[messageType] ?? null
   if (!info) return null
 
-  // Extrai os campos necessários para /chat/getBase64FromMediaMessage
   const mediaObj = msg.message?.[messageType] ?? {}
   const mediaData = {
     messageType,
@@ -62,14 +70,79 @@ function detectarMidia(msg) {
     fileEncSha256: mediaObj.fileEncSha256,
     fileSha256: mediaObj.fileSha256,
   }
-
   return { ...info, mediaData }
 }
 
-// Mapeia código de status do WhatsApp para texto
 function mapStatus(code) {
   const map = { 1: 'pendente', 2: 'enviado', 3: 'entregue', 4: 'lido', 5: 'reproduzido' }
   return map[code] ?? null
+}
+
+// Baixa mídia via Evolution API e salva no Supabase Storage (fire-and-forget)
+async function baixarEArmazenarMidia(evolutionId, mediaData) {
+  try {
+    if (!mediaData?.mediaKey || !mediaData?.messageType) {
+      console.log('[webhook] mídia sem mediaKey — download ignorado:', evolutionId)
+      return
+    }
+
+    const messageObj = {
+      key: {
+        id: evolutionId,
+        remoteJid: mediaData.remoteJid,
+        fromMe: mediaData.fromMe ?? false,
+      },
+      message: {
+        [mediaData.messageType]: {
+          url: mediaData.url,
+          mediaKey: mediaData.mediaKey,
+          mimetype: mediaData.mimetype,
+          fileName: mediaData.fileName,
+          fileLength: mediaData.fileLength,
+          directPath: mediaData.directPath,
+          fileEncSha256: mediaData.fileEncSha256,
+          fileSha256: mediaData.fileSha256,
+        },
+      },
+    }
+
+    const { data: result } = await evolutionApi.post(
+      `/chat/getBase64FromMediaMessage/${INSTANCE}`,
+      { message: messageObj }
+    )
+
+    if (!result?.base64) {
+      console.log('[webhook] Evolution API não retornou base64 para:', evolutionId)
+      return
+    }
+
+    const mimeType = result.mimetype || mediaData.mimetype || 'application/octet-stream'
+    const ext = mimeType.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin'
+    const folder = mediaData.messageType.replace('Message', '')
+    const path = `${folder}/${evolutionId}.${ext}`
+    const buffer = Buffer.from(result.base64, 'base64')
+
+    const { error: uploadError } = await supabase.storage
+      .from('whatsapp-media')
+      .upload(path, buffer, { contentType: mimeType, upsert: true })
+
+    if (uploadError) {
+      console.error('[webhook] erro upload storage:', uploadError.message)
+      return
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('whatsapp-media')
+      .getPublicUrl(path)
+
+    await supabase.from('whatsapp_mensagens')
+      .update({ media_url: publicUrl })
+      .eq('evolution_id', evolutionId)
+
+    console.log('[webhook] mídia armazenada:', path, '→', publicUrl.slice(0, 60))
+  } catch (err) {
+    console.error('[webhook] erro ao baixar mídia:', evolutionId, '|', err.message)
+  }
 }
 
 async function proximoVendedor() {
@@ -105,7 +178,7 @@ export default async function handleWebhook(req, res) {
     const payload = req.body
     console.log('[webhook] event:', payload.event, '| data keys:', Object.keys(payload.data || {}))
 
-    // ── Status de entrega/leitura ──────────────────────────────────────────
+    // ── Status de entrega/leitura ─────────────────────────────────────────
     if (payload.event === 'messages.update') {
       const updates = Array.isArray(payload.data) ? payload.data : [payload.data]
       for (const upd of updates) {
@@ -127,7 +200,6 @@ export default async function handleWebhook(req, res) {
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
     if (!msg) return res.sendStatus(200)
 
-    // Log completo para inspecionar payload de anúncios Meta Ads e mídias
     console.log('[webhook] msg completo:', JSON.stringify(msg).slice(0, 1500))
 
     const fromMe = msg.key?.fromMe === true
@@ -183,16 +255,23 @@ export default async function handleWebhook(req, res) {
       }
     }
 
+    const evolutionId = msg.key?.id ?? null
+
     await supabase.from('whatsapp_mensagens').insert({
       lead_id: lead?.id ?? null,
       mensagem: texto,
       direcao,
       telefone,
       status,
-      evolution_id: msg.key?.id ?? null,
+      evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_data: mediaData,
     })
+
+    // Fire-and-forget: baixa mídia e salva no Supabase Storage
+    if (mediaTipo && evolutionId && !fromMe) {
+      baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
+    }
 
     res.sendStatus(200)
   } catch (err) {
