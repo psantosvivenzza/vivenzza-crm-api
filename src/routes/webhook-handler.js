@@ -72,6 +72,7 @@ export default async function handleWebhook(req, res) {
         .insert({
           nome: `Lead WhatsApp ${semPrefixo}`,
           telefone: semPrefixo,
+          tipo: 'salao',
           etapa: 'novo',
           origem: 'whatsapp',
           responsavel_id: vendedor?.id ?? null,
