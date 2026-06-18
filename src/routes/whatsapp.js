@@ -13,6 +13,54 @@ const evolutionApi = axios.create({
   headers: { apikey: EVOLUTION_KEY },
 })
 
+// GET /api/whatsapp/media/:evolution_id — proxy para download de mídia via Evolution API
+// DEVE vir antes de /:lead_id para não ser capturado pelo catch-all
+router.get('/media/:evolution_id', async (req, res) => {
+  try {
+    const { evolution_id } = req.params
+
+    // Busca a mensagem para obter o telefone (remoteJid)
+    const { data: registro } = await supabase
+      .from('whatsapp_mensagens')
+      .select('telefone, direcao')
+      .eq('evolution_id', evolution_id)
+      .single()
+
+    if (!registro) return res.status(404).json({ erro: 'Mensagem não encontrada' })
+
+    // Busca a mensagem completa no Evolution API para obter as chaves de mídia
+    let fullMsg = null
+    try {
+      const { data: found } = await evolutionApi.post(`/message/findMessages/${INSTANCE}`, {
+        where: { key: { id: evolution_id } },
+        page: { cursor: 0, limit: 1 },
+      })
+      fullMsg = found?.messages?.records?.[0] ?? found?.[0] ?? null
+    } catch {
+      // findMessages pode não estar disponível em todas as versões
+    }
+
+    if (!fullMsg) return res.status(404).json({ erro: 'Mídia não disponível no Evolution API' })
+
+    // Download da mídia com descriptografia pelo Evolution API
+    const { data: media } = await evolutionApi.post(`/message/downloadMedia/${INSTANCE}`, {
+      message: fullMsg,
+    })
+
+    if (!media?.base64) return res.status(404).json({ erro: 'Base64 não retornado pelo Evolution API' })
+
+    const mimeType = media.mimetype || 'application/octet-stream'
+    const buffer = Buffer.from(media.base64, 'base64')
+    res.setHeader('Content-Type', mimeType)
+    res.setHeader('Content-Disposition', 'inline')
+    res.setHeader('Cache-Control', 'private, max-age=3600')
+    res.send(buffer)
+  } catch (err) {
+    const status = err.response?.status ?? 500
+    res.status(status).json({ erro: err.message })
+  }
+})
+
 // GET /api/whatsapp/:lead_id — histórico de mensagens
 router.get('/:lead_id', async (req, res) => {
   try {
@@ -61,6 +109,7 @@ router.post('/enviar-audio', async (req, res) => {
         telefone: numero_limpo,
         status: 'enviado',
         evolution_id: envio?.key?.id ?? null,
+        media_tipo: 'audio',
       })
     }
 
@@ -93,6 +142,8 @@ router.post('/enviar-midia', async (req, res) => {
       fileName,
     })
 
+    const tipoMap = { image: 'image', video: 'video', document: 'document' }
+
     if (lead_id) {
       await supabase.from('whatsapp_mensagens').insert({
         lead_id,
@@ -101,6 +152,7 @@ router.post('/enviar-midia', async (req, res) => {
         telefone: numero_limpo,
         status: 'enviado',
         evolution_id: envio?.key?.id ?? null,
+        media_tipo: tipoMap[mediatype] ?? 'document',
       })
     }
 
@@ -123,7 +175,6 @@ router.post('/enviar', async (req, res) => {
     }
 
     let numero_limpo = destino.replace(/\D/g, '')
-    // Garante prefixo 55 (Brasil) se não tiver DDI
     if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
