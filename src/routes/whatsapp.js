@@ -35,6 +35,83 @@ router.get('/:lead_id', async (req, res) => {
   }
 })
 
+// POST /api/whatsapp/enviar-audio — enviar áudio (PTT) via Evolution API
+router.post('/enviar-audio', async (req, res) => {
+  try {
+    const { lead_id, numero, telefone, audio } = req.body
+    const destino = numero || telefone
+    if (!destino || !audio) {
+      return res.status(400).json({ erro: 'Campos "numero" e "audio" são obrigatórios' })
+    }
+
+    let numero_limpo = destino.replace(/\D/g, '')
+    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
+
+    const { data: envio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${INSTANCE}`, {
+      number: numero_limpo,
+      audio,
+      encoding: true,
+    })
+
+    if (lead_id) {
+      await supabase.from('whatsapp_mensagens').insert({
+        lead_id,
+        mensagem: '[áudio]',
+        direcao: 'saida',
+        telefone: numero_limpo,
+        status: 'enviado',
+        evolution_id: envio?.key?.id ?? null,
+      })
+    }
+
+    res.json({ sucesso: true, evolution: envio })
+  } catch (err) {
+    const status = err.response?.status ?? 500
+    const mensagem = err.response?.data?.message ?? err.message
+    res.status(status).json({ erro: mensagem })
+  }
+})
+
+// POST /api/whatsapp/enviar-midia — enviar arquivo/imagem via Evolution API
+router.post('/enviar-midia', async (req, res) => {
+  try {
+    const { lead_id, numero, telefone, media, mediatype, mimetype, fileName, caption } = req.body
+    const destino = numero || telefone
+    if (!destino || !media) {
+      return res.status(400).json({ erro: 'Campos "numero" e "media" são obrigatórios' })
+    }
+
+    let numero_limpo = destino.replace(/\D/g, '')
+    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
+
+    const { data: envio } = await evolutionApi.post(`/message/sendMedia/${INSTANCE}`, {
+      number: numero_limpo,
+      mediatype: mediatype || 'document',
+      mimetype,
+      caption: caption || '',
+      media,
+      fileName,
+    })
+
+    if (lead_id) {
+      await supabase.from('whatsapp_mensagens').insert({
+        lead_id,
+        mensagem: caption ? `[arquivo: ${fileName}] ${caption}` : `[arquivo: ${fileName}]`,
+        direcao: 'saida',
+        telefone: numero_limpo,
+        status: 'enviado',
+        evolution_id: envio?.key?.id ?? null,
+      })
+    }
+
+    res.json({ sucesso: true, evolution: envio })
+  } catch (err) {
+    const status = err.response?.status ?? 500
+    const mensagem = err.response?.data?.message ?? err.message
+    res.status(status).json({ erro: mensagem })
+  }
+})
+
 // POST /api/whatsapp/enviar — enviar mensagem via Evolution API
 router.post('/enviar', async (req, res) => {
   try {
