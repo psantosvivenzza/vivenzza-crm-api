@@ -165,6 +165,26 @@ router.post('/enviar-audio', async (req, res) => {
       encoding: true,
     })
 
+    const evolutionId = envio?.key?.id ?? null
+    let mediaUrl = null
+
+    // Salva o áudio enviado no Supabase Storage para exibir player imediatamente
+    if (audio && evolutionId) {
+      try {
+        const buffer = Buffer.from(audio, 'base64')
+        const path = `audio/${evolutionId}.ogg`
+        const { error: uploadError } = await supabase.storage
+          .from('whatsapp-media')
+          .upload(path, buffer, { contentType: 'audio/ogg; codecs=opus', upsert: true })
+        if (!uploadError) {
+          const { data: { publicUrl } } = supabase.storage.from('whatsapp-media').getPublicUrl(path)
+          mediaUrl = publicUrl
+        }
+      } catch (uploadErr) {
+        console.error('[enviar-audio] erro upload storage:', uploadErr.message)
+      }
+    }
+
     if (lead_id) {
       await supabase.from('whatsapp_mensagens').insert({
         lead_id,
@@ -172,12 +192,13 @@ router.post('/enviar-audio', async (req, res) => {
         direcao: 'saida',
         telefone: numero_limpo,
         status: 'enviado',
-        evolution_id: envio?.key?.id ?? null,
+        evolution_id: evolutionId,
         media_tipo: 'audio',
+        media_url: mediaUrl,
       })
     }
 
-    res.json({ sucesso: true, evolution: envio })
+    res.json({ sucesso: true, media_url: mediaUrl, evolution: envio })
   } catch (err) {
     const status = err.response?.status ?? 500
     const mensagem = err.response?.data?.message ?? err.message
