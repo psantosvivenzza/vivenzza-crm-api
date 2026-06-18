@@ -32,7 +32,7 @@ function detectarAnuncio(msg) {
   return null
 }
 
-// Detecta tipo de mídia e texto descritivo da mensagem
+// Detecta tipo de mídia, texto descritivo e extrai dados para download posterior
 function detectarMidia(msg) {
   const messageType = msg.messageType || Object.keys(msg.message || {}).find(k => k !== 'messageContextInfo') || ''
   const map = {
@@ -44,7 +44,26 @@ function detectarMidia(msg) {
     documentMessage:                { tipo: 'document', texto: `[arquivo: ${msg.message?.documentMessage?.fileName || 'documento'}]` },
     documentWithCaptionMessage:     { tipo: 'document', texto: `[arquivo: ${msg.message?.documentWithCaptionMessage?.message?.documentMessage?.fileName || 'documento'}]` },
   }
-  return map[messageType] ?? null
+  const info = map[messageType] ?? null
+  if (!info) return null
+
+  // Extrai os campos necessários para /chat/getBase64FromMediaMessage
+  const mediaObj = msg.message?.[messageType] ?? {}
+  const mediaData = {
+    messageType,
+    remoteJid: msg.key?.remoteJid,
+    fromMe: msg.key?.fromMe ?? false,
+    url: mediaObj.url,
+    mediaKey: mediaObj.mediaKey,
+    mimetype: mediaObj.mimetype,
+    fileName: mediaObj.fileName || mediaObj.title,
+    fileLength: mediaObj.fileLength,
+    directPath: mediaObj.directPath,
+    fileEncSha256: mediaObj.fileEncSha256,
+    fileSha256: mediaObj.fileSha256,
+  }
+
+  return { ...info, mediaData }
 }
 
 // Mapeia código de status do WhatsApp para texto
@@ -122,6 +141,7 @@ export default async function handleWebhook(req, res) {
       midia?.texto ??
       '[mídia]'
     const mediaTipo = midia?.tipo ?? null
+    const mediaData = midia?.mediaData ?? null
 
     const direcao = fromMe ? 'saida' : 'entrada'
     const status = fromMe ? 'enviado' : 'recebido'
@@ -171,6 +191,7 @@ export default async function handleWebhook(req, res) {
       status,
       evolution_id: msg.key?.id ?? null,
       media_tipo: mediaTipo,
+      media_data: mediaData,
     })
 
     res.sendStatus(200)

@@ -19,40 +19,67 @@ router.get('/media/:evolution_id', async (req, res) => {
   try {
     const { evolution_id } = req.params
 
-    // Busca a mensagem para obter o telefone (remoteJid)
+    // Busca a mensagem com os dados de mídia armazenados no webhook
     const { data: registro } = await supabase
       .from('whatsapp_mensagens')
-      .select('telefone, direcao')
+      .select('telefone, direcao, media_data, media_url')
       .eq('evolution_id', evolution_id)
       .single()
 
     if (!registro) return res.status(404).json({ erro: 'Mensagem não encontrada' })
 
-    // Busca a mensagem completa no Evolution API para obter as chaves de mídia
-    let fullMsg = null
-    try {
-      const { data: found } = await evolutionApi.post(`/message/findMessages/${INSTANCE}`, {
-        where: { key: { id: evolution_id } },
-        page: { cursor: 0, limit: 1 },
-      })
-      fullMsg = found?.messages?.records?.[0] ?? found?.[0] ?? null
-    } catch {
-      // findMessages pode não estar disponível em todas as versões
+    // Se já temos URL armazenada, redireciona
+    if (registro.media_url) {
+      return res.redirect(registro.media_url)
     }
 
-    if (!fullMsg) return res.status(404).json({ erro: 'Mídia não disponível no Evolution API' })
+    const md = registro.media_data
+    if (!md || !md.mediaKey) {
+      return res.status(404).json({ erro: 'Dados de mídia não disponíveis. Mensagem pode ser anterior à atualização do sistema.' })
+    }
 
-    // Download da mídia com descriptografia pelo Evolution API
-    const { data: media } = await evolutionApi.post(`/message/downloadMedia/${INSTANCE}`, {
-      message: fullMsg,
-    })
+    const remoteJid = md.remoteJid || `${registro.telefone}@s.whatsapp.net`
 
-    if (!media?.base64) return res.status(404).json({ erro: 'Base64 não retornado pelo Evolution API' })
+    // Reconstrói o objeto de mensagem para /chat/getBase64FromMediaMessage
+    const messageObj = {
+      key: {
+        id: evolution_id,
+        remoteJid,
+        fromMe: md.fromMe ?? false,
+      },
+      message: {
+        [md.messageType]: {
+          url: md.url,
+          mediaKey: md.mediaKey,
+          mimetype: md.mimetype,
+          fileName: md.fileName,
+          fileLength: md.fileLength,
+          directPath: md.directPath,
+          fileEncSha256: md.fileEncSha256,
+          fileSha256: md.fileSha256,
+        },
+      },
+    }
 
-    const mimeType = media.mimetype || 'application/octet-stream'
-    const buffer = Buffer.from(media.base64, 'base64')
+    const { data: result } = await evolutionApi.post(
+      `/chat/getBase64FromMediaMessage/${INSTANCE}`,
+      { message: messageObj }
+    )
+
+    if (!result?.base64) return res.status(404).json({ erro: 'Mídia não retornada pelo Evolution API' })
+
+    const mimeType = result.mimetype || md.mimetype || 'application/octet-stream'
+    const buffer = Buffer.from(result.base64, 'base64')
+
+    // Cache a URL no DB para próximas requisições (fire-and-forget)
+    // Não aguardamos para não atrasar a resposta
+    supabase.from('whatsapp_mensagens')
+      .update({ media_url: `cached:${evolution_id}` })
+      .eq('evolution_id', evolution_id)
+      .then()
+
     res.setHeader('Content-Type', mimeType)
-    res.setHeader('Content-Disposition', 'inline')
+    res.setHeader('Content-Disposition', `inline; filename="${md.fileName || 'media'}"`)
     res.setHeader('Cache-Control', 'private, max-age=3600')
     res.send(buffer)
   } catch (err) {
