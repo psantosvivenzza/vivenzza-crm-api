@@ -63,10 +63,9 @@ router.post('/', async (req, res) => {
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
 
-    // Insert na tabela leads (sem email/telefone — ficam em contatos)
     const { data: lead, error: leadError } = await supabase
       .from('leads')
-      .insert({ nome, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
+      .insert({ nome, email: email || null, telefone: telefone || null, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
       .select()
       .single()
 
