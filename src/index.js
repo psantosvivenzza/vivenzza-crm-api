@@ -17,6 +17,9 @@ import estoqueRouter from './routes/estoque.js'
 import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
 import relatoriosRouter from './routes/relatorios.js'
+import adminRouter from './routes/admin.js'
+import cron from 'node-cron'
+import { runBackup } from './jobs/backup.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -43,6 +46,7 @@ app.use('/api/estoque', auth, estoqueRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
+app.use('/api/admin', auth, adminRouter)
 
 // Health check
 app.get('/health', (req, res) => {
@@ -62,4 +66,13 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Vivenzza CRM API rodando na porta ${PORT}`)
+})
+
+// Backup automático diário às 02:00 BRT (05:00 UTC)
+cron.schedule('0 5 * * *', async () => {
+  try {
+    await runBackup()
+  } catch (err) {
+    console.error('[cron backup] Erro:', err.message)
+  }
 })
