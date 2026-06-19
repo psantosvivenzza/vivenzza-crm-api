@@ -59,14 +59,14 @@ router.get('/:id', async (req, res) => {
 // POST /api/leads — criar
 router.post('/', async (req, res) => {
   try {
-    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor, observacoes, origem } = req.body
+    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor, valor_negociacao, observacoes, origem } = req.body
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
 
     // Insert na tabela leads (sem email/telefone — ficam em contatos)
     const { data: lead, error: leadError } = await supabase
       .from('leads')
-      .insert({ nome, empresa, etapa, tipo, valor, observacoes, origem })
+      .insert({ nome, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
       .select()
       .single()
 

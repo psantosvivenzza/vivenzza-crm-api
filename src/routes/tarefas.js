@@ -24,9 +24,15 @@ router.get('/', async (req, res) => {
     if (status) query = query.eq('status', status)
 
     if (hoje === 'true') {
-      const agora = new Date()
-      const inicioDia = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).toISOString()
-      const fimDia   = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 23, 59, 59, 999).toISOString()
+      // Usa fuso de Brasília (UTC-3) para calcular o dia correto
+      const OFFSET_BRT = 3 * 60 * 60 * 1000
+      const agoraBrt = new Date(Date.now() - OFFSET_BRT)
+      const ano = agoraBrt.getUTCFullYear()
+      const mes = agoraBrt.getUTCMonth()
+      const dia = agoraBrt.getUTCDate()
+      // Brasília meia-noite = 03:00 UTC; fim do dia = dia+1 às 02:59:59 UTC
+      const inicioDia = new Date(Date.UTC(ano, mes, dia, 3, 0, 0, 0)).toISOString()
+      const fimDia    = new Date(Date.UTC(ano, mes, dia + 1, 2, 59, 59, 999)).toISOString()
       query = query.gte('prazo', inicioDia).lte('prazo', fimDia).neq('status', 'concluida')
     }
 
