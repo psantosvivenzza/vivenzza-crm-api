@@ -94,6 +94,16 @@ router.put('/:id', async (req, res) => {
     delete campos.id
     delete campos.created_at
 
+    // Detecta transição para/de 'fechado' para registrar fechado_em
+    if (campos.etapa !== undefined) {
+      const { data: atual } = await supabase.from('leads').select('etapa').eq('id', req.params.id).single()
+      if (campos.etapa === 'fechado' && atual?.etapa !== 'fechado') {
+        campos.fechado_em = new Date().toISOString()
+      } else if (campos.etapa !== 'fechado' && atual?.etapa === 'fechado') {
+        campos.fechado_em = null
+      }
+    }
+
     const { data, error } = await supabase
       .from('leads')
       .update({ ...campos, updated_at: new Date().toISOString() })
@@ -120,9 +130,15 @@ router.put('/:id/etapa', async (req, res) => {
       return res.status(400).json({ erro: `Etapa inválida. Use: ${etapasValidas.join(', ')}` })
     }
 
+    const agora = new Date().toISOString()
+    const updateData = { etapa, updated_at: agora }
+    // Registra o momento exato em que o lead foi movido para fechado
+    if (etapa === 'fechado') updateData.fechado_em = agora
+    else updateData.fechado_em = null  // saiu de fechado — reseta
+
     const { data, error } = await supabase
       .from('leads')
-      .update({ etapa, updated_at: new Date().toISOString() })
+      .update(updateData)
       .eq('id', req.params.id)
       .select()
       .single()

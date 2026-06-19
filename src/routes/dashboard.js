@@ -36,7 +36,8 @@ router.get('/', async (req, res) => {
 
     safe(
       supabase.from('leads').select('id, valor_negociacao', { count: 'exact' })
-        .eq('etapa', 'fechado').gte('updated_at', inicioMes).lte('updated_at', fimMes)
+        .not('fechado_em', 'is', null)
+        .gte('fechado_em', inicioMes).lte('fechado_em', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
           return {
