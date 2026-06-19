@@ -274,21 +274,47 @@ router.post('/enviar-midia', async (req, res) => {
       fileName,
     })
 
+    const evolutionId = envio?.key?.id ?? null
     const tipoMap = { image: 'image', video: 'video', document: 'document' }
+    const labelMap = { image: '[imagem]', video: '[vídeo]' }
+    let mediaUrl = null
+
+    // Upload para Supabase Storage para exibição imediata no chat
+    if (media && evolutionId) {
+      try {
+        const buffer = Buffer.from(media, 'base64')
+        const safeFile = (fileName || `file_${evolutionId}`).replace(/[^a-zA-Z0-9._-]/g, '_')
+        const storagePath = `${mediatype || 'document'}/${evolutionId}_${safeFile}`
+        const { error: uploadError } = await supabase.storage
+          .from('whatsapp-media')
+          .upload(storagePath, buffer, { contentType: mimetype || 'application/octet-stream', upsert: true })
+        if (!uploadError) {
+          const { data: { publicUrl } } = supabase.storage.from('whatsapp-media').getPublicUrl(storagePath)
+          mediaUrl = publicUrl
+        }
+      } catch (uploadErr) {
+        console.error('[enviar-midia] erro upload storage:', uploadErr.message)
+      }
+    }
+
+    const msgTexto = labelMap[mediatype]
+      ? (caption ? `${labelMap[mediatype]} ${caption}` : labelMap[mediatype])
+      : (caption ? `[arquivo: ${fileName}] ${caption}` : `[arquivo: ${fileName}]`)
 
     if (lead_id) {
       await supabase.from('whatsapp_mensagens').insert({
         lead_id,
-        mensagem: caption ? `[arquivo: ${fileName}] ${caption}` : `[arquivo: ${fileName}]`,
+        mensagem: msgTexto,
         direcao: 'saida',
         telefone: numero_limpo,
         status: 'enviado',
-        evolution_id: envio?.key?.id ?? null,
+        evolution_id: evolutionId,
         media_tipo: tipoMap[mediatype] ?? 'document',
+        media_url: mediaUrl,
       })
     }
 
-    res.json({ sucesso: true, evolution: envio })
+    res.json({ sucesso: true, media_url: mediaUrl, evolution: envio })
   } catch (err) {
     const status = err.response?.status ?? 500
     const mensagem = err.response?.data?.message ?? err.message
