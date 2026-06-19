@@ -59,7 +59,7 @@ router.get('/', async (req, res) => {
 
     safe(
       supabase.from('tarefas').select('id', { count: 'exact' })
-        .lte('data_vencimento', fimDia).neq('status', 'concluida')
+        .lte('prazo', fimDia).neq('status', 'concluida')
         .then(({ count, error }) => {
           if (error) throw error
           return count ?? 0
