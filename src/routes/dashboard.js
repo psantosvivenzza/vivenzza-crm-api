@@ -13,20 +13,28 @@ router.get('/', async (req, res) => {
   const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
   const fimMes    = new Date(agora.getFullYear(), agora.getMonth() + 1, 0, 23, 59, 59, 999).toISOString()
 
-  const isVendedor = req.user.role === 'vendedor'
+  // Vendedor sempre filtra pelos seus próprios dados. Admin filtra por vendedor_id
+  // só quando passado via query (seletor "Empresa (geral)" / "Ana" / "Tatiane").
+  let filtroVendedorId = null
+  if (req.user.role === 'vendedor') {
+    filtroVendedorId = req.user.id
+  } else if (req.user.role === 'admin' && req.query.vendedor_id) {
+    filtroVendedorId = req.query.vendedor_id
+  }
+  const filtrarPorVendedor = !!filtroVendedorId
 
-  // Vendedor só vê mensagens dos seus próprios leads - whatsapp_mensagens não tem responsavel_id direto
+  // Filtra mensagens pelos leads do vendedor - whatsapp_mensagens não tem responsavel_id direto
   let leadIdsVendedor = null
-  if (isVendedor) {
-    const { data: meusLeads } = await supabase.from('leads').select('id').eq('responsavel_id', req.user.id)
+  if (filtrarPorVendedor) {
+    const { data: meusLeads } = await supabase.from('leads').select('id').eq('responsavel_id', filtroVendedorId)
     leadIdsVendedor = (meusLeads || []).map((l) => l.id)
   }
 
-  const [r1, r2, r3, r4, r5, r6] = await Promise.all([
+  const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
     safe(
       (() => {
         let q = supabase.from('leads').select('etapa')
-        if (isVendedor) q = q.eq('responsavel_id', req.user.id)
+        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ data, error }) => {
         if (error) throw error
@@ -41,7 +49,7 @@ router.get('/', async (req, res) => {
     safe(
       (() => {
         let q = supabase.from('leads').select('valor_negociacao').in('etapa', ['contato', 'proposta', 'negociacao'])
-        if (isVendedor) q = q.eq('responsavel_id', req.user.id)
+        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ data, error }) => {
         if (error) throw error
@@ -55,7 +63,7 @@ router.get('/', async (req, res) => {
         let q = supabase.from('leads').select('id, valor_negociacao', { count: 'exact' })
           .not('fechado_em', 'is', null)
           .gte('fechado_em', inicioMes).lte('fechado_em', fimMes)
-        if (isVendedor) q = q.eq('responsavel_id', req.user.id)
+        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ data, count, error }) => {
         if (error) throw error
@@ -69,10 +77,10 @@ router.get('/', async (req, res) => {
 
     safe(
       (async () => {
-        if (isVendedor && leadIdsVendedor.length === 0) return 0
+        if (filtrarPorVendedor && leadIdsVendedor.length === 0) return 0
         let q = supabase.from('whatsapp_mensagens').select('id', { count: 'exact' })
           .eq('direcao', 'entrada').gte('created_at', inicioDia).lte('created_at', fimDia)
-        if (isVendedor) q = q.in('lead_id', leadIdsVendedor)
+        if (filtrarPorVendedor) q = q.in('lead_id', leadIdsVendedor)
         const { count, error } = await q
         if (error) throw error
         return count ?? 0
@@ -84,7 +92,7 @@ router.get('/', async (req, res) => {
       (() => {
         let q = supabase.from('tarefas').select('id', { count: 'exact' })
           .lte('prazo', fimDia).neq('status', 'concluida')
-        if (isVendedor) q = q.eq('responsavel_id', req.user.id)
+        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ count, error }) => {
         if (error) throw error
@@ -105,6 +113,24 @@ router.get('/', async (req, res) => {
         }),
       { quantidade: 0, valor: 0 }
     ),
+
+    safe(
+      (() => {
+        let q = supabase.from('leads').select('created_at')
+          .eq('origem', 'manual')
+          .gte('created_at', inicioMes).lte('created_at', fimMes)
+        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
+        return q
+      })().then(({ data, error }) => {
+        if (error) throw error
+        const lista = data ?? []
+        return {
+          hoje: lista.filter((l) => l.created_at >= inicioDia && l.created_at <= fimDia).length,
+          mes: lista.length,
+        }
+      }),
+      { hoje: 0, mes: 0 }
+    ),
   ])
 
   const porEtapa = r1.value
@@ -118,6 +144,7 @@ router.get('/', async (req, res) => {
     whatsapp:       { conversas_hoje: r4.value },
     tarefas:        { pendentes_ou_atrasadas: r5.value },
     pedidos_mes:    r6.value,
+    leads_manuais:  r7.value,
     gerado_em:      new Date().toISOString(),
   })
 })
