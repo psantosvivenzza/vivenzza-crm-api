@@ -173,9 +173,11 @@ async function proximoVendedor() {
   return proximo
 }
 
-export default async function handleWebhook(req, res) {
+// Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser
+// chamada tanto pela rota direta (/api/whatsapp/webhook) quanto internamente
+// pelo webhook do SDR (/api/sdr/webhook), que recebe o mesmo payload da Evolution.
+export async function processWhatsappEvent(payload) {
   try {
-    const payload = req.body
     console.log('[webhook] event:', payload.event, '| data keys:', Object.keys(payload.data || {}))
 
     // ── Status de entrega/leitura ─────────────────────────────────────────
@@ -192,13 +194,13 @@ export default async function handleWebhook(req, res) {
           console.log('[webhook] status atualizado:', msgId.slice(0, 12), '→', novoStatus)
         }
       }
-      return res.sendStatus(200)
+      return
     }
 
-    if (payload.event !== 'messages.upsert') return res.sendStatus(200)
+    if (payload.event !== 'messages.upsert') return
 
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
-    if (!msg) return res.sendStatus(200)
+    if (!msg) return
 
     console.log('[webhook] msg completo:', JSON.stringify(msg).slice(0, 1500))
 
@@ -272,10 +274,12 @@ export default async function handleWebhook(req, res) {
     if (mediaTipo && evolutionId && !fromMe) {
       baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
     }
-
-    res.sendStatus(200)
   } catch (err) {
-    console.error('[webhook] erro:', err.message, '| body:', JSON.stringify(req.body).slice(0, 200))
-    res.sendStatus(200)
+    console.error('[webhook] erro:', err.message, '| body:', JSON.stringify(payload).slice(0, 200))
   }
+}
+
+export default async function handleWebhook(req, res) {
+  await processWhatsappEvent(req.body)
+  res.sendStatus(200)
 }

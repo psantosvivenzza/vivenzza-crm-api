@@ -2,6 +2,7 @@ import { Router } from 'express'
 import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
+import { processWhatsappEvent } from './webhook-handler.js'
 
 const router = Router()
 
@@ -129,131 +130,142 @@ router.post('/estado', async (req, res) => {
   }
 })
 
-// POST /api/sdr/webhook — recebe mensagens da Evolution API e responde com Claude
+// Fluxo da Lara (IA) — só atua em mensagens novas recebidas (não-fromMe).
+// Retorna { telefone, parsed } quando responde, ou null quando não há o que fazer
+// (evento irrelevante, mensagem de status, eco da própria Lara, etc).
+async function processarLara(event) {
+  if (event.event !== 'messages.upsert') return null
+
+  const msg = Array.isArray(event.data) ? event.data[0] : event.data
+  if (!msg || msg.key?.fromMe) return null
+
+  const telefone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '').replace('@lid', '')
+  if (!telefone) return null
+
+  const messageType = msg.message?.messageType || Object.keys(msg.message || {})[0] || 'conversation'
+  let mensagem = ''
+  let tipo = 'texto'
+
+  if (messageType === 'conversation') {
+    mensagem = msg.message?.conversation || ''
+  } else if (messageType === 'extendedTextMessage') {
+    mensagem = msg.message?.extendedTextMessage?.text || ''
+  } else if (messageType === 'audioMessage') {
+    mensagem = '[Cliente enviou um áudio]'
+    tipo = 'audio'
+  } else if (messageType === 'imageMessage') {
+    mensagem = msg.message?.imageMessage?.caption || '[Cliente enviou uma imagem]'
+    tipo = 'imagem'
+  } else if (messageType === 'documentMessage') {
+    mensagem = '[Cliente enviou um documento]'
+    tipo = 'documento'
+  } else {
+    mensagem = '[Mensagem recebida]'
+  }
+
+  if (!mensagem.trim()) return null
+
+  const { data: conversa } = await supabase
+    .from('sdr_conversas')
+    .select('*')
+    .eq('telefone', telefone)
+    .single()
+
+  const estado = conversa?.estado || 'novo'
+  const tipo_lead = conversa?.tipo_lead || 'indefinido'
+  const historico = conversa?.historico || []
+
+  historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+  const historicoRecente = historico.slice(-10)
+
+  const claudeResponse = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: SYSTEM_PROMPT(estado, tipo_lead, tipo),
+    messages: historicoRecente.map(h => ({
+      role: h.role === 'user' ? 'user' : 'assistant',
+      content: h.content,
+    })),
+  })
+
+  const parsed = parsearRespostaClaude(claudeResponse.content[0]?.text || '')
+
+  historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
+
+  await supabase.from('sdr_conversas').upsert({
+    telefone,
+    estado: parsed.proximo_estado,
+    tipo_lead: parsed.tipo_lead,
+    historico: historicoRecente,
+    ultimo_contato: new Date().toISOString(),
+  }, { onConflict: 'telefone' })
+
+  await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+    number: telefone,
+    text: parsed.resposta,
+  })
+
+  if (parsed.gerar_audio && ELEVENLABS_KEY) {
+    try {
+      const audioResponse = await axios.post(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+        {
+          text: parsed.resposta,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+        },
+        { headers: { 'xi-api-key': ELEVENLABS_KEY }, responseType: 'arraybuffer' }
+      )
+
+      const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
+      await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+        number: telefone,
+        mediatype: 'audio',
+        media: audioBase64,
+        fileName: 'lara-vivenzza.mp3',
+      })
+    } catch (audioErr) {
+      console.error('[sdr] erro ao gerar áudio:', audioErr.message)
+    }
+  }
+
+  return { telefone, parsed }
+}
+
+// POST /api/sdr/webhook — recebe TODOS os eventos da Evolution API.
+// Fluxo mesclado: a Lara responde automaticamente E o handler humano original
+// (leads no Pipeline, histórico no chat das vendedoras) continua processando
+// o mesmo payload normalmente — inclusive os eventos fromMe/status, que a
+// Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
 router.post('/webhook', async (req, res) => {
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
 
+  let resultadoLara = null
   try {
-    const event = req.body
-    if (event.event !== 'messages.upsert') return
-
-    const msg = Array.isArray(event.data) ? event.data[0] : event.data
-    if (!msg || msg.key?.fromMe) return
-
-    const telefone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '').replace('@lid', '')
-    if (!telefone) return
-
-    const messageType = msg.message?.messageType || Object.keys(msg.message || {})[0] || 'conversation'
-    let mensagem = ''
-    let tipo = 'texto'
-
-    if (messageType === 'conversation') {
-      mensagem = msg.message?.conversation || ''
-    } else if (messageType === 'extendedTextMessage') {
-      mensagem = msg.message?.extendedTextMessage?.text || ''
-    } else if (messageType === 'audioMessage') {
-      mensagem = '[Cliente enviou um áudio]'
-      tipo = 'audio'
-    } else if (messageType === 'imageMessage') {
-      mensagem = msg.message?.imageMessage?.caption || '[Cliente enviou uma imagem]'
-      tipo = 'imagem'
-    } else if (messageType === 'documentMessage') {
-      mensagem = '[Cliente enviou um documento]'
-      tipo = 'documento'
-    } else {
-      mensagem = '[Mensagem recebida]'
-    }
-
-    if (!mensagem.trim()) return
-
-    const { data: conversa } = await supabase
-      .from('sdr_conversas')
-      .select('*')
-      .eq('telefone', telefone)
-      .single()
-
-    const estado = conversa?.estado || 'novo'
-    const tipo_lead = conversa?.tipo_lead || 'indefinido'
-    const historico = conversa?.historico || []
-
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    const historicoRecente = historico.slice(-10)
-
-    const claudeResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT(estado, tipo_lead, tipo),
-      messages: historicoRecente.map(h => ({
-        role: h.role === 'user' ? 'user' : 'assistant',
-        content: h.content,
-      })),
-    })
-
-    const parsed = parsearRespostaClaude(claudeResponse.content[0]?.text || '')
-
-    historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
-
-    await supabase.from('sdr_conversas').upsert({
-      telefone,
-      estado: parsed.proximo_estado,
-      tipo_lead: parsed.tipo_lead,
-      historico: historicoRecente,
-      ultimo_contato: new Date().toISOString(),
-    }, { onConflict: 'telefone' })
-
-    await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
-      number: telefone,
-      text: parsed.resposta,
-    })
-
-    if (parsed.gerar_audio && ELEVENLABS_KEY) {
-      try {
-        const audioResponse = await axios.post(
-          `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-          {
-            text: parsed.resposta,
-            model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: 0.5, similarity_boost: 0.8 },
-          },
-          { headers: { 'xi-api-key': ELEVENLABS_KEY }, responseType: 'arraybuffer' }
-        )
-
-        const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
-        await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
-          number: telefone,
-          mediatype: 'audio',
-          media: audioBase64,
-          fileName: 'lara-vivenzza.mp3',
-        })
-      } catch (audioErr) {
-        console.error('[sdr] erro ao gerar áudio:', audioErr.message)
-      }
-    }
-
-    if (parsed.acao === 'CRIAR_LEAD' && parsed.tipo_lead !== 'indefinido') {
-      try {
-        const candidatos = candidatosTelefone(telefone)
-        const { data: existentes } = await supabase
-          .from('leads')
-          .select('id')
-          .in('telefone', candidatos)
-          .limit(1)
-
-        if (!existentes || existentes.length === 0) {
-          await supabase.from('leads').insert({
-            nome: `Lead SDR ${telefone}`,
-            telefone,
-            tipo: parsed.tipo_lead,
-            origem: 'whatsapp_sdr',
-            etapa: 'novo',
-          })
-        }
-      } catch (leadErr) {
-        console.error('[sdr] erro ao criar lead:', leadErr.message)
-      }
-    }
+    resultadoLara = await processarLara(req.body)
   } catch (err) {
-    console.error('[sdr] erro no webhook:', err.message)
+    console.error('[sdr] erro no fluxo Lara:', err.message)
+  }
+
+  try {
+    await processWhatsappEvent(req.body)
+  } catch (err) {
+    console.error('[sdr] erro ao repassar para o fluxo humano:', err.message)
+  }
+
+  // Tagueia o lead (já criado pelo fluxo humano acima) com o perfil identificado
+  // pela Lara, sem sobrescrever um "tipo" já preenchido manualmente.
+  if (resultadoLara?.parsed?.tipo_lead && resultadoLara.parsed.tipo_lead !== 'indefinido') {
+    try {
+      const candidatos = candidatosTelefone(resultadoLara.telefone)
+      await supabase
+        .from('leads')
+        .update({ tipo: resultadoLara.parsed.tipo_lead })
+        .in('telefone', candidatos)
+        .is('tipo', null)
+    } catch (tagErr) {
+      console.error('[sdr] erro ao taguear lead:', tagErr.message)
+    }
   }
 })
 
