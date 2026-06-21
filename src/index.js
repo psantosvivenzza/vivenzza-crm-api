@@ -18,6 +18,7 @@ import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
 import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
+import sdrRouter from './routes/sdr.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 
@@ -29,6 +30,9 @@ app.use(express.json({ limit: '50mb' }))
 
 // Webhook do WhatsApp — sem autenticação, registrado como rota direta
 app.post('/api/whatsapp/webhook', handleWebhook)
+
+// SDR digital (Lara) — sem autenticação, a Evolution API chama direto
+app.use('/api/sdr', sdrRouter)
 
 // Login — sem autenticação
 app.use('/api/auth', authRouter)
