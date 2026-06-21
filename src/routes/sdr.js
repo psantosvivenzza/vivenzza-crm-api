@@ -244,11 +244,15 @@ async function processarLara(event) {
     ultimo_contato: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
-    number: telefone,
-    text: parsed.resposta,
-  })
-  await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
+  try {
+    const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+      number: telefone,
+      text: parsed.resposta,
+    })
+    await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
+  } catch (textErr) {
+    console.error('[sdr] erro ao enviar texto:', textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
+  }
 
   if (parsed.gerar_audio && ELEVENLABS_KEY) {
     try {
