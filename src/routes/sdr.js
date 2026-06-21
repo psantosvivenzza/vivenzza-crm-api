@@ -11,6 +11,7 @@ const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -377,6 +378,66 @@ router.post('/estado', async (req, res) => {
   }
 })
 
+// Baixa o áudio (voice note ou arquivo) via Evolution API, no mesmo formato
+// usado por webhook-handler.js para mídia em geral.
+async function baixarAudioBase64(msg) {
+  try {
+    const audioMsg = msg.message?.audioMessage
+    if (!audioMsg) return null
+
+    const messageObj = {
+      key: { id: msg.key?.id, remoteJid: msg.key?.remoteJid, fromMe: msg.key?.fromMe ?? false },
+      message: { audioMessage: audioMsg },
+    }
+
+    const { data: result } = await evolutionApi.post(
+      `/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`,
+      { message: messageObj }
+    )
+
+    if (!result?.base64) return null
+    return { base64: result.base64, mimetype: result.mimetype || audioMsg.mimetype || 'audio/ogg' }
+  } catch (err) {
+    console.error('[sdr] erro ao baixar áudio:', err.message)
+    return null
+  }
+}
+
+// Transcreve o áudio com Whisper (OpenAI). Sem dependências extras —
+// usa fetch/FormData/Blob nativos do Node.
+async function transcreverAudio(base64, mimetype) {
+  if (!OPENAI_API_KEY) {
+    console.error('[sdr] OPENAI_API_KEY não configurada — não foi possível transcrever o áudio')
+    return null
+  }
+  try {
+    const buffer = Buffer.from(base64, 'base64')
+    const ext = mimetype.includes('ogg') ? 'ogg' : (mimetype.split('/')[1]?.split(';')[0] || 'ogg')
+
+    const form = new FormData()
+    form.append('file', new Blob([buffer], { type: mimetype }), `audio.${ext}`)
+    form.append('model', 'whisper-1')
+    form.append('language', 'pt')
+
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: form,
+    })
+
+    if (!resp.ok) {
+      console.error('[sdr] erro Whisper:', resp.status, await resp.text())
+      return null
+    }
+
+    const json = await resp.json()
+    return json.text?.trim() || null
+  } catch (err) {
+    console.error('[sdr] erro ao transcrever áudio:', err.message)
+    return null
+  }
+}
+
 // Fluxo da Lara (IA) — só atua em mensagens novas recebidas (não-fromMe).
 // Retorna { telefone, parsed } quando responde, ou null quando não há o que fazer
 // (evento irrelevante, mensagem de status, eco da própria Lara, etc).
@@ -398,8 +459,10 @@ async function processarLara(event) {
   } else if (messageType === 'extendedTextMessage') {
     mensagem = msg.message?.extendedTextMessage?.text || ''
   } else if (messageType === 'audioMessage') {
-    mensagem = '[Cliente enviou um áudio]'
     tipo = 'audio'
+    const audioBaixado = await baixarAudioBase64(msg)
+    const transcricao = audioBaixado ? await transcreverAudio(audioBaixado.base64, audioBaixado.mimetype) : null
+    mensagem = transcricao || '[Cliente enviou um áudio que não foi possível transcrever]'
   } else if (messageType === 'imageMessage') {
     mensagem = msg.message?.imageMessage?.caption || '[Cliente enviou uma imagem]'
     tipo = 'imagem'
