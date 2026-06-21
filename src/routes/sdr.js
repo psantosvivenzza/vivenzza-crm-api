@@ -110,6 +110,28 @@ function candidatosTelefone(telefone) {
   return [telefone, semPrefixo, com9, sem9].filter(Boolean)
 }
 
+// Registra cada envio da Lara em whatsapp_mensagens, no mesmo formato usado por
+// /api/whatsapp/enviar* — sem isso, a conversa que a vendedora vê no Pipeline/WhatsApp
+// fica incompleta (só apareceriam as mensagens do cliente, nunca as respostas da Lara).
+async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
+  try {
+    const candidatos = candidatosTelefone(telefone)
+    const { data: leads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
+    await supabase.from('whatsapp_mensagens').insert({
+      lead_id: leads?.[0]?.id ?? null,
+      mensagem,
+      direcao: 'saida',
+      telefone,
+      status: 'enviado',
+      evolution_id: evolutionId,
+      media_tipo: mediaTipo,
+      media_url: mediaUrl,
+    })
+  } catch (err) {
+    console.error('[sdr] erro ao registrar mensagem de saída:', err.message)
+  }
+}
+
 // GET /api/sdr/estado/:telefone — estado atual da conversa
 router.get('/estado/:telefone', async (req, res) => {
   try {
@@ -222,10 +244,11 @@ async function processarLara(event) {
     ultimo_contato: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+  const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
     number: telefone,
     text: parsed.resposta,
   })
+  await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
 
   if (parsed.gerar_audio && ELEVENLABS_KEY) {
     try {
@@ -240,12 +263,26 @@ async function processarLara(event) {
       )
 
       const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
-      await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+      const { data: envioAudio } = await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
         number: telefone,
         mediatype: 'audio',
         media: audioBase64,
         fileName: 'lara-vivenzza.mp3',
       })
+
+      const evolutionIdAudio = envioAudio?.key?.id ?? null
+      let audioUrl = null
+      try {
+        const path = `audio/${evolutionIdAudio || Date.now()}.mp3`
+        const { error: uploadError } = await supabase.storage
+          .from('whatsapp-media')
+          .upload(path, Buffer.from(audioBase64, 'base64'), { contentType: 'audio/mpeg', upsert: true })
+        if (!uploadError) {
+          audioUrl = supabase.storage.from('whatsapp-media').getPublicUrl(path).data.publicUrl
+        }
+      } catch { /* upload de cópia do áudio é best-effort, não bloqueia o envio */ }
+
+      await registrarMensagemSaida({ telefone, mensagem: '[áudio]', evolutionId: evolutionIdAudio, mediaTipo: 'audio', mediaUrl: audioUrl })
     } catch (audioErr) {
       console.error('[sdr] erro ao gerar áudio:', audioErr.message)
     }
@@ -254,11 +291,18 @@ async function processarLara(event) {
   if (ACOES_CATALOGO.includes(parsed.acao)) {
     for (const cat of catalogosParaEnviar(parsed.tipo_lead)) {
       try {
-        await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+        const { data: envioCat } = await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
           number: telefone,
           mediatype: 'document',
           media: cat.url,
           fileName: cat.fileName,
+        })
+        await registrarMensagemSaida({
+          telefone,
+          mensagem: `[arquivo: ${cat.fileName}]`,
+          evolutionId: envioCat?.key?.id ?? null,
+          mediaTipo: 'document',
+          mediaUrl: cat.url,
         })
       } catch (catErr) {
         console.error('[sdr] erro ao enviar catálogo:', cat.fileName, '|', catErr.message)
