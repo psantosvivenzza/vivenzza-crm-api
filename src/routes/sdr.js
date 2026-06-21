@@ -20,6 +20,28 @@ const evolutionApi = axios.create({
   timeout: 20000,
 })
 
+const CATALOGO_PROFISSIONAL = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/Catalogos/catalogo-profissional.pdf'
+const CATALOGO_COLORACAO = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/Catalogos/catalogo-coloracao.pdf'
+const CATALOGO_HOME_CARE = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/whatsapp-media/catalogo-home-care.pdf'
+
+const ACOES_CATALOGO = ['ENVIAR_CATALOGO_PRO', 'ENVIAR_CATALOGO_HOME', 'ENVIAR_APRESENTACAO_B2B']
+
+// Salão e distribuidor recebem o pacote completo (profissional + coloração + home care);
+// consumidor final recebe só o catálogo home care.
+function catalogosParaEnviar(tipo_lead) {
+  if (tipo_lead === 'salao' || tipo_lead === 'distribuidor') {
+    return [
+      { url: CATALOGO_PROFISSIONAL, fileName: 'catalogo-profissional.pdf' },
+      { url: CATALOGO_COLORACAO, fileName: 'catalogo-coloracao.pdf' },
+      { url: CATALOGO_HOME_CARE, fileName: 'catalogo-home-care.pdf' },
+    ]
+  }
+  if (tipo_lead === 'consumidor_final') {
+    return [{ url: CATALOGO_HOME_CARE, fileName: 'catalogo-home-care.pdf' }]
+  }
+  return []
+}
+
 const SYSTEM_PROMPT = (estado, tipo_lead, tipo) => `Você é Lara, consultora comercial da Vivenzza Professional, marca premium de cosméticos capilares com excelência italiana. Seu objetivo é qualificar leads e guiá-los até uma venda ou demonstração com nossa equipe.
 
 SEU PERFIL:
@@ -226,6 +248,21 @@ async function processarLara(event) {
       })
     } catch (audioErr) {
       console.error('[sdr] erro ao gerar áudio:', audioErr.message)
+    }
+  }
+
+  if (ACOES_CATALOGO.includes(parsed.acao)) {
+    for (const cat of catalogosParaEnviar(parsed.tipo_lead)) {
+      try {
+        await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+          number: telefone,
+          mediatype: 'document',
+          media: cat.url,
+          fileName: cat.fileName,
+        })
+      } catch (catErr) {
+        console.error('[sdr] erro ao enviar catálogo:', cat.fileName, '|', catErr.message)
+      }
     }
   }
 
