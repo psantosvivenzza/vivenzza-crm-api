@@ -299,6 +299,7 @@ Retorne APENAS o JSON, sem markdown, sem explicação.`
     await marcarVendedorAssumiu(lead.telefone)
 
     await incrementarMetrica('responderam')
+    await incrementarMetrica('reativados')
     await incrementarMetrica('passados_vendedor')
     console.log(`[reativacao] lead ${lead.nome} respondeu e foi passado pro vendedor`)
   } catch (err) {
