@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
     leadIdsVendedor = (meusLeads || []).map((l) => l.id)
   }
 
-  const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
+  const [r1, r2, r3, r4, r5, r6, r7, r8, r9] = await Promise.all([
     safe(
       (() => {
         let q = supabase.from('leads').select('etapa')
@@ -131,6 +131,31 @@ router.get('/', async (req, res) => {
       }),
       { hoje: 0, mes: 0 }
     ),
+
+    safe(
+      (() => {
+        let q = supabase.from('ligacoes').select('id', { count: 'exact', head: true })
+          .gte('iniciada_em', inicioDia).lte('iniciada_em', fimDia)
+        if (filtrarPorVendedor) q = q.eq('vendedor_id', filtroVendedorId)
+        return q
+      })().then(({ count, error }) => {
+        if (error) throw error
+        return count ?? 0
+      }),
+      0
+    ),
+
+    safe(
+      (() => {
+        let q = supabase.from('ligacoes').select('id', { count: 'exact', head: true })
+        if (filtrarPorVendedor) q = q.eq('vendedor_id', filtroVendedorId)
+        return q
+      })().then(({ count, error }) => {
+        if (error) throw error
+        return count ?? 0
+      }),
+      0
+    ),
   ])
 
   const porEtapa = r1.value
@@ -145,6 +170,7 @@ router.get('/', async (req, res) => {
     tarefas:        { pendentes_ou_atrasadas: r5.value },
     pedidos_mes:    r6.value,
     leads_manuais:  r7.value,
+    ligacoes:       { hoje: r8.value, total: r9.value },
     gerado_em:      new Date().toISOString(),
   })
 })

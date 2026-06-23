@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
+import { marcarVendedorAssumiu } from './sdr.js'
 
 const router = Router()
 
@@ -28,8 +29,10 @@ router.get('/media/:evolution_id', async (req, res) => {
 
     if (!registro) return res.status(404).json({ erro: 'Mensagem não encontrada' })
 
-    // Se já temos URL armazenada, redireciona
-    if (registro.media_url) {
+    // Só redireciona se for uma URL http(s) de verdade — protege contra valores
+    // inválidos que possam ter ficado gravados em media_url (ex: marcador interno),
+    // que o navegador tentaria abrir como esquema desconhecido.
+    if (/^https?:\/\//.test(registro.media_url || '')) {
       return res.redirect(registro.media_url)
     }
 
@@ -71,12 +74,25 @@ router.get('/media/:evolution_id', async (req, res) => {
     const mimeType = result.mimetype || md.mimetype || 'application/octet-stream'
     const buffer = Buffer.from(result.base64, 'base64')
 
-    // Cache a URL no DB para próximas requisições (fire-and-forget)
-    // Não aguardamos para não atrasar a resposta
-    supabase.from('whatsapp_mensagens')
-      .update({ media_url: `cached:${evolution_id}` })
-      .eq('evolution_id', evolution_id)
-      .then()
+    // Salva no Supabase Storage e grava a URL pública real, para que a próxima
+    // requisição redirecione direto pra ela em vez de chamar o Evolution API de novo.
+    // Fire-and-forget — não aguardamos para não atrasar a resposta.
+    ;(async () => {
+      try {
+        const ext = mimeType.split('/')[1]?.split(';')[0]?.split('+')[0] || 'bin'
+        const folder = (md.messageType || 'media').replace('Message', '')
+        const path = `${folder}/${evolution_id}.${ext}`
+        const { error: uploadError } = await supabase.storage
+          .from('whatsapp-media')
+          .upload(path, buffer, { contentType: mimeType, upsert: true })
+        if (!uploadError) {
+          const { data: { publicUrl } } = supabase.storage.from('whatsapp-media').getPublicUrl(path)
+          await supabase.from('whatsapp_mensagens').update({ media_url: publicUrl }).eq('evolution_id', evolution_id)
+        }
+      } catch (err) {
+        console.error('[whatsapp] erro ao cachear mídia via proxy:', err.message)
+      }
+    })()
 
     res.setHeader('Content-Type', mimeType)
     res.setHeader('Content-Disposition', `inline; filename="${md.fileName || 'media'}"`)
@@ -177,18 +193,54 @@ router.get('/:lead_id', async (req, res) => {
   try {
     const { lead_id } = req.params
     const { page = 1, limit = 50 } = req.query
-    const offset = (Number(page) - 1) * Number(limit)
+    const limitNum = Number(limit)
+    const offset = (Number(page) - 1) * limitNum
 
-    const { data, error, count } = await supabase
-      .from('whatsapp_mensagens')
-      .select('*', { count: 'exact' })
-      .eq('lead_id', lead_id)
-      .order('created_at', { ascending: true })
-      .range(offset, offset + Number(limit) - 1)
+    // Busca em ordem decrescente (mais recentes primeiro) e só depois inverte — em
+    // ordem crescente com range(), uma conversa com mais de `limit` mensagens no total
+    // retornava sempre as MAIS ANTIGAS, nunca as recentes. Era por isso que uma mensagem
+    // recém-enviada aparecia (optimistic update local) e desaparecia ao recarregar do
+    // servidor: o servidor nunca devolvia essa mensagem nova pra começo.
+    //
+    // As mensagens e o telefone do lead são independentes — buscar em paralelo corta
+    // ~1/3 do tempo desse endpoint, que é chamado a cada 5s por conversa aberta no chat.
+    const [{ data, error, count }, { data: lead }] = await Promise.all([
+      supabase
+        .from('whatsapp_mensagens')
+        .select('*', { count: 'exact' })
+        .eq('lead_id', lead_id)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limitNum - 1),
+      supabase.from('leads').select('telefone').eq('id', lead_id).single(),
+    ])
 
     if (error) throw error
+    const ordenado = [...(data || [])].reverse()
 
-    res.json({ data, total: count, page: Number(page), limit: Number(limit) })
+    // Status do atendimento (ia_atendendo / vendedor_assumiu / ia_apoio) — usado pelo
+    // badge no header do chat, pra Ana/Tatiane saberem se a Lara está respondendo agora.
+    // candidatosTelefone() foi feita para o sentido contrário (entrada em formato do
+    // WhatsApp, já com "55", gerando variações locais) — aqui o ponto de partida é
+    // leads.telefone em formato local, então geramos local + "55"+local pra cada variação
+    // de 9º dígito, senão a variante "55"+telefone-como-está nunca é testada.
+    let status_atendimento = null
+    if (lead?.telefone) {
+      const semPrefixo = lead.telefone.replace(/^55/, '')
+      const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
+      const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
+      const locais = [semPrefixo, com9, sem9].filter(Boolean)
+      const candidatos = [...locais, ...locais.map((c) => `55${c}`)]
+
+      const { data: conversas } = await supabase
+        .from('sdr_conversas')
+        .select('status_atendimento')
+        .in('telefone', candidatos)
+        .order('ultimo_contato', { ascending: false })
+        .limit(1)
+      status_atendimento = conversas?.[0]?.status_atendimento ?? null
+    }
+
+    res.json({ data: ordenado, total: count, page: Number(page), limit: limitNum, status_atendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -211,6 +263,8 @@ router.post('/enviar-audio', async (req, res) => {
       audio,
       encoding: true,
     })
+
+    await marcarVendedorAssumiu(numero_limpo)
 
     const evolutionId = envio?.key?.id ?? null
     let mediaUrl = null
@@ -273,6 +327,8 @@ router.post('/enviar-midia', async (req, res) => {
       media,
       fileName,
     })
+
+    await marcarVendedorAssumiu(numero_limpo)
 
     const evolutionId = envio?.key?.id ?? null
     const tipoMap = { image: 'image', video: 'video', document: 'document' }
@@ -339,6 +395,8 @@ router.post('/enviar', async (req, res) => {
       number: numero_limpo,
       text: mensagem,
     })
+
+    await marcarVendedorAssumiu(numero_limpo)
 
     if (lead_id) {
       await supabase.from('whatsapp_mensagens').insert({

@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { query as dbQuery } from '../lib/db.js'
+import { normalizarTelefone } from '../lib/telefone.js'
 
 const router = Router()
 
@@ -63,19 +64,24 @@ router.post('/', async (req, res) => {
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
 
+    // Mantém só os dígitos — telefone digitado com espaço/hífen/parênteses não batia com
+    // as variações geradas por candidatosTelefone, e o webhook acabava criando um lead
+    // duplicado quando o cliente respondia pelo WhatsApp.
+    const telefoneNormalizado = normalizarTelefone(telefone)
+
     const { data: lead, error: leadError } = await supabase
       .from('leads')
-      .insert({ nome, email: email || null, telefone: telefone || null, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
+      .insert({ nome, email: email || null, telefone: telefoneNormalizado, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
       .select()
       .single()
 
     if (leadError) throw leadError
 
     // Se email ou telefone fornecidos, cria contato principal vinculado ao lead
-    if (email || telefone) {
+    if (email || telefoneNormalizado) {
       const { error: contatoError } = await supabase
         .from('contatos')
-        .insert({ lead_id: lead.id, nome, telefone: telefone || null, email: email || null, principal: true })
+        .insert({ lead_id: lead.id, nome, telefone: telefoneNormalizado, email: email || null, principal: true })
 
       if (contatoError) throw contatoError
     }
@@ -92,6 +98,10 @@ router.put('/:id', async (req, res) => {
     const campos = req.body
     delete campos.id
     delete campos.created_at
+
+    if (campos.telefone !== undefined) {
+      campos.telefone = normalizarTelefone(campos.telefone)
+    }
 
     // Detecta transição para/de 'fechado' para registrar fechado_em
     if (campos.etapa !== undefined) {

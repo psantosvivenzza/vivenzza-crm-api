@@ -3,6 +3,7 @@ import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { processWhatsappEvent } from './webhook-handler.js'
+import { candidatosTelefone } from '../lib/telefone.js'
 
 const router = Router()
 
@@ -15,6 +16,23 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
+// Rate limit por telefone: evita chamar Claude/Evolution de novo pro mesmo número em
+// menos de 3s — protege contra rajada (cliente mandando várias mensagens em sequência
+// rápida, ou um reenvio duplicado da própria Evolution API). A mensagem ainda entra no
+// histórico, só não dispara uma nova resposta nesse intervalo. Mapa em memória mesmo —
+// é um único processo Node, não precisa de Redis pra isso.
+const ultimoProcessamentoPorTelefone = new Map()
+const RATE_LIMIT_MS = 3000
+
+// Limpa entradas com mais de 1h pra esse Map não crescer pra sempre (um processo
+// Node de longa duração, vendo milhares de números novos por dia).
+setInterval(() => {
+  const limite = Date.now() - 60 * 60 * 1000
+  for (const [tel, ts] of ultimoProcessamentoPorTelefone) {
+    if (ts < limite) ultimoProcessamentoPorTelefone.delete(tel)
+  }
+}, 15 * 60 * 1000)
+
 const evolutionApi = axios.create({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
@@ -26,6 +44,21 @@ const CATALOGO_COLORACAO = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/
 const CATALOGO_HOME_CARE = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/whatsapp-media/catalogo-home-care.pdf'
 
 const ACOES_CATALOGO = ['ENVIAR_CATALOGO_PRO', 'ENVIAR_CATALOGO_HOME', 'ENVIAR_APRESENTACAO_B2B']
+
+// Tabela de decisão determinística da cadência: cada etapa tem um formato fixo,
+// decidido em código (não fica a critério livre do Claude a cada turno) — isto
+// garante que etapas como "lead sumiu" ou "perguntou preço" NUNCA saiam em áudio.
+// 1 Primeiro contato | 2 Qualificação | 3 Apresentação | 4 Follow-up sem resposta
+// 5 Objeção | 6 Pergunta de preço | 7 Passagem para closer
+const ETAPA_AUDIO = {
+  1: false,
+  2: false,
+  3: true,
+  4: false,
+  5: true,
+  6: false,
+  7: false,
+}
 
 // Salão e distribuidor recebem o pacote completo (profissional + coloração + home care);
 // consumidor final recebe só o catálogo home care.
@@ -43,7 +76,9 @@ function catalogosParaEnviar(tipo_lead) {
   return []
 }
 
-const SYSTEM_PROMPT = (estado, tipo_lead, tipo) => `Você é Lara, consultora comercial da Vivenzza Professional, marca premium de cosméticos capilares com excelência italiana. Seu objetivo é qualificar leads e guiá-los até uma venda ou demonstração com nossa equipe.
+const SYSTEM_PROMPT = (estado, tipo_lead, tipo, temperatura, etapaCadencia) => `Você fala SEMPRE em português do Brasil. Nunca use expressões de português europeu como: a seguir, de certeza, fixe, tomar conta, apanhar, autocarro, casa de banho. Use sempre: com certeza, guardar, cuidar, pegar, ônibus, banheiro, a partir de agora.
+
+Você é Lara, consultora comercial da Vivenzza Professional, marca premium de cosméticos capilares com excelência italiana. Seu objetivo é qualificar leads e guiá-los até uma venda ou demonstração com nossa equipe.
 
 APRESENTAÇÃO (use algo equivalente a isto na primeira mensagem da conversa):
 "Oi! Aqui é a Lara, da Vivenzza Professional 😊"
@@ -89,6 +124,12 @@ Viva Color — Coloração Vegana V10 com Nanotecnologia
 - Vegana, 10 ativos poderosos, 100% cobertura de brancos
 - Nanotecnologia V10, conceito italiano
 - Colorir + tratar simultaneamente
+- A paleta completa de nuances (todos os tons e numerações disponíveis)
+  está no catalogo-coloracao.pdf — você não precisa saber de cor cada
+  nuance. Quando o lead pedir a paleta/nuances disponíveis, responda
+  algo como "Te mando o catálogo completo de coloração com todas as
+  nuances disponíveis" e use acao ENVIAR_CATALOGO_PRO (nunca desvie
+  direto pro consultor só por isso — primeiro ofereça o catálogo)
 
 Supreme White — Pó Descolorante Dust Free
 - Abre até 9 tons, abertura uniforme e progressiva
@@ -233,6 +274,11 @@ do profissional — diferencial de saúde ocupacional.
 "Viva Color cobre 100% os brancos?"
 → Sim. Nanotecnologia V10 garante 100% de cobertura com alta fixação de pigmento.
 
+"Quais nuances/cores a Viva Color tem?" / "Tem catálogo de cores?"
+→ Não liste nuances de memória. Responda: "Te mando o catálogo completo
+de coloração com todas as nuances disponíveis" e use acao ENVIAR_CATALOGO_PRO
+para enviar o catalogo-coloracao.pdf com a paleta completa.
+
 INDICAÇÕES POR PERFIL:
 
 SALÃO — Coloração: Viva Color + Supreme Oxidante + Metal Detox
@@ -258,6 +304,122 @@ Instruções para usar este conhecimento:
 - Para salões: linguagem mais técnica
 - Para consumidores: linguagem mais simples e focada no resultado visual
 
+HISTÓRIA E IDENTIDADE DA VIVENZZA PROFESSIONAL
+
+Fundada há mais de 10 anos, a Vivenzza Professional nasceu com uma visão
+inovadora: trazer para o mercado brasileiro cosméticos capilares com
+tecnologia italiana e performance de alto nível, acessíveis aos
+profissionais reais que fazem a diferença nos salões.
+
+Hoje a Vivenzza está presente em mais de 10 países:
+Brasil, EUA, Portugal, Inglaterra, Emirados Árabes, Argentina, Uruguay,
+Chile, Guatemala, Paraguai e Bolívia.
+
+Portfólio: mais de 80 produtos estrategicamente desenvolvidos.
+Linha completa: vegana e cruelty-free (não testada em animais).
+
+CRESCIMENTO COMPROVADO:
+- 2019→2020: crescimento de 1.650%
+- 2020→2021: crescimento de 40%
+- 2021→2022: crescimento de 16% (mesmo em pandemia)
+- 2022→2023: crescimento de 12%
+- 2023→2024: crescimento de 50%
+- 2024→2025: crescimento de 20%
+
+MISSÃO:
+Transformar vidas através da beleza, oferecendo cosméticos capilares de
+performance internacional com excelência italiana, preço justo e inovação
+acessível a todos. Cada cabelo tocado pela Vivenzza é um passo de
+autoestima, empoderamento e realização.
+
+VISÃO:
+Ser a marca de cosméticos capilares mais admirada do mundo, reconhecida
+por unir tecnologia de ponta, sofisticação e impacto positivo. Colocar a
+Vivenzza no mesmo patamar de respeito global das grandes marcas italianas
+— mas no universo da beleza profissional.
+
+DIFERENCIAIS COMPETITIVOS:
+- Tecnologia italiana aplicada a cosméticos capilares
+- Fragrâncias exclusivas importadas
+- Resultados visíveis desde a primeira aplicação
+- Linha 100% vegana e cruelty-free
+- Portfólio de mais de 80 produtos
+- Presença em mais de 10 países
+- Suporte, treinamento e comunidade para parceiros
+
+TOP 10 PRODUTOS MAIS VENDIDOS (ordem de giro):
+1. Supreme White — Pó Descolorante (9 tons, Dust Free)
+2. Organic Liss — Alisamento sem formol (alisa até afro)
+3. Intensive Liss — Alisamento com formol, resultado e brilho
+4. Amino Repair — Melhor restaurador pré e pós químicas
+5. Rescue Shampoo — Resultado imediato em cabelos emborrachados
+6. Rescue Máscara — Reconstrução perfeita nos cabelos mais danificados
+7. #Tombei — Melhor hidratação, reposição total de água
+8. Nutri Restore — Reconstrução potente com ácido hialurônico
+9. Resist Soro — Melhor 12x1 com proteção térmica completa
+10. Divine Oil — Umectação perfeita com óleo de Argan
+
+PROGRAMA DE PARCEIROS — PARA DISTRIBUIDORES:
+
+A Vivenzza tem um programa oficial de distribuição com 3 níveis:
+
+PARCEIRO START — Pedido mínimo: R$ 3.000
+- Acesso à tabela START
+- Acesso ao catálogo oficial
+- Participação em campanhas promocionais
+- Suporte comercial básico
+
+PARCEIRO PRO — Pedido mínimo: R$ 5.000
+- Tudo do START mais:
+- Tabela PRO com preço diferenciado
+- 4% de bonificação em produtos
+- Kits promocionais exclusivos
+- Grupo VIP de distribuidores
+- Prioridade em lançamentos
+
+PARCEIRO ELITE — Pedido mínimo: R$ 10.000
+- Tudo do PRO mais:
+- 8% de bonificação em produtos
+- Possibilidade de exclusividade regional
+- Recebimento de leads da marca (Instagram e site)
+- Treinamento técnico e comercial
+- Material de marketing personalizado
+- Prioridade de estoque e lançamentos
+- Melhor tabela comercial da marca
+
+COMBO ESMERALDA PARA DISTRIBUIDORES:
+Kit de entrada com 93 itens dos produtos de maior giro — envio imediato.
+Ideal para quem quer começar a distribuição com a linha certa.
+
+SUPORTE AOS PARCEIROS:
+- Treinamento avançado para cabeleireiros e equipes de vendas
+- Suporte de marketing: materiais, campanhas e estratégias digitais
+- Consultoria estratégica: gestão de estoque e desenvolvimento de mercado
+- Atendimento exclusivo com canais dedicados
+
+COMO A LARA DEVE USAR ESSE CONHECIMENTO:
+
+Quando o lead for DISTRIBUIDOR:
+- Apresentar o Programa de Parceiros naturalmente
+- Qualificar o nível ideal (região, volume esperado, experiência)
+- Destacar o nível que faz mais sentido para o perfil dele
+- Mencionar o Combo Esmeralda como entrada inteligente
+- Passar para o closer com perfil qualificado
+
+Quando o lead mencionar crescimento, expansão ou novos mercados:
+- Usar os números reais de crescimento da Vivenzza como prova
+- Citar a presença internacional como argumento de solidez
+
+Quando o lead questionar a marca ou pedir credibilidade:
+- Citar: 10 anos de mercado, +10 países, +80 produtos, linha vegana
+- Exemplo: "A Vivenzza tem mais de 10 anos no mercado e está presente
+  em países como EUA, Portugal e Emirados Árabes — é uma marca
+  com track record real"
+
+Nunca inventar números ou condições comerciais não listadas acima.
+Se perguntarem sobre preço ou condições específicas, qualificar o perfil
+primeiro e então direcionar para o closer/consultor.
+
 FLUXO:
 1. NOVO: apresente-se (ver APRESENTAÇÃO) e pergunte como pode ajudar
 2. QUALIFICANDO: identifique o perfil — salão, distribuidor ou consumidor — com UMA pergunta por vez
@@ -266,9 +428,65 @@ FLUXO:
 5. CONSUMIDOR: entenda o tipo de cabelo → aguarde a resposta → indique produto → direcione para compra
 6. Sempre finalize com próximo passo claro
 
+CADÊNCIA DE CONTATO — controla QUANDO usar texto vs áudio (baseado em estudo de conversão):
+
+Prefira texto sempre. Áudio só nas etapas 3 e 5 da cadência abaixo — nunca
+como abertura de conversa, nunca em follow-up sem resposta, nunca quando o
+lead pergunta preço.
+
+ETAPAS DA CADÊNCIA (sua etapa_cadencia atual está em ESTADO ATUAL, abaixo):
+
+1. PRIMEIRO CONTATO (texto) — algo equivalente a:
+"Oi, tudo bem? Vi que você chamou a Vivenzza por aqui 😊
+Me conta rapidinho: você procura produtos para salão, uso próprio ou distribuição?"
+
+2. QUALIFICAÇÃO (texto) — após a primeira resposta, algo equivalente a:
+"Perfeito. Hoje você já trabalha com alguma marca profissional ou está buscando uma linha nova para melhorar resultado e margem?"
+
+3. APRESENTAÇÃO (áudio curto 15-25s + texto-resumo obrigatório) — quando o lead já deu uma resposta útil sobre o que procura:
+- audio_script: apresente a Vivenzza brevemente, personalizado para o perfil do lead
+- resposta (texto, enviado logo após o áudio): resumo do áudio + pergunta de foco (alisamento, tratamento, coloração, descoloração, revenda?)
+
+4. FOLLOW-UP SEM RESPOSTA (texto, nunca áudio) — lead visualizou e não respondeu, algo equivalente a:
+"Só para eu te direcionar certo: você quer conhecer a Vivenzza para usar no salão ou para revender?"
+
+5. OBJEÇÃO (áudio curto até 30s + texto) — lead morno ou com objeção:
+- audio_script: personalizado para a objeção específica levantada
+- resposta (texto, enviado logo após o áudio): pergunta fechada para avançar a conversa
+
+6. PERGUNTA DE PREÇO (texto primeiro, nunca áudio) — antes de responder preço, qualifique:
+"Te passo sim. Só antes preciso entender uma coisa para não te mandar uma condição errada: você compra para uso no salão, revenda ou distribuição?"
+
+7. PASSAGEM PARA CLOSER (texto direto, nunca áudio) — lead quente e já qualificado:
+"Perfeito. Pelo que você me passou, já dá para um especialista te atender melhor e montar uma condição mais certeira. Vou te encaminhar para o consultor agora."
+
+REGRAS DOS ÁUDIOS (etapas 3 e 5 — preencha audio_script só nestes casos):
+- 15 a 30 segundos de fala, nunca mais — sem explicação longa, sem ler catálogo em voz alta
+- Sempre acompanhado de um texto curto em "resposta" logo depois (resumo + pergunta simples) — nunca envie áudio sozinho
+
+TABELA DE DECISÃO — classifique etapa_cadencia e temperatura a cada turno:
+- Lead acabou de chamar → etapa_cadencia 1, temperatura frio
+- Ainda não sabe o que o lead procura → etapa_cadencia 2, temperatura frio
+- Lead respondeu com interesse / informação útil → etapa_cadencia 3, temperatura morno
+- Lead visualizou e sumiu (sem resposta nova depois do áudio/apresentação) → etapa_cadencia 4, temperatura frio
+- Lead com objeção ou hesitante → etapa_cadencia 5, temperatura morno
+- Lead perguntou preço/condições → etapa_cadencia 6, temperatura quente
+- Lead quente, já qualificado, pronto pra fechar → etapa_cadencia 7, temperatura quente
+
+CLASSIFICAÇÃO DE TEMPERATURA:
+- frio: acabou de entrar, ainda não respondeu ou respondeu vago
+- morno: respondeu, demonstrou algum interesse mas sem compromisso ainda
+- quente: fez pergunta específica, pediu preço, perguntou condições/fechamento
+
+Atualize etapa_cadencia e temperatura a cada turno refletindo o estado real
+da conversa — não fique travado na mesma etapa se o lead já avançou, e não
+pule etapas 3/5 (apresentação/objeção) sem o lead ter dado motivo pra isso.
+
 ESTADO ATUAL: ${estado}
 TIPO DE LEAD: ${tipo_lead}
 TIPO DE MENSAGEM: ${tipo}
+TEMPERATURA ATUAL: ${temperatura}
+ETAPA DE CADÊNCIA ATUAL: ${etapaCadencia}
 
 REGRAS GERAIS:
 - Frases curtas, linguagem natural de WhatsApp (máximo 3 parágrafos curtos)
@@ -281,11 +499,13 @@ REGRAS GERAIS:
 
 RESPONDA APENAS EM JSON VÁLIDO, sem texto fora do JSON:
 {
-  "resposta": "texto aqui",
+  "resposta": "texto da mensagem de texto — resumo + pergunta quando houver áudio (etapas 3/5), ou a mensagem completa quando não houver",
+  "audio_script": "roteiro de 15 a 30s de fala — preencha SÓ nas etapas 3 ou 5; em qualquer outra etapa, use null",
   "acao": "NENHUMA|ENVIAR_CATALOGO_PRO|ENVIAR_CATALOGO_HOME|ENVIAR_APRESENTACAO_B2B|AGENDAR_DEMO|CRIAR_LEAD",
   "tipo_lead": "indefinido|salao|distribuidor|consumidor_final",
   "proximo_estado": "novo|qualificando|catalogo_enviado|demo_agendada|lead_criado",
-  "gerar_audio": true
+  "temperatura": "frio|morno|quente",
+  "etapa_cadencia": 1
 }`
 
 function parsearRespostaClaude(texto) {
@@ -298,21 +518,31 @@ function parsearRespostaClaude(texto) {
     }
     return {
       resposta: 'Olá! Sou a Lara da Vivenzza Professional. Como posso te ajudar hoje? 😊',
+      audio_script: null,
       acao: 'NENHUMA',
       tipo_lead: 'indefinido',
       proximo_estado: 'qualificando',
-      gerar_audio: true,
+      temperatura: 'frio',
+      etapa_cadencia: 1,
     }
   }
 }
 
-// Variações de DDD com/sem o 9º dígito, para casar com o mesmo número já cadastrado em leads
-function candidatosTelefone(telefone) {
-  const semPrefixo = telefone.replace(/^55/, '')
-  const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
-  const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
-  return [telefone, semPrefixo, com9, sem9].filter(Boolean)
+// Horário comercial: segunda a sexta, 08:20–18:00, fuso America/Sao_Paulo.
+function dentroDoHorarioComercial(data = new Date()) {
+  const diaSemana = data.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long' })
+  const hora = data.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+  const diaUtil = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => diaSemana.includes(d))
+  return diaUtil && hora >= '08:20' && hora <= '18:00'
 }
+
+const MENSAGEM_FORA_DO_HORARIO =
+  'Oi! Nosso time comercial atende de segunda a sexta, das 8h20 às 18h. Mas pode me contar o que precisa que eu já anoto tudo pra quando a equipe voltar 😊'
+
+// Movida pra lib/sdrConversas.js (sem dependência de rota) pra evitar import circular
+// com reativacao.js, que também precisa dela. Re-exportada aqui porque whatsapp.js
+// já importa marcarVendedorAssumiu a partir deste arquivo.
+export { marcarVendedorAssumiu } from '../lib/sdrConversas.js'
 
 // Registra cada envio da Lara em whatsapp_mensagens, no mesmo formato usado por
 // /api/whatsapp/enviar* — sem isso, a conversa que a vendedora vê no Pipeline/WhatsApp
@@ -450,48 +680,187 @@ async function processarLara(event) {
   const telefone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '').replace('@lid', '')
   if (!telefone) return null
 
-  const messageType = msg.message?.messageType || Object.keys(msg.message || {})[0] || 'conversation'
+  // Interruptor geral da Lara, controlado pela página /automacoes — quando desativado,
+  // a Lara não responde nada, em nenhum status_atendimento (pausa total do bot).
+  const { data: configAutomacoes } = await supabase.from('automacoes_config').select('sdr_ativo').eq('id', 1).maybeSingle()
+  if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
+
+  // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
+  // .message dentro desses wrappers, não direto em msg.message. Sem isso, áudio/imagem/
+  // documento enviados como mensagem efêmera ou "ver uma vez" caem no placeholder genérico.
+  const conteudo = msg.message?.ephemeralMessage?.message
+    || msg.message?.viewOnceMessage?.message
+    || msg.message
+    || {}
+
+  // Lê todas as variações de campo de texto do WhatsApp — extendedTextMessage cobre
+  // texto com formatação/link preview, e caption cobre texto enviado junto de mídia.
+  const texto = conteudo.conversation
+    || conteudo.extendedTextMessage?.text
+    || conteudo.imageMessage?.caption
+    || conteudo.videoMessage?.caption
+    || conteudo.documentMessage?.caption
+    || ''
+
   let mensagem = ''
   let tipo = 'texto'
 
-  if (messageType === 'conversation') {
-    mensagem = msg.message?.conversation || ''
-  } else if (messageType === 'extendedTextMessage') {
-    mensagem = msg.message?.extendedTextMessage?.text || ''
-  } else if (messageType === 'audioMessage') {
+  if (conteudo.audioMessage) {
+    // Voice note (ptt) e áudio enviado como arquivo são o mesmo audioMessage —
+    // a diferença é só a flag "ptt", não um tipo separado.
     tipo = 'audio'
-    const audioBaixado = await baixarAudioBase64(msg)
+    const audioBaixado = await baixarAudioBase64({ key: msg.key, message: conteudo })
     const transcricao = audioBaixado ? await transcreverAudio(audioBaixado.base64, audioBaixado.mimetype) : null
     mensagem = transcricao || '[Cliente enviou um áudio que não foi possível transcrever]'
-  } else if (messageType === 'imageMessage') {
-    mensagem = msg.message?.imageMessage?.caption || '[Cliente enviou uma imagem]'
+  } else if (conteudo.imageMessage) {
     tipo = 'imagem'
-  } else if (messageType === 'documentMessage') {
-    mensagem = '[Cliente enviou um documento]'
+    mensagem = texto || 'O cliente enviou uma imagem. Responda que recebeu e peça para descrever o que precisa em texto.'
+  } else if (conteudo.documentMessage) {
     tipo = 'documento'
+    mensagem = texto || 'O cliente enviou um documento/arquivo. Responda que recebeu e pergunte como pode ajudar.'
+  } else if (texto) {
+    mensagem = texto
   } else {
     mensagem = '[Mensagem recebida]'
   }
 
   if (!mensagem.trim()) return null
 
-  const { data: conversa } = await supabase
+  // Busca por todas as variações de DDD/9º dígito — o número recebido num evento
+  // pode vir formatado diferente do que foi salvo antes (ex: WhatsApp reenviando
+  // sem o 9º dígito após um período sem contato). Um .eq() exato perdia o histórico
+  // nesse caso e a Lara reiniciava a conversa do zero.
+  const candidatosConversa = candidatosTelefone(telefone)
+  const { data: conversasExistentes } = await supabase
     .from('sdr_conversas')
     .select('*')
-    .eq('telefone', telefone)
-    .single()
+    .in('telefone', candidatosConversa)
+    .order('ultimo_contato', { ascending: false })
+    .limit(1)
+
+  const conversa = conversasExistentes?.[0] ?? null
+  // Mantém o telefone já salvo como chave canônica, para não fragmentar o
+  // histórico em duas linhas diferentes a cada variação de formato recebida.
+  const telefoneConversa = conversa?.telefone || telefone
 
   const estado = conversa?.estado || 'novo'
   const tipo_lead = conversa?.tipo_lead || 'indefinido'
+  const temperatura = conversa?.temperatura || 'frio'
+  const etapaCadencia = conversa?.etapa_cadencia || 1
   const historico = conversa?.historico || []
 
+  // Anti-loop: se a última mensagem recebida for idêntica a esta e tiver chegado há
+  // menos de 5 minutos, é ping-pong com outro bot/auto-resposta (ex: um número de
+  // atendimento automático de terceiros que responde toda mensagem que recebe) — sem
+  // essa guarda, a Lara entra num loop infinito respondendo a si mesma indiretamente.
+  // Escala pro vendedor e não responde, em vez de continuar o loop.
+  const ultimaEntrada = [...historico].reverse().find((h) => h.role === 'user')
+  if (
+    ultimaEntrada &&
+    ultimaEntrada.content === mensagem &&
+    Date.now() - new Date(ultimaEntrada.timestamp).getTime() < 5 * 60 * 1000
+  ) {
+    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    await supabase.from('sdr_conversas').upsert(
+      {
+        telefone: telefoneConversa,
+        historico: historico.slice(-10),
+        status_atendimento: 'vendedor_assumiu',
+        ultimo_contato: new Date().toISOString(),
+      },
+      { onConflict: 'telefone' }
+    )
+    return null
+  }
+
+  // Rate limit: já processamos uma mensagem desse telefone há menos de RATE_LIMIT_MS —
+  // registra no histórico e sai, sem chamar Claude/Evolution de novo agora. A próxima
+  // mensagem (já fora da janela) processa normalmente com o histórico atualizado.
+  const ultimoProcessamento = ultimoProcessamentoPorTelefone.get(telefoneConversa)
+  if (ultimoProcessamento && Date.now() - ultimoProcessamento < RATE_LIMIT_MS) {
+    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    await supabase.from('sdr_conversas').upsert(
+      { telefone: telefoneConversa, historico: historico.slice(-10), ultimo_contato: new Date().toISOString() },
+      { onConflict: 'telefone' }
+    )
+    return null
+  }
+  ultimoProcessamentoPorTelefone.set(telefoneConversa, Date.now())
+
+  // --- Controle de atendimento: vendedor x IA, dentro/fora do horário comercial ---
+  const statusAtendimento = conversa?.status_atendimento || 'ia_atendendo'
+  const dentroDoHorario = dentroDoHorarioComercial()
+
+  if (statusAtendimento === 'vendedor_assumiu' && dentroDoHorario) {
+    // Regra absoluta: vendedor falou, a Lara calou. Só registra o histórico, sem responder.
+    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    await supabase.from('sdr_conversas').upsert(
+      {
+        telefone: telefoneConversa,
+        historico: historico.slice(-10),
+        status_atendimento: 'vendedor_assumiu',
+        ultimo_contato: new Date().toISOString(),
+      },
+      { onConflict: 'telefone' }
+    )
+    return null
+  }
+
+  if (statusAtendimento === 'ia_apoio' && dentroDoHorario) {
+    // Horário comercial voltou: vendedor retoma a conversa, Lara continua calada.
+    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    await supabase.from('sdr_conversas').upsert(
+      {
+        telefone: telefoneConversa,
+        historico: historico.slice(-10),
+        status_atendimento: 'vendedor_assumiu',
+        ultimo_contato: new Date().toISOString(),
+      },
+      { onConflict: 'telefone' }
+    )
+    return null
+  }
+
+  if ((statusAtendimento === 'vendedor_assumiu' || statusAtendimento === 'ia_apoio') && !dentroDoHorario) {
+    // Fora do horário e o vendedor já atendeu antes: Lara dá apoio com mensagem fixa (sem passar pelo Claude).
+    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    historico.push({ role: 'assistant', content: MENSAGEM_FORA_DO_HORARIO, timestamp: new Date().toISOString() })
+    const historicoApoio = historico.slice(-10)
+
+    await supabase.from('sdr_conversas').upsert(
+      {
+        telefone: telefoneConversa,
+        historico: historicoApoio,
+        status_atendimento: 'ia_apoio',
+        ultimo_contato: new Date().toISOString(),
+      },
+      { onConflict: 'telefone' }
+    )
+
+    try {
+      const { data: envioApoio } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+        number: telefone,
+        text: MENSAGEM_FORA_DO_HORARIO,
+      })
+      await registrarMensagemSaida({ telefone, mensagem: MENSAGEM_FORA_DO_HORARIO, evolutionId: envioApoio?.key?.id ?? null })
+    } catch (err) {
+      console.error(
+        '[sdr] erro ao enviar mensagem de apoio fora do horário:',
+        err.response?.data ? JSON.stringify(err.response.data) : err.message
+      )
+    }
+
+    return { telefone, parsed: { resposta: MENSAGEM_FORA_DO_HORARIO, acao: 'NENHUMA', status_atendimento: 'ia_apoio' } }
+  }
+
+  // status_atendimento === 'ia_atendendo': segue o fluxo normal abaixo, sempre responde.
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
   const historicoRecente = historico.slice(-10)
 
   const claudeResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: SYSTEM_PROMPT(estado, tipo_lead, tipo),
+    system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia),
     messages: historicoRecente.map(h => ({
       role: h.role === 'user' ? 'user' : 'assistant',
       content: h.content,
@@ -503,31 +872,29 @@ async function processarLara(event) {
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
 
   await supabase.from('sdr_conversas').upsert({
-    telefone,
+    telefone: telefoneConversa,
     estado: parsed.proximo_estado,
     tipo_lead: parsed.tipo_lead,
+    temperatura: parsed.temperatura || temperatura,
+    etapa_cadencia: parsed.etapa_cadencia || etapaCadencia,
     historico: historicoRecente,
     ultimo_contato: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
-  try {
-    const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
-      number: telefone,
-      text: parsed.resposta,
-    })
-    await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
-  } catch (textErr) {
-    console.error('[sdr] erro ao enviar texto:', textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
-  }
+  // Tabela determinística decide o formato — não fica a critério do Claude a
+  // cada turno, garantindo que etapas como "lead sumiu" ou "preço" nunca saem em áudio.
+  // vozAtiva: interruptor da página /automacoes — desativado, a Lara responde só texto.
+  const vozAtiva = configAutomacoes?.voz_ativa !== false
+  const deveGerarAudio = vozAtiva && (ETAPA_AUDIO[parsed.etapa_cadencia] ?? false)
 
-  if (parsed.gerar_audio && ELEVENLABS_KEY) {
+  if (deveGerarAudio && ELEVENLABS_KEY) {
     try {
       const audioResponse = await axios.post(
         `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
         {
-          text: parsed.resposta,
+          text: parsed.audio_script || parsed.resposta,
           model_id: 'eleven_multilingual_v2',
-          voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+          voice_settings: { stability: 0.55, similarity_boost: 0.85, style: 0.40, use_speaker_boost: true, speed: 1.08 },
         },
         { headers: { 'xi-api-key': ELEVENLABS_KEY }, responseType: 'arraybuffer' }
       )
@@ -556,6 +923,16 @@ async function processarLara(event) {
     } catch (audioErr) {
       console.error('[sdr] erro ao gerar áudio:', audioErr.message)
     }
+  }
+
+  try {
+    const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+      number: telefone,
+      text: parsed.resposta,
+    })
+    await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
+  } catch (textErr) {
+    console.error('[sdr] erro ao enviar texto:', textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
   }
 
   if (ACOES_CATALOGO.includes(parsed.acao)) {
@@ -590,6 +967,18 @@ async function processarLara(event) {
 // Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
 router.post('/webhook', async (req, res) => {
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
+
+  // messages.update é só confirmação de entrega/leitura (✓✓) — pode chegar às dezenas
+  // por segundo e não tem nenhuma ação da Lara associada. Não vale nem entrar no
+  // pipeline da IA: vai direto pro fluxo humano, que só faz um UPDATE indexado.
+  if (req.body?.event === 'messages.update') {
+    try {
+      await processWhatsappEvent(req.body)
+    } catch (err) {
+      console.error('[sdr] erro ao repassar status para o fluxo humano:', err.message)
+    }
+    return
+  }
 
   let resultadoLara = null
   try {

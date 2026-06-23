@@ -1,5 +1,7 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
+import { candidatosTelefone } from '../lib/telefone.js'
+import { detectarRespostaReativacao } from './reativacao.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'vivenzza2026'
@@ -42,21 +44,21 @@ function detectarAnuncio(msg) {
   return null
 }
 
-function detectarMidia(msg) {
-  const messageType = msg.messageType || Object.keys(msg.message || {}).find(k => k !== 'messageContextInfo') || ''
+function detectarMidia(msg, conteudo) {
+  const messageType = msg.messageType || Object.keys(conteudo || {}).find(k => k !== 'messageContextInfo') || ''
   const map = {
     audioMessage:               { tipo: 'audio',    texto: '[áudio]' },
     ptvMessage:                 { tipo: 'video',    texto: '[vídeo curto]' },
     videoMessage:               { tipo: 'video',    texto: '[vídeo]' },
     imageMessage:               { tipo: 'image',    texto: '[imagem]' },
     stickerMessage:             { tipo: 'sticker',  texto: '[figurinha]' },
-    documentMessage:            { tipo: 'document', texto: `[arquivo: ${msg.message?.documentMessage?.fileName || 'documento'}]` },
-    documentWithCaptionMessage: { tipo: 'document', texto: `[arquivo: ${msg.message?.documentWithCaptionMessage?.message?.documentMessage?.fileName || 'documento'}]` },
+    documentMessage:            { tipo: 'document', texto: `[arquivo: ${conteudo?.documentMessage?.fileName || 'documento'}]` },
+    documentWithCaptionMessage: { tipo: 'document', texto: `[arquivo: ${conteudo?.documentWithCaptionMessage?.message?.documentMessage?.fileName || 'documento'}]` },
   }
   const info = map[messageType] ?? null
   if (!info) return null
 
-  const mediaObj = msg.message?.[messageType] ?? {}
+  const mediaObj = conteudo?.[messageType] ?? {}
   const mediaData = {
     messageType,
     remoteJid: msg.key?.remoteJid,
@@ -74,7 +76,10 @@ function detectarMidia(msg) {
 }
 
 function mapStatus(code) {
-  const map = { 1: 'pendente', 2: 'enviado', 3: 'entregue', 4: 'lido', 5: 'reproduzido' }
+  const map = {
+    1: 'pendente', 2: 'enviado', 3: 'entregue', 4: 'lido', 5: 'reproduzido',
+    PENDING: 'pendente', SERVER_ACK: 'enviado', DELIVERY_ACK: 'entregue', READ: 'lido', PLAYED: 'reproduzido',
+  }
   return map[code] ?? null
 }
 
@@ -178,14 +183,18 @@ async function proximoVendedor() {
 // pelo webhook do SDR (/api/sdr/webhook), que recebe o mesmo payload da Evolution.
 export async function processWhatsappEvent(payload) {
   try {
-    console.log('[webhook] event:', payload.event, '| data keys:', Object.keys(payload.data || {}))
+    // Volume de "messages.update" pode chegar a dezenas por segundo (um ACK de
+    // entrega/leitura por destinatário, por mensagem) — logar cada evento aqui
+    // (e formatar Object.keys(...) com console.log) sobrecarregava o event loop
+    // sob picos de tráfego e deixava o servidor inteiro lento (até o /health).
+    // Sem log de evento aqui; cada ramo abaixo loga só quando há algo relevante.
 
     // ── Status de entrega/leitura ─────────────────────────────────────────
     if (payload.event === 'messages.update') {
       const updates = Array.isArray(payload.data) ? payload.data : [payload.data]
       for (const upd of updates) {
-        const msgId = upd.key?.id
-        const novoStatus = mapStatus(upd.update?.status)
+        const msgId = upd.keyId ?? upd.key?.id
+        const novoStatus = mapStatus(upd.status ?? upd.update?.status)
         if (msgId && novoStatus) {
           await supabase
             .from('whatsapp_mensagens')
@@ -202,16 +211,22 @@ export async function processWhatsappEvent(payload) {
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
     if (!msg) return
 
-    console.log('[webhook] msg completo:', JSON.stringify(msg).slice(0, 1500))
-
     const fromMe = msg.key?.fromMe === true
     const remoteJid = msg.key?.remoteJid ?? ''
     const telefone = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '')
 
-    const midia = detectarMidia(msg)
+    // Mensagens efêmeras ("apagar após visualização") e de visualização única embrulham
+    // o conteúdo real um nível mais profundo — sem isso, a mídia/texto real nunca é
+    // encontrado e a mensagem cai no fallback genérico "[mídia]".
+    const conteudo = msg.message?.ephemeralMessage?.message
+      || msg.message?.viewOnceMessage?.message
+      || msg.message
+      || {}
+
+    const midia = detectarMidia(msg, conteudo)
     const texto =
-      msg.message?.conversation ??
-      msg.message?.extendedTextMessage?.text ??
+      conteudo.conversation ??
+      conteudo.extendedTextMessage?.text ??
       midia?.texto ??
       '[mídia]'
     const mediaTipo = midia?.tipo ?? null
@@ -222,9 +237,10 @@ export async function processWhatsappEvent(payload) {
     console.log('[webhook]', direcao, '| tel:', telefone, '| tipo:', mediaTipo ?? 'texto', '|', texto.slice(0, 50))
 
     const semPrefixo = telefone.replace(/^55/, '')
-    const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
-    const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
-    const candidatos = [telefone, semPrefixo, com9, sem9].filter(Boolean)
+    // candidatosTelefone cobre as mesmas variações de 9º dígito de antes, mais as formas
+    // com prefixo "55" — sem isso, um lead criado manualmente com o telefone salvo nesse
+    // formato nunca era encontrado e o webhook criava um segundo lead duplicado.
+    const candidatos = candidatosTelefone(telefone)
 
     const { data: leads } = await supabase
       .from('leads')
@@ -273,6 +289,14 @@ export async function processWhatsappEvent(payload) {
     // Fire-and-forget: baixa mídia e salva no Supabase Storage
     if (mediaTipo && evolutionId && !fromMe) {
       baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
+    }
+
+    // Resposta do cliente a um follow-up automático de reativação — verifica em
+    // background, não atrasa o resto do processamento desse webhook.
+    if (lead && !fromMe) {
+      detectarRespostaReativacao(lead.id, texto).catch((err) =>
+        console.error('[reativacao] erro ao processar resposta:', err.message)
+      )
     }
   } catch (err) {
     console.error('[webhook] erro:', err.message, '| body:', JSON.stringify(payload).slice(0, 200))

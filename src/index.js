@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import { corsMiddleware } from './middleware/cors.js'
-import { auth } from './middleware/auth.js'
+import { auth, adminOnly } from './middleware/auth.js'
 
 import authRouter from './routes/auth.js'
 import usuariosRouter from './routes/usuarios.js'
@@ -19,6 +19,9 @@ import nfeRouter from './routes/nfe.js'
 import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter from './routes/sdr.js'
+import ligacoesRouter from './routes/ligacoes.js'
+import automacoesRouter from './routes/automacoes.js'
+import reativacaoRouter from './routes/reativacao.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 
@@ -27,6 +30,19 @@ const PORT = process.env.PORT || 3001
 
 app.use(corsMiddleware)
 app.use(express.json({ limit: '50mb' }))
+
+// Loga requisições que passam de 2s — sem isso, uma lentidão intermitente só aparece
+// como média/p99 agregado no painel do Railway, sem dizer qual rota é a culpada.
+app.use((req, res, next) => {
+  const inicio = Date.now()
+  res.on('finish', () => {
+    const duracao = Date.now() - inicio
+    if (duracao > 2000) {
+      console.warn(`[lento] ${req.method} ${req.path} levou ${duracao}ms`)
+    }
+  })
+  next()
+})
 
 // Webhook do WhatsApp — sem autenticação, registrado como rota direta
 app.post('/api/whatsapp/webhook', handleWebhook)
@@ -51,6 +67,9 @@ app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
 app.use('/api/admin', auth, adminRouter)
+app.use('/api/ligacoes', auth, ligacoesRouter)
+app.use('/api/automacoes', auth, automacoesRouter)
+app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 
 // Health check
 app.get('/health', (req, res) => {
