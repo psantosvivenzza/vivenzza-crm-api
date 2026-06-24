@@ -95,6 +95,12 @@ router.get('/status', async (req, res) => {
         ativo: config.voz_ativa,
         creditos_usados: elevenValue?.character_count ?? null,
         creditos_limite: elevenValue?.character_limit ?? null,
+        // Detalhe do erro só quando a chamada falhou — sem isso, "offline" não dizia
+        // se era chave errada, sem permissão, rate limit, etc, e cada diagnóstico
+        // exigia entrar no Railway pra ver o log.
+        erro: elevenlabsInfo.status === 'rejected'
+          ? (elevenlabsInfo.reason?.response?.data?.detail?.message || elevenlabsInfo.reason?.message)
+          : null,
       },
       anthropic: {
         status: anthropicOk.status === 'fulfilled' ? 'online' : 'offline',
