@@ -294,6 +294,11 @@ Retorne APENAS o JSON, sem markdown, sem explicação.`
       tipo: 'whatsapp',
       status: 'pendente',
       responsavel_id: lead.responsavel_id,
+      origem: 'reativacao',
+      resumo_ia: resumo.resumo || null,
+      intencao_ia: resumo.ultima_intencao || null,
+      proxima_acao_ia: resumo.melhor_proxima_acao || null,
+      prioridade_ia: resumo.prioridade || null,
     })
 
     await marcarVendedorAssumiu(lead.telefone)

@@ -11,7 +11,7 @@ router.get('/', async (req, res) => {
 
     let query = supabase
       .from('tarefas')
-      .select('*, leads(id, nome)', { count: 'exact' })
+      .select('*, leads(id, nome, telefone, tipo, etapa)', { count: 'exact' })
       .order('prazo', { ascending: true })
       .range(offset, offset + Number(limit) - 1)
 
@@ -50,7 +50,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('tarefas')
-      .select('*, leads(id, nome, etapa)')
+      .select('*, leads(id, nome, telefone, tipo, etapa)')
       .eq('id', req.params.id)
       .single()
 
@@ -70,6 +70,8 @@ router.post('/', async (req, res) => {
 
     if (!titulo?.trim()) return res.status(400).json({ erro: 'Campo "titulo" é obrigatório' })
 
+    // origem sempre "manual" aqui — tarefas automaticas (reativacao, futuramente Lara)
+    // sao inseridas direto via supabase nas rotas internas, nunca por essa API publica.
     const { data, error } = await supabase
       .from('tarefas')
       .insert({
@@ -80,8 +82,9 @@ router.post('/', async (req, res) => {
         tipo,
         status: 'pendente',
         responsavel_id: req.user.id,
+        origem: 'manual',
       })
-      .select()
+      .select('*, leads(id, nome, telefone, tipo, etapa)')
       .single()
 
     if (error) throw error
