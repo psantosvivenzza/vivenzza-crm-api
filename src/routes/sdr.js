@@ -508,23 +508,23 @@ RESPONDA APENAS EM JSON VÁLIDO, sem texto fora do JSON:
   "etapa_cadencia": 1
 }`
 
-function parsearRespostaClaude(texto) {
-  try {
-    return JSON.parse(texto)
-  } catch {
-    const match = texto.match(/\{[\s\S]*\}/)
-    if (match) {
-      try { return JSON.parse(match[0]) } catch { /* cai no fallback abaixo */ }
-    }
-    return {
-      resposta: 'Olá! Sou a Lara da Vivenzza Professional. Como posso te ajudar hoje? 😊',
-      audio_script: null,
-      acao: 'NENHUMA',
-      tipo_lead: 'indefinido',
-      proximo_estado: 'qualificando',
-      temperatura: 'frio',
-      etapa_cadencia: 1,
-    }
+function parsearRespostaClaude(texto, contexto = {}) {
+  const tryParse = (str) => {
+    try { return JSON.parse(str) } catch { return null }
+  }
+  const resultado = tryParse(texto) ?? tryParse((texto.match(/\{[\s\S]*\}/) || [])[0])
+  if (resultado) return resultado
+
+  // Fallback: preserva o estado atual da conversa para não reiniciar do zero
+  console.warn('[sdr] parsearRespostaClaude: JSON inválido, usando fallback. raw:', texto?.slice(0, 100))
+  return {
+    resposta: 'Pode repetir? Não entendi sua mensagem 😊',
+    audio_script: null,
+    acao: 'NENHUMA',
+    tipo_lead: contexto.tipo_lead ?? 'indefinido',
+    proximo_estado: contexto.estado ?? 'qualificando',
+    temperatura: contexto.temperatura ?? 'frio',
+    etapa_cadencia: contexto.etapaCadencia ?? 1,
   }
 }
 
@@ -862,7 +862,7 @@ async function processarLara(event) {
   })
 
   const claudeRawText = claudeResponse.content[0]?.text || ''
-  const parsed = parsearRespostaClaude(claudeRawText)
+  const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia })
 
   console.log('[sdr:debug]', JSON.stringify({
     tel: telefoneConversa,
