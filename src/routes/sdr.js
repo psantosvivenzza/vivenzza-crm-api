@@ -805,11 +805,11 @@ async function processarLara(event) {
   ultimoProcessamentoPorTelefone.set(telefoneConversa, Date.now())
 
   // --- Controle de atendimento: vendedor x IA, dentro/fora do horário comercial ---
-  const statusAtendimento = conversa?.status_atendimento || 'ia_atendendo'
+  // Dentro do horário (seg–sex 08:20–18:00): time comercial assume, Lara fica silenciosa.
+  // Fora do horário (noite, fins de semana): Lara responde via Claude para todos os leads.
   const dentroDoHorario = dentroDoHorarioComercial()
 
-  if (statusAtendimento === 'vendedor_assumiu' && dentroDoHorario) {
-    // Regra absoluta: vendedor falou, a Lara calou. Só registra o histórico, sem responder.
+  if (dentroDoHorario) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
     let historicoParaSalvar = historico.slice(-10)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
@@ -825,56 +825,7 @@ async function processarLara(event) {
     return null
   }
 
-  if (statusAtendimento === 'ia_apoio' && dentroDoHorario) {
-    // Horário comercial voltou: vendedor retoma a conversa, Lara continua calada.
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-10)
-    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from('sdr_conversas').upsert(
-      {
-        telefone: telefoneConversa,
-        historico: historicoParaSalvar,
-        status_atendimento: 'vendedor_assumiu',
-        ultimo_contato: new Date().toISOString(),
-      },
-      { onConflict: 'telefone' }
-    )
-    return null
-  }
-
-  if ((statusAtendimento === 'vendedor_assumiu' || statusAtendimento === 'ia_apoio') && !dentroDoHorario) {
-    // Fora do horário e o vendedor já atendeu antes: Lara dá apoio com mensagem fixa (sem passar pelo Claude).
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    historico.push({ role: 'assistant', content: MENSAGEM_FORA_DO_HORARIO, timestamp: new Date().toISOString() })
-    const historicoApoio = historico.slice(-10)
-
-    await supabase.from('sdr_conversas').upsert(
-      {
-        telefone: telefoneConversa,
-        historico: historicoApoio,
-        status_atendimento: 'ia_apoio',
-        ultimo_contato: new Date().toISOString(),
-      },
-      { onConflict: 'telefone' }
-    )
-
-    try {
-      const { data: envioApoio } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
-        number: telefone,
-        text: MENSAGEM_FORA_DO_HORARIO,
-      })
-      await registrarMensagemSaida({ telefone, mensagem: MENSAGEM_FORA_DO_HORARIO, evolutionId: envioApoio?.key?.id ?? null })
-    } catch (err) {
-      console.error(
-        '[sdr] erro ao enviar mensagem de apoio fora do horário:',
-        err.response?.data ? JSON.stringify(err.response.data) : err.message
-      )
-    }
-
-    return { telefone, parsed: { resposta: MENSAGEM_FORA_DO_HORARIO, acao: 'NENHUMA', status_atendimento: 'ia_apoio' } }
-  }
-
-  // status_atendimento === 'ia_atendendo': segue o fluxo normal abaixo, sempre responde.
+  // Fora do horário comercial: Lara responde via Claude independente do status anterior.
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
   let historicoRecente = historico.slice(-10)
   if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
