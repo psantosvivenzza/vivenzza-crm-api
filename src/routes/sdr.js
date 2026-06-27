@@ -826,6 +826,8 @@ async function processarLara(event) {
   }
 
   // Fora do horário comercial: Lara responde via Claude independente do status anterior.
+  // Se o vendedor havia assumido, Lara retoma o controle até o próximo horário comercial.
+  const statusAtendimento = conversa?.status_atendimento || 'ia_atendendo'
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
   let historicoRecente = historico.slice(-10)
   if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
@@ -851,6 +853,7 @@ async function processarLara(event) {
     temperatura: parsed.temperatura || temperatura,
     etapa_cadencia: parsed.etapa_cadencia || etapaCadencia,
     historico: historicoRecente,
+    status_atendimento: 'ia_atendendo',
     ultimo_contato: new Date().toISOString(),
   }, { onConflict: 'telefone' })
 
