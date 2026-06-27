@@ -515,10 +515,12 @@ function parsearRespostaClaude(texto, contexto = {}) {
   const resultado = tryParse(texto) ?? tryParse((texto.match(/\{[\s\S]*\}/) || [])[0])
   if (resultado) return resultado
 
-  // Fallback: preserva o estado atual da conversa para não reiniciar do zero
-  console.warn('[sdr] parsearRespostaClaude: JSON inválido, usando fallback. raw:', texto?.slice(0, 100))
+  // Claude retornou texto puro sem JSON — usa o texto como resposta para não
+  // desperdiçar uma mensagem válida, preservando o estado atual da conversa.
+  const textoLimpo = texto?.trim() ?? ''
+  console.warn('[sdr] parsearRespostaClaude: JSON inválido, usando texto puro. raw:', textoLimpo.slice(0, 100))
   return {
-    resposta: 'Pode repetir? Não entendi sua mensagem 😊',
+    resposta: textoLimpo || 'Pode repetir? Não entendi sua mensagem 😊',
     audio_script: null,
     acao: 'NENHUMA',
     tipo_lead: contexto.tipo_lead ?? 'indefinido',
