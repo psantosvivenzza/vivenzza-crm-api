@@ -529,11 +529,24 @@ function parsearRespostaClaude(texto) {
 }
 
 // Horário comercial: segunda a sexta, 08:20–18:00, fuso America/Sao_Paulo.
+// Usa formatToParts para evitar comparação de string com separador locale-dependente
+// (Windows formata como "14h20", não "14:20", quebrando >= / <=).
 function dentroDoHorarioComercial(data = new Date()) {
-  const diaSemana = data.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long' })
-  const hora = data.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
-  const diaUtil = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => diaSemana.includes(d))
-  return diaUtil && hora >= '08:20' && hora <= '18:00'
+  const partes = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(data)
+  const get = (tipo) => partes.find((p) => p.type === tipo)?.value ?? ''
+  const diaUtil = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => get('weekday').includes(d))
+  const hora = get('hour')
+  const minuto = get('minute')
+  const totalMin = Number(hora) * 60 + Number(minuto)
+  const resultado = diaUtil && totalMin >= 8 * 60 + 20 && totalMin <= 18 * 60
+  console.log('[horario]', { partes, diaUtil, hora, minuto, totalMin, resultado })
+  return resultado
 }
 
 const MENSAGEM_FORA_DO_HORARIO =
@@ -682,7 +695,7 @@ async function processarLara(event) {
 
   // Interruptor geral da Lara, controlado pela página /automacoes — quando desativado,
   // a Lara não responde nada, em nenhum status_atendimento (pausa total do bot).
-  const { data: configAutomacoes } = await supabase.from('automacoes_config').select('sdr_ativo').eq('id', 1).maybeSingle()
+  const { data: configAutomacoes } = await supabase.from('automacoes_config').select('sdr_ativo, voz_ativa').eq('id', 1).maybeSingle()
   if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
 
   // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
@@ -761,10 +774,12 @@ async function processarLara(event) {
     Date.now() - new Date(ultimaEntrada.timestamp).getTime() < 5 * 60 * 1000
   ) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    let historicoParaSalvar = historico.slice(-10)
+    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       {
         telefone: telefoneConversa,
-        historico: historico.slice(-10),
+        historico: historicoParaSalvar,
         status_atendimento: 'vendedor_assumiu',
         ultimo_contato: new Date().toISOString(),
       },
@@ -779,8 +794,10 @@ async function processarLara(event) {
   const ultimoProcessamento = ultimoProcessamentoPorTelefone.get(telefoneConversa)
   if (ultimoProcessamento && Date.now() - ultimoProcessamento < RATE_LIMIT_MS) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    let historicoParaSalvar = historico.slice(-10)
+    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
-      { telefone: telefoneConversa, historico: historico.slice(-10), ultimo_contato: new Date().toISOString() },
+      { telefone: telefoneConversa, historico: historicoParaSalvar, ultimo_contato: new Date().toISOString() },
       { onConflict: 'telefone' }
     )
     return null
@@ -794,10 +811,12 @@ async function processarLara(event) {
   if (statusAtendimento === 'vendedor_assumiu' && dentroDoHorario) {
     // Regra absoluta: vendedor falou, a Lara calou. Só registra o histórico, sem responder.
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    let historicoParaSalvar = historico.slice(-10)
+    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       {
         telefone: telefoneConversa,
-        historico: historico.slice(-10),
+        historico: historicoParaSalvar,
         status_atendimento: 'vendedor_assumiu',
         ultimo_contato: new Date().toISOString(),
       },
@@ -809,10 +828,12 @@ async function processarLara(event) {
   if (statusAtendimento === 'ia_apoio' && dentroDoHorario) {
     // Horário comercial voltou: vendedor retoma a conversa, Lara continua calada.
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
+    let historicoParaSalvar = historico.slice(-10)
+    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       {
         telefone: telefoneConversa,
-        historico: historico.slice(-10),
+        historico: historicoParaSalvar,
         status_atendimento: 'vendedor_assumiu',
         ultimo_contato: new Date().toISOString(),
       },
@@ -855,7 +876,8 @@ async function processarLara(event) {
 
   // status_atendimento === 'ia_atendendo': segue o fluxo normal abaixo, sempre responde.
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-  const historicoRecente = historico.slice(-10)
+  let historicoRecente = historico.slice(-10)
+  if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
 
   const claudeResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
@@ -885,7 +907,7 @@ async function processarLara(event) {
   // cada turno, garantindo que etapas como "lead sumiu" ou "preço" nunca saem em áudio.
   // vozAtiva: interruptor da página /automacoes — desativado, a Lara responde só texto.
   const vozAtiva = configAutomacoes?.voz_ativa !== false
-  const deveGerarAudio = vozAtiva && (ETAPA_AUDIO[parsed.etapa_cadencia] ?? false)
+  const deveGerarAudio = vozAtiva && (ETAPA_AUDIO[Number(parsed.etapa_cadencia)] ?? false)
 
   if (deveGerarAudio && ELEVENLABS_KEY) {
     try {
@@ -900,11 +922,10 @@ async function processarLara(event) {
       )
 
       const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
-      const { data: envioAudio } = await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+      const { data: envioAudio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${EVOLUTION_INSTANCE}`, {
         number: telefone,
-        mediatype: 'audio',
-        media: audioBase64,
-        fileName: 'lara-vivenzza.mp3',
+        audio: audioBase64,
+        encoding: true,
       })
 
       const evolutionIdAudio = envioAudio?.key?.id ?? null
