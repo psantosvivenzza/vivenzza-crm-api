@@ -867,10 +867,10 @@ async function processarLara(event) {
   console.log('[sdr:debug]', JSON.stringify({
     tel: telefoneConversa,
     claudeRawLen: claudeRawText.length,
+    claudeRaw: claudeRawText.slice(0, 200),
     parsedEtapa: parsed.etapa_cadencia,
     parsedEstado: parsed.proximo_estado,
     parsedRespostaStart: parsed.resposta?.slice(0, 60),
-    fallback: claudeRawText.length === 0,
   }))
 
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
