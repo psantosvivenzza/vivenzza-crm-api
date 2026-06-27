@@ -844,6 +844,16 @@ async function processarLara(event) {
     return acc
   }, [])
 
+  console.log('[sdr:debug]', JSON.stringify({
+    tel: telefoneConversa,
+    historicoLen: historico.length,
+    historicoRoles: historico.map(h => h.role),
+    messagesLen: messagesParaClaude.length,
+    messagesRoles: messagesParaClaude.map(m => m.role),
+    etapaCadencia,
+    estado,
+  }))
+
   const claudeResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
@@ -851,7 +861,17 @@ async function processarLara(event) {
     messages: messagesParaClaude,
   })
 
-  const parsed = parsearRespostaClaude(claudeResponse.content[0]?.text || '')
+  const claudeRawText = claudeResponse.content[0]?.text || ''
+  const parsed = parsearRespostaClaude(claudeRawText)
+
+  console.log('[sdr:debug]', JSON.stringify({
+    tel: telefoneConversa,
+    claudeRawLen: claudeRawText.length,
+    parsedEtapa: parsed.etapa_cadencia,
+    parsedEstado: parsed.proximo_estado,
+    parsedRespostaStart: parsed.resposta?.slice(0, 60),
+    fallback: claudeRawText.length === 0,
+  }))
 
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
 
