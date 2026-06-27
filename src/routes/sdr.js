@@ -544,9 +544,7 @@ function dentroDoHorarioComercial(data = new Date()) {
   const hora = get('hour')
   const minuto = get('minute')
   const totalMin = Number(hora) * 60 + Number(minuto)
-  const resultado = diaUtil && totalMin >= 8 * 60 + 20 && totalMin <= 18 * 60
-  console.log('[horario]', { partes, diaUtil, hora, minuto, totalMin, resultado })
-  return resultado
+  return diaUtil && totalMin >= 8 * 60 + 20 && totalMin <= 18 * 60
 }
 
 const MENSAGEM_FORA_DO_HORARIO =
@@ -832,14 +830,25 @@ async function processarLara(event) {
   let historicoRecente = historico.slice(-10)
   if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
 
+  // A API da Anthropic exige alternância estrita user/assistant. Se o rate-limit ou o
+  // bloqueio de horário salvou uma mensagem user sem resposta, o histórico pode ter
+  // duas entradas user seguidas — isso rejeita a chamada e a Lara "reinicia".
+  // Mesclar entradas consecutivas do mesmo role resolve sem perder conteúdo.
+  const messagesParaClaude = historicoRecente.reduce((acc, h) => {
+    const role = h.role === 'user' ? 'user' : 'assistant'
+    if (acc.length > 0 && acc[acc.length - 1].role === role) {
+      acc[acc.length - 1].content += '\n' + h.content
+    } else {
+      acc.push({ role, content: h.content })
+    }
+    return acc
+  }, [])
+
   const claudeResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
     system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia),
-    messages: historicoRecente.map(h => ({
-      role: h.role === 'user' ? 'user' : 'assistant',
-      content: h.content,
-    })),
+    messages: messagesParaClaude,
   })
 
   const parsed = parsearRespostaClaude(claudeResponse.content[0]?.text || '')
