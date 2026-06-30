@@ -88,8 +88,9 @@ app.post('/api/admin/meta-report', async (req, res) => {
     const resultado = await runMetaReport({ daysAgo })
     res.json({ ok: true, ...resultado })
   } catch (err) {
-    console.error('[meta-report manual] Erro:', err.message)
-    res.status(500).json({ erro: err.message })
+    const detail = err.response?.data ?? err.message
+    console.error('[meta-report manual] Erro:', JSON.stringify(detail))
+    res.status(500).json({ erro: err.message, detail })
   }
 })
 
