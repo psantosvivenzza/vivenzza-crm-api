@@ -20,6 +20,7 @@ import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter from './routes/sdr.js'
 import campanhasRouter from './routes/campanhas.js'
+import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
 import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
@@ -70,6 +71,7 @@ app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
 app.use('/api/admin', auth, adminRouter)
 app.use('/api/admin/campanhas', auth, adminOnly, campanhasRouter)
+app.use('/api/admin/google-ads', auth, adminOnly, googleAdsRouter)
 app.use('/api/ligacoes', auth, ligacoesRouter)
 app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
