@@ -24,6 +24,7 @@ import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
+import { runMetaReport } from './jobs/meta-report.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -97,5 +98,30 @@ cron.schedule('0 5 * * *', async () => {
     await runBackup()
   } catch (err) {
     console.error('[cron backup] Erro:', err.message)
+  }
+})
+
+// Relatório Meta Ads diário às 07:00 BRT (10:00 UTC)
+cron.schedule('0 10 * * *', async () => {
+  try {
+    await runMetaReport()
+  } catch (err) {
+    console.error('[cron meta-report] Erro:', err.message)
+  }
+})
+
+// Rota de disparo manual do relatório Meta Ads (protegida por API_SECRET_KEY)
+app.post('/api/admin/meta-report', async (req, res) => {
+  const { authorization } = req.headers
+  if (authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
+    return res.status(401).json({ erro: 'Não autorizado' })
+  }
+  try {
+    const daysAgo = Number(req.query.daysAgo) || 1
+    const resultado = await runMetaReport({ daysAgo })
+    res.json({ ok: true, ...resultado })
+  } catch (err) {
+    console.error('[meta-report manual] Erro:', err.message)
+    res.status(500).json({ erro: err.message })
   }
 })
