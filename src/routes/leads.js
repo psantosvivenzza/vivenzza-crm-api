@@ -10,14 +10,15 @@ const useDb = () => !!process.env.DATABASE_URL
 // GET /api/leads — listar com filtros opcionais
 router.get('/', async (req, res) => {
   try {
-    const { etapa, tipo, desde, origem, page = 1, limit = 50 } = req.query
-    const offset = (Number(page) - 1) * Number(limit)
+    const { etapa, tipo, desde, origem, page = 1, limit, pageSize } = req.query
+    const pageLimit = Number(pageSize ?? limit ?? 50)
+    const offset = (Number(page) - 1) * pageLimit
 
     let query = supabase
       .from('leads')
       .select('*, usuarios!leads_responsavel_id_fkey(id, nome)', { count: 'exact' })
       .order('criado_em', { ascending: false })
-      .range(offset, offset + Number(limit) - 1)
+      .range(offset, offset + pageLimit - 1)
 
     if (etapa) query = query.eq('etapa', etapa)
     if (tipo) query = query.eq('tipo', tipo)
@@ -33,7 +34,7 @@ router.get('/', async (req, res) => {
 
     if (error) throw error
 
-    res.json({ data, total: count, page: Number(page), limit: Number(limit) })
+    res.json({ data, total: count, page: Number(page), pageSize: pageLimit })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
