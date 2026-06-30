@@ -77,6 +77,22 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
+// Disparo manual do relatório Meta Ads (antes do 404 para ser alcançada)
+app.post('/api/admin/meta-report', async (req, res) => {
+  const { authorization } = req.headers
+  if (authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
+    return res.status(401).json({ erro: 'Não autorizado' })
+  }
+  try {
+    const daysAgo = Number(req.query.daysAgo) || 1
+    const resultado = await runMetaReport({ daysAgo })
+    res.json({ ok: true, ...resultado })
+  } catch (err) {
+    console.error('[meta-report manual] Erro:', err.message)
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // 404
 app.use((req, res) => {
   res.status(404).json({ erro: `Rota não encontrada: ${req.method} ${req.path}` })
@@ -107,21 +123,5 @@ cron.schedule('0 10 * * *', async () => {
     await runMetaReport()
   } catch (err) {
     console.error('[cron meta-report] Erro:', err.message)
-  }
-})
-
-// Rota de disparo manual do relatório Meta Ads (protegida por API_SECRET_KEY)
-app.post('/api/admin/meta-report', async (req, res) => {
-  const { authorization } = req.headers
-  if (authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
-    return res.status(401).json({ erro: 'Não autorizado' })
-  }
-  try {
-    const daysAgo = Number(req.query.daysAgo) || 1
-    const resultado = await runMetaReport({ daysAgo })
-    res.json({ ok: true, ...resultado })
-  } catch (err) {
-    console.error('[meta-report manual] Erro:', err.message)
-    res.status(500).json({ erro: err.message })
   }
 })
