@@ -681,6 +681,22 @@ async function transcreverAudio(base64, mimetype) {
   }
 }
 
+const KEYWORDS_B2B = ['salão', 'distribui', 'atacado', 'revendedor', 'revenda', 'lojista', 'parceiro', 'atacadista', 'fornecedor', 'kit profissional']
+const KEYWORDS_B2C = ['uso próprio', 'meu cabelo', 'consumidor', 'quero comprar', 'produto pra mim', 'uso pessoal']
+
+const DIACRITICOS = /[̀-ͯ]/g
+function detectarTipoKeyword(texto) {
+  const normalizar = (s) => s.toLowerCase().normalize('NFD').replace(DIACRITICOS, '')
+  const t = normalizar(texto)
+  for (const kw of KEYWORDS_B2B) {
+    if (t.includes(normalizar(kw))) return { tipo: 'distribuidor', keyword: kw, categoria: 'b2b' }
+  }
+  for (const kw of KEYWORDS_B2C) {
+    if (t.includes(normalizar(kw))) return { tipo: 'b2c', keyword: kw, categoria: 'b2c' }
+  }
+  return null
+}
+
 // Fluxo da Lara (IA) — só atua em mensagens novas recebidas (não-fromMe).
 // Retorna { telefone, parsed } quando responde, ou null quando não há o que fazer
 // (evento irrelevante, mensagem de status, eco da própria Lara, etc).
@@ -865,6 +881,17 @@ async function processarLara(event) {
 
   const claudeRawText = claudeResponse.content[0]?.text || ''
   const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia })
+
+  // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword
+  // de B2B ou B2C é detectada na mensagem — cobre leads criados sem tipo definido.
+  const turnoAtual = historico.filter(h => h.role === 'user').length
+  if (turnoAtual <= 2) {
+    const kwDetectada = detectarTipoKeyword(mensagem)
+    if (kwDetectada) {
+      console.log(`[sdr:keyword] ${telefoneConversa} turno=${turnoAtual} ${kwDetectada.categoria.toUpperCase()} keyword="${kwDetectada.keyword}" tipo=${kwDetectada.tipo}`)
+      parsed.tipo_lead = kwDetectada.tipo
+    }
+  }
 
   console.log('[sdr:debug]', JSON.stringify({
     tel: telefoneConversa,
