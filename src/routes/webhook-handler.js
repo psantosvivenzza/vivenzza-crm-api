@@ -21,6 +21,49 @@ function detectarCampanha(texto) {
   return 'whatsapp'
 }
 
+// Retorna o valor padronizado de campanha_origem para o novo lead:
+// Prioridade: referral Meta Ads > externalAdReply > keyword no texto > whatsapp_organico.
+function detectarCampanhaOrigem(msg, texto) {
+  const mapearConteudoAd = (conteudo) => {
+    const c = conteudo.toUpperCase()
+    if (c.includes('B2B') || c.includes('REGIAO') || c.includes('REGIOES') || c.includes('REGIÕES')) return 'b2b_regioes'
+    if (c.includes('LISTA') || c.includes('BRASIL')) return 'lista_brasil'
+    if (c.includes('CIDADESRS') || c.includes('CIDADES RS')) return 'cidadesrs'
+    return null
+  }
+
+  // Sinal primário: Meta Ads click-to-WhatsApp via referral object
+  const ref = msg.referral
+  if (ref) {
+    const conteudoRef = [ref.headline, ref.body, ref.source_id].filter(Boolean).join(' ')
+    const campanha = mapearConteudoAd(conteudoRef)
+    if (campanha) return campanha
+    const titulo = (ref.headline || ref.body || '').slice(0, 80).trim()
+    return titulo || 'meta_ads'
+  }
+
+  // Sinal secundário: anúncio via externalAdReply (contexto de mensagem)
+  const tiposMsg = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'buttonsMessage']
+  for (const tipoMsg of tiposMsg) {
+    const adReply = msg.message?.[tipoMsg]?.contextInfo?.externalAdReply
+    if (adReply) {
+      const conteudoAd = [adReply.title, adReply.body].filter(Boolean).join(' ')
+      const campanha = mapearConteudoAd(conteudoAd)
+      if (campanha) return campanha
+      const titulo = (adReply.title || '').slice(0, 80).trim()
+      return titulo || 'meta_ads'
+    }
+  }
+
+  // Fallback: keyword no texto da primeira mensagem
+  const t = (texto || '').toUpperCase()
+  if (t.includes('CIDADESRS')) return 'cidadesrs'
+  if (t.includes('B2B'))       return 'b2b_regioes'
+  if (t.includes('LISTA'))     return 'lista_brasil'
+
+  return 'whatsapp_organico'
+}
+
 function detectarAnuncio(msg) {
   const ref = msg.referral
   if (ref) {
@@ -253,6 +296,7 @@ export async function processWhatsappEvent(payload) {
     if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
       const origem = detectarAnuncio(msg) ?? detectarCampanha(texto)
+      const campanha_origem = detectarCampanhaOrigem(msg, texto)
       const { data: novoLead, error } = await supabase
         .from('leads')
         .insert({
@@ -260,6 +304,7 @@ export async function processWhatsappEvent(payload) {
           telefone: semPrefixo,
           etapa: 'novo',
           origem,
+          campanha_origem,
           responsavel_id: vendedor?.id ?? null,
         })
         .select('id, nome, responsavel_id')
@@ -267,7 +312,7 @@ export async function processWhatsappEvent(payload) {
 
       if (!error && novoLead) {
         lead = novoLead
-        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem)
+        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem)
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
       }
