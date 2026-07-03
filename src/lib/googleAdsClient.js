@@ -55,28 +55,29 @@ async function getAccessToken() {
   return _cachedToken
 }
 
-// ─── Google Ads REST API v17 ──────────────────────────────────────────────────
+// ─── Google Ads REST API v24 ──────────────────────────────────────────────────
 // Executa uma query GAQL e retorna todos os resultados (faz paginação automática).
+// Nota: listAccessibleCustomers confirmou que GOOGLE_ADS_CUSTOMER_ID (4437283054)
+// é diretamente acessível pelo token sem precisar de login-customer-id.
+// Enviar login-customer-id=MCC causa 403 porque a hierarquia da API não reconhece
+// o MCC como manager da conta — as duas contas são acessíveis de forma independente.
 
 const GADS_VERSION = 'v24'
 
 export async function gaqlQuery(gaql) {
   const {
     GOOGLE_ADS_CUSTOMER_ID,
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID,
     GOOGLE_ADS_DEVELOPER_TOKEN,
   } = process.env
 
-  const customerId    = GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')
-  const loginId       = GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/-/g, '')
-  const accessToken   = await getAccessToken()
-  const path          = `/${GADS_VERSION}/customers/${customerId}/googleAds:search`
+  const customerId  = GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')
+  const accessToken = await getAccessToken()
+  const path        = `/${GADS_VERSION}/customers/${customerId}/googleAds:search`
 
   const baseHeaders = {
-    'Authorization':  `Bearer ${accessToken}`,
-    'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN,
-    'Content-Type':   'application/json',
-    ...(loginId ? { 'login-customer-id': loginId } : {}),
+    'Authorization':   `Bearer ${accessToken}`,
+    'developer-token':  GOOGLE_ADS_DEVELOPER_TOKEN,
+    'Content-Type':    'application/json',
   }
 
   const results = []
