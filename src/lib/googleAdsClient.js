@@ -1,14 +1,13 @@
 import https from 'https'
-import { GoogleAdsApi } from 'google-ads-api'
 
 // ─── Token cache ──────────────────────────────────────────────────────────────
-// gaxios v6 (usado pelo google-ads-api) usa o fetch nativo (undici) para renovar
-// o token OAuth2, o que causa "Premature close" no ambiente Railway (Linux).
-// Solução: renovar o access_token manualmente via https nativo, que não usa undici,
-// e passar access_token direto ao Customer() — bypassando o fluxo gaxios/OAuth2.
+// google-ads-api v24 usa gaxios v6 → fetch nativo (undici) para renovar o token,
+// o que causa "Premature close" no container Linux do Railway.
+// Solução definitiva: substituir toda a lib por chamadas REST diretas com https
+// nativo, que não usa undici e funciona corretamente no ambiente Railway.
 
 let _cachedToken = null
-let _tokenExpiry = 0   // timestamp ms
+let _tokenExpiry  = 0
 
 function fetchAccessToken() {
   const { GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN } = process.env
@@ -47,63 +46,81 @@ function fetchAccessToken() {
   })
 }
 
-// Retorna access_token válido; renova se expirar em < 60 s.
 async function getAccessToken() {
-  if (_cachedToken && Date.now() < _tokenExpiry - 60_000) {
-    return _cachedToken
-  }
+  if (_cachedToken && Date.now() < _tokenExpiry - 60_000) return _cachedToken
   const { access_token, expires_in } = await fetchAccessToken()
-  _cachedToken  = access_token
+  _cachedToken = access_token
   _tokenExpiry  = Date.now() + expires_in * 1000
   console.log('[google-ads] access_token renovado, expira em', expires_in, 's')
   return _cachedToken
 }
 
-// ─── Singleton do cliente Google Ads ─────────────────────────────────────────
+// ─── Google Ads REST API v17 ──────────────────────────────────────────────────
+// Executa uma query GAQL e retorna todos os resultados (faz paginação automática).
 
-let _api = null
+const GADS_VERSION = 'v17'
 
-function getApi() {
-  if (!_api) {
-    const { GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_DEVELOPER_TOKEN } = process.env
-    if (!GOOGLE_ADS_CLIENT_ID || !GOOGLE_ADS_CLIENT_SECRET || !GOOGLE_ADS_DEVELOPER_TOKEN) {
-      throw new Error(
-        'Google Ads não configurado. Defina GOOGLE_ADS_CLIENT_ID, ' +
-        'GOOGLE_ADS_CLIENT_SECRET e GOOGLE_ADS_DEVELOPER_TOKEN.'
-      )
-    }
-    _api = new GoogleAdsApi({
-      client_id:       GOOGLE_ADS_CLIENT_ID,
-      client_secret:   GOOGLE_ADS_CLIENT_SECRET,
-      developer_token: GOOGLE_ADS_DEVELOPER_TOKEN,
+export async function gaqlQuery(gaql) {
+  const {
+    GOOGLE_ADS_CUSTOMER_ID,
+    GOOGLE_ADS_LOGIN_CUSTOMER_ID,
+    GOOGLE_ADS_DEVELOPER_TOKEN,
+  } = process.env
+
+  const customerId    = GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')
+  const loginId       = GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/-/g, '')
+  const accessToken   = await getAccessToken()
+  const path          = `/${GADS_VERSION}/customers/${customerId}/googleAds:search`
+
+  const baseHeaders = {
+    'Authorization':  `Bearer ${accessToken}`,
+    'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN,
+    'Content-Type':   'application/json',
+    ...(loginId ? { 'login-customer-id': loginId } : {}),
+  }
+
+  const results = []
+
+  const fetchPage = (pageToken) => new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ query: gaql, ...(pageToken ? { pageToken } : {}) })
+
+    const req = https.request({
+      hostname: 'googleads.googleapis.com',
+      path,
+      method:   'POST',
+      headers:  { ...baseHeaders, 'Content-Length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => { data += c })
+      res.on('end', async () => {
+        try {
+          const json = JSON.parse(data)
+          if (res.statusCode !== 200) {
+            const detail = json.error?.message ?? JSON.stringify(json).slice(0, 300)
+            return reject(new Error(`Google Ads API ${res.statusCode}: ${detail}`))
+          }
+          results.push(...(json.results ?? []))
+          if (json.nextPageToken) {
+            fetchPage(json.nextPageToken).then(resolve).catch(reject)
+          } else {
+            resolve()
+          }
+        } catch {
+          reject(new Error(`Resposta inválida: ${data.slice(0, 300)}`))
+        }
+      })
     })
-  }
-  return _api
-}
-
-/**
- * Retorna um Customer autenticado pronto para queries GAQL.
- * Usa access_token obtido via https nativo (não gaxios/undici).
- */
-export async function getCustomer() {
-  const { GOOGLE_ADS_CUSTOMER_ID, GOOGLE_ADS_LOGIN_CUSTOMER_ID } = process.env
-
-  if (!GOOGLE_ADS_CUSTOMER_ID) {
-    throw new Error('Google Ads não configurado. Defina GOOGLE_ADS_CUSTOMER_ID.')
-  }
-
-  const access_token = await getAccessToken()
-
-  return getApi().Customer({
-    customer_id: GOOGLE_ADS_CUSTOMER_ID,
-    ...(GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { login_customer_id: GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}),
-    access_token,
+    req.on('error', reject)
+    req.write(payload)
+    req.end()
   })
+
+  await fetchPage(null)
+  return results
 }
 
-/**
- * Retorna true se todas as variáveis obrigatórias estão definidas.
- */
+// ─── Guard de configuração ────────────────────────────────────────────────────
+
 export function googleAdsConfigurado() {
   const {
     GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET,

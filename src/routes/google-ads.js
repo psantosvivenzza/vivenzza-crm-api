@@ -1,20 +1,14 @@
 import { Router } from 'express'
-import { getCustomer, googleAdsConfigurado } from '../lib/googleAdsClient.js'
+import { gaqlQuery, googleAdsConfigurado } from '../lib/googleAdsClient.js'
 
 const router = Router()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// REST API retorna int64 como string e valores monetários em micros.
 
-const fromMicros = (v) => (Number(v || 0) / 1_000_000)
+const fromMicros = (v) => Number(v || 0) / 1_000_000
 
-// Converte status numérico do enum para string legível
-const STATUS_MAP = { 2: 'ENABLED', 3: 'PAUSED', 4: 'REMOVED' }
-
-function normalizeStatus(s) {
-  return STATUS_MAP[s] ?? String(s)
-}
-
-// ─── Guard: retorna 503 se as variáveis ainda não estão configuradas ──────────
+// ─── Guard ────────────────────────────────────────────────────────────────────
 
 function requireConfig(res) {
   if (!googleAdsConfigurado()) {
@@ -34,23 +28,19 @@ function requireConfig(res) {
 }
 
 // ─── GET /api/admin/google-ads/resumo ────────────────────────────────────────
-// Retorna campanhas ativas/pausadas dos últimos 30 dias.
-// Interface idêntica ao /api/admin/campanhas/resumo (campo `fonte: 'google'`)
-// para facilitar a fusão no frontend.
+// Interface idêntica ao /api/admin/campanhas/resumo (campo `fonte: 'google'`).
+// REST API v17: campos int64 chegam como string, status como enum string.
 
 router.get('/resumo', async (req, res) => {
   if (requireConfig(res)) return
   try {
-    const customer = await getCustomer()
-
-    const rows = await customer.query(`
+    const rows = await gaqlQuery(`
       SELECT
         campaign.id,
         campaign.name,
         campaign.status,
         metrics.cost_micros,
         metrics.impressions,
-        metrics.reach_metric_value,
         metrics.clicks,
         metrics.ctr,
         metrics.average_cpm,
@@ -62,21 +52,19 @@ router.get('/resumo', async (req, res) => {
     `)
 
     const campanhas = rows.map((r) => ({
-      fonte: 'google',
-      id: String(r.campaign.id),
-      nome: r.campaign.name,
-      status: normalizeStatus(r.campaign.status),
-      gasto: fromMicros(r.metrics.cost_micros),
-      impressoes: Number(r.metrics.impressions || 0),
-      alcance: Number(r.metrics.reach_metric_value || 0),
-      cliques: Number(r.metrics.clicks || 0),
-      ctr: Number(r.metrics.ctr || 0) * 100,       // Google retorna 0–1, normaliza para %
-      cpm: fromMicros(r.metrics.average_cpm),
-      // Google Ads não tem "conversas iniciadas" nativo — usa conversions genéricas
-      // até que uma ação de conversão específica de WhatsApp seja configurada
-      conversas: Number(r.metrics.conversions || 0),
-      custoConversa: r.metrics.cost_per_conversion
-        ? fromMicros(r.metrics.cost_per_conversion)
+      fonte:          'google',
+      id:             String(r.campaign.id),
+      nome:           r.campaign.name,
+      status:         r.campaign.status,                              // já é string: "ENABLED" | "PAUSED"
+      gasto:          fromMicros(r.metrics.costMicros),
+      impressoes:     Number(r.metrics.impressions  || 0),
+      alcance:        0,                                              // não disponível em campanhas padrão
+      cliques:        Number(r.metrics.clicks       || 0),
+      ctr:            Number(r.metrics.ctr          || 0) * 100,     // API retorna 0–1, converte para %
+      cpm:            fromMicros(r.metrics.averageCpm),
+      conversas:      Number(r.metrics.conversions  || 0),
+      custoConversa:  r.metrics.costPerConversion
+        ? fromMicros(r.metrics.costPerConversion)
         : null,
     }))
 
@@ -93,9 +81,7 @@ router.get('/resumo', async (req, res) => {
 router.get('/historico', async (req, res) => {
   if (requireConfig(res)) return
   try {
-    const customer = await getCustomer()
-
-    const rows = await customer.query(`
+    const rows = await gaqlQuery(`
       SELECT
         segments.date,
         metrics.cost_micros,
@@ -106,12 +92,11 @@ router.get('/historico', async (req, res) => {
       ORDER BY segments.date ASC
     `)
 
-    // Agrega por dia (a query retorna uma linha por campanha por dia)
     const byDay = {}
     for (const r of rows) {
       const dia = r.segments.date
       if (!byDay[dia]) byDay[dia] = { dia, gasto: 0, conversas: 0 }
-      byDay[dia].gasto = parseFloat((byDay[dia].gasto + fromMicros(r.metrics.cost_micros)).toFixed(2))
+      byDay[dia].gasto      = parseFloat((byDay[dia].gasto + fromMicros(r.metrics.costMicros)).toFixed(2))
       byDay[dia].conversas += Number(r.metrics.conversions || 0)
     }
 
