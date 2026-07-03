@@ -120,6 +120,55 @@ export async function gaqlQuery(gaql) {
   return results
 }
 
+// ─── Mutate (campanhas, ad groups, keywords, anúncios) ───────────────────────
+// resource: 'campaigns' | 'campaignBudgets' | 'adGroups' | 'adGroupCriteria' |
+//           'adGroupAds' | 'campaignCriteria'
+// operations: array de { create | update | remove }
+
+export async function gadsMutate(resource, operations) {
+  const {
+    GOOGLE_ADS_CUSTOMER_ID,
+    GOOGLE_ADS_DEVELOPER_TOKEN,
+  } = process.env
+
+  const customerId  = GOOGLE_ADS_CUSTOMER_ID.replace(/-/g, '')
+  const accessToken = await getAccessToken()
+  const path        = `/${GADS_VERSION}/customers/${customerId}/${resource}:mutate`
+  const payload     = JSON.stringify({ operations })
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'googleads.googleapis.com',
+      path,
+      method:   'POST',
+      headers:  {
+        'Authorization':   `Bearer ${accessToken}`,
+        'developer-token':  GOOGLE_ADS_DEVELOPER_TOKEN,
+        'Content-Type':    'application/json',
+        'Content-Length':  Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => { data += c })
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data)
+          if (res.statusCode !== 200) {
+            const detail = JSON.stringify(json).slice(0, 800)
+            return reject(new Error(`Google Ads API ${res.statusCode} (${resource}): ${detail}`))
+          }
+          resolve(json)
+        } catch {
+          reject(new Error(`Resposta inválida (${resource}): ${data.slice(0, 300)}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.write(payload)
+    req.end()
+  })
+}
+
 // ─── Guard de configuração ────────────────────────────────────────────────────
 
 export function googleAdsConfigurado() {
