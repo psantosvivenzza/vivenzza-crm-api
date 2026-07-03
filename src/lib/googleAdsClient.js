@@ -58,7 +58,7 @@ async function getAccessToken() {
 // ─── Google Ads REST API v17 ──────────────────────────────────────────────────
 // Executa uma query GAQL e retorna todos os resultados (faz paginação automática).
 
-const GADS_VERSION = 'v17'
+const GADS_VERSION = 'v24'
 
 export async function gaqlQuery(gaql) {
   const {
