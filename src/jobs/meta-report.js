@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { google } from 'googleapis'
+import { gaqlQuery, googleAdsConfigurado } from '../lib/googleAdsClient.js'
 
 const {
   META_ACCESS_TOKEN,
@@ -114,6 +115,56 @@ const getAction = (actions, type) =>
 const getCost = (costs, type) =>
   costs?.find((a) => a.action_type === type)?.value ?? null
 
+// ─── Google Ads ────────────────────────────────────────────────────────────────
+
+async function fetchGoogleAdsDaily(dateLabel) {
+  if (!googleAdsConfigurado()) return null
+
+  const rows = await gaqlQuery(`
+    SELECT
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.cost_per_conversion
+    FROM campaign
+    WHERE segments.date = '${dateLabel}'
+      AND campaign.status != 'REMOVED'
+  `)
+
+  if (!rows.length) return null
+
+  const fromMicros = (v) => Number(v || 0) / 1_000_000
+  const gasto      = rows.reduce((s, r) => s + fromMicros(r.metrics.costMicros),   0)
+  const cliques    = rows.reduce((s, r) => s + Number(r.metrics.clicks       || 0), 0)
+  const impressoes = rows.reduce((s, r) => s + Number(r.metrics.impressions  || 0), 0)
+  const conversoes = rows.reduce((s, r) => s + Number(r.metrics.conversions  || 0), 0)
+  const ctr        = impressoes > 0 ? (cliques / impressoes) * 100 : 0
+  const custoConv  = conversoes > 0 ? gasto / conversoes : null
+
+  return { gasto, cliques, impressoes, ctr, conversoes, custoConv }
+}
+
+function buildGoogleAdsBlock(data, dateLabel) {
+  const sep = '━━━━━━━━━━━━━━━━━━━━━'
+  const header = `\n${sep}\n📊 *GOOGLE ADS — ${dateLabel}*\n${sep}`
+
+  if (!data) {
+    return `${header}\n🔴 Sem campanhas ativas no momento`
+  }
+
+  const { gasto, cliques, impressoes, ctr, conversoes, custoConv } = data
+  return (
+    `${header}\n` +
+    `💰 Gasto: R$ ${fmt(gasto)}\n` +
+    `👆 Cliques: ${cliques}\n` +
+    `📈 Impressões: ${impressoes}\n` +
+    `🎯 CTR: ${fmt(ctr)}%\n` +
+    `💬 Conversões: ${conversoes}\n` +
+    `💵 Custo/Conversão: R$ ${custoConv !== null ? fmt(custoConv) : '-'}`
+  )
+}
+
 // ─── Mensagem WhatsApp ────────────────────────────────────────────────────────
 
 function buildMessage(insights, statusMap, dateLabel, totalSpend) {
@@ -199,7 +250,16 @@ export async function runMetaReport({ daysAgo = 1 } = {}) {
   const sheetName = await writeToSheets(rows, dateLabel)
   console.log(`[meta-report] Planilha atualizada: aba "${sheetName}"`)
 
-  const msg = buildMessage(insights, statusMap, dateLabel, totalSpend)
+  let msg = buildMessage(insights, statusMap, dateLabel, totalSpend)
+
+  try {
+    const gadsData = await fetchGoogleAdsDaily(dateLabel)
+    msg += buildGoogleAdsBlock(gadsData, dateLabel)
+  } catch (err) {
+    console.error('[meta-report] Google Ads fetch falhou:', err.message)
+    msg += buildGoogleAdsBlock(null, dateLabel)
+  }
+
   await sendWhatsApp(msg)
   console.log(`[meta-report] WhatsApp enviado para ${WHATSAPP_REPORT_NUMBER}`)
 
