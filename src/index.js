@@ -24,6 +24,7 @@ import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
 import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
+import publicLeadsRouter from './routes/public-leads.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
@@ -49,6 +50,9 @@ app.use((req, res, next) => {
 
 // Webhook do WhatsApp — sem autenticação, registrado como rota direta
 app.post('/api/whatsapp/webhook', handleWebhook)
+
+// Leads de landing pages — sem autenticação
+app.use('/api/public/leads', publicLeadsRouter)
 
 // SDR digital (Lara) — sem autenticação, a Evolution API chama direto
 app.use('/api/sdr', sdrRouter)
