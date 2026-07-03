@@ -41,7 +41,7 @@ function requireConfig(res) {
 router.get('/resumo', async (req, res) => {
   if (requireConfig(res)) return
   try {
-    const customer = getCustomer()
+    const customer = await getCustomer()
 
     const rows = await customer.query(`
       SELECT
@@ -93,7 +93,7 @@ router.get('/resumo', async (req, res) => {
 router.get('/historico', async (req, res) => {
   if (requireConfig(res)) return
   try {
-    const customer = getCustomer()
+    const customer = await getCustomer()
 
     const rows = await customer.query(`
       SELECT

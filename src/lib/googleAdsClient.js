@@ -1,8 +1,65 @@
+import https from 'https'
 import { GoogleAdsApi } from 'google-ads-api'
 
+// ─── Token cache ──────────────────────────────────────────────────────────────
+// gaxios v6 (usado pelo google-ads-api) usa o fetch nativo (undici) para renovar
+// o token OAuth2, o que causa "Premature close" no ambiente Railway (Linux).
+// Solução: renovar o access_token manualmente via https nativo, que não usa undici,
+// e passar access_token direto ao Customer() — bypassando o fluxo gaxios/OAuth2.
+
+let _cachedToken = null
+let _tokenExpiry = 0   // timestamp ms
+
+function fetchAccessToken() {
+  const { GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_REFRESH_TOKEN } = process.env
+  const body = new URLSearchParams({
+    client_id:     GOOGLE_ADS_CLIENT_ID,
+    client_secret: GOOGLE_ADS_CLIENT_SECRET,
+    refresh_token: GOOGLE_ADS_REFRESH_TOKEN,
+    grant_type:    'refresh_token',
+  }).toString()
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'oauth2.googleapis.com',
+      path:     '/token',
+      method:   'POST',
+      headers:  {
+        'Content-Type':   'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => { data += c })
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data)
+          if (json.access_token) resolve(json)
+          else reject(new Error(`OAuth2: ${json.error} — ${json.error_description ?? data}`))
+        } catch {
+          reject(new Error(`OAuth2: resposta inválida — ${data.slice(0, 200)}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.write(body)
+    req.end()
+  })
+}
+
+// Retorna access_token válido; renova se expirar em < 60 s.
+async function getAccessToken() {
+  if (_cachedToken && Date.now() < _tokenExpiry - 60_000) {
+    return _cachedToken
+  }
+  const { access_token, expires_in } = await fetchAccessToken()
+  _cachedToken  = access_token
+  _tokenExpiry  = Date.now() + expires_in * 1000
+  console.log('[google-ads] access_token renovado, expira em', expires_in, 's')
+  return _cachedToken
+}
+
 // ─── Singleton do cliente Google Ads ─────────────────────────────────────────
-// Lazy-initialized para não explodir na inicialização caso as vars não existam.
-// Usar getCustomer() em vez de importar o cliente diretamente.
 
 let _api = null
 
@@ -16,8 +73,8 @@ function getApi() {
       )
     }
     _api = new GoogleAdsApi({
-      client_id: GOOGLE_ADS_CLIENT_ID,
-      client_secret: GOOGLE_ADS_CLIENT_SECRET,
+      client_id:       GOOGLE_ADS_CLIENT_ID,
+      client_secret:   GOOGLE_ADS_CLIENT_SECRET,
       developer_token: GOOGLE_ADS_DEVELOPER_TOKEN,
     })
   }
@@ -26,32 +83,26 @@ function getApi() {
 
 /**
  * Retorna um Customer autenticado pronto para queries GAQL.
- * customer_id  → conta de anúncios (ex: "123-456-7890")
- * login_customer_id → conta MCC (opcional; obrigatório se acessar via MCC)
+ * Usa access_token obtido via https nativo (não gaxios/undici).
  */
-export function getCustomer() {
-  const {
-    GOOGLE_ADS_CUSTOMER_ID,
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID,
-    GOOGLE_ADS_REFRESH_TOKEN,
-  } = process.env
+export async function getCustomer() {
+  const { GOOGLE_ADS_CUSTOMER_ID, GOOGLE_ADS_LOGIN_CUSTOMER_ID } = process.env
 
-  if (!GOOGLE_ADS_CUSTOMER_ID || !GOOGLE_ADS_REFRESH_TOKEN) {
-    throw new Error(
-      'Google Ads não configurado. Defina GOOGLE_ADS_CUSTOMER_ID e GOOGLE_ADS_REFRESH_TOKEN.'
-    )
+  if (!GOOGLE_ADS_CUSTOMER_ID) {
+    throw new Error('Google Ads não configurado. Defina GOOGLE_ADS_CUSTOMER_ID.')
   }
+
+  const access_token = await getAccessToken()
 
   return getApi().Customer({
     customer_id: GOOGLE_ADS_CUSTOMER_ID,
     ...(GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { login_customer_id: GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}),
-    refresh_token: GOOGLE_ADS_REFRESH_TOKEN,
+    access_token,
   })
 }
 
 /**
  * Retorna true se todas as variáveis obrigatórias estão definidas.
- * Útil para exibir estado "não configurado" no frontend sem lançar erro.
  */
 export function googleAdsConfigurado() {
   const {
