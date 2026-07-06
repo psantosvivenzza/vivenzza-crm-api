@@ -106,10 +106,10 @@ router.get('/media/:evolution_id', async (req, res) => {
 
 // GET /api/whatsapp/nao-lidas — contagem de mensagens entrada por lead (últimos 7 dias)
 // DEVE vir antes de /:lead_id
+// Usa RPC get_nao_lidas() para agregar no banco em vez de buscar todas as linhas —
+// reduz de ~2400 linhas / ~2 MB para ~400 linhas de resultado.
 router.get('/nao-lidas', async (req, res) => {
   try {
-    const desde = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-
     let leadIds = null
     if (req.user.role === 'vendedor') {
       const { data: meusLeads } = await supabase
@@ -120,32 +120,12 @@ router.get('/nao-lidas', async (req, res) => {
       if (leadIds.length === 0) return res.json({ data: [] })
     }
 
-    let query = supabase
-      .from('whatsapp_mensagens')
-      .select('lead_id, created_at, mensagem')
-      .eq('direcao', 'entrada')
-      .gte('created_at', desde)
-      .order('created_at', { ascending: false })
-
-    if (leadIds) query = query.in('lead_id', leadIds)
-
-    const { data, error } = await query
+    const { data, error } = await supabase.rpc('get_nao_lidas', {
+      p_lead_ids: leadIds ?? null,
+    })
     if (error) throw error
 
-    const porLead = {}
-    for (const msg of data || []) {
-      if (!porLead[msg.lead_id]) {
-        porLead[msg.lead_id] = {
-          lead_id: msg.lead_id,
-          count: 0,
-          last_at: msg.created_at,
-          preview: msg.mensagem?.slice(0, 60) || '',
-        }
-      }
-      porLead[msg.lead_id].count++
-    }
-
-    res.json({ data: Object.values(porLead) })
+    res.json({ data: data || [] })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
