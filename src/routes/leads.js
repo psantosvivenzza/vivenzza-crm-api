@@ -52,6 +52,10 @@ router.get('/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
 
+    if (req.user.role === 'vendedor' && data.responsavel_id !== req.user.id) {
+      return res.status(403).json({ erro: 'Sem permissão para acessar este lead' })
+    }
+
     res.json(data)
   } catch (err) {
     res.status(500).json({ erro: err.message })
@@ -96,6 +100,13 @@ router.post('/', async (req, res) => {
 // PUT /api/leads/:id — atualizar
 router.put('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', req.params.id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar este lead' })
+      }
+    }
+
     const campos = req.body
     delete campos.id
     delete campos.created_at
@@ -133,6 +144,13 @@ router.put('/:id', async (req, res) => {
 // PUT /api/leads/:id/etapa — mover no pipeline
 router.put('/:id/etapa', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', req.params.id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para mover este lead' })
+      }
+    }
+
     const { etapa } = req.body
 
     const etapasValidas = ['novo', 'contato', 'proposta', 'negociacao', 'fechado', 'perdido']
@@ -162,9 +180,13 @@ router.put('/:id/etapa', async (req, res) => {
   }
 })
 
-// DELETE /api/leads/:id — remover
+// DELETE /api/leads/:id — remover (admin only)
 router.delete('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      return res.status(403).json({ erro: 'Apenas administradores podem remover leads' })
+    }
+
     const { error } = await supabase
       .from('leads')
       .delete()

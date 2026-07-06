@@ -1,6 +1,8 @@
 import { supabase } from '../lib/supabase.js'
 
-const TABELAS = ['leads', 'usuarios', 'tarefas', 'contatos', 'pedidos', 'whatsapp_mensagens']
+// whatsapp_mensagens excluída do backup completo: pode ter centenas de milhares de
+// linhas e causar OOM. O Supabase já tem redundância própria para essa tabela.
+const TABELAS = ['leads', 'usuarios', 'tarefas', 'contatos', 'pedidos']
 const MANTER_DIAS = 30
 
 async function fetchAll(tabela) {

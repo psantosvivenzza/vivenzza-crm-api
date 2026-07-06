@@ -873,14 +873,25 @@ async function processarLara(event) {
     estado,
   }))
 
-  const claudeResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia),
-    messages: messagesParaClaude,
-  })
-
-  const claudeRawText = claudeResponse.content[0]?.text || ''
+  let claudeRawText
+  try {
+    const claudeResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia),
+      messages: messagesParaClaude,
+    })
+    claudeRawText = claudeResponse.content[0]?.text || ''
+  } catch (anthropicErr) {
+    console.error('[sdr] Claude indisponível:', anthropicErr.message)
+    try {
+      await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+        number: telefone,
+        text: 'Oi! Recebi sua mensagem 😊 Nossa equipe vai entrar em contato em breve.',
+      })
+    } catch {}
+    return null
+  }
   const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia })
 
   // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword

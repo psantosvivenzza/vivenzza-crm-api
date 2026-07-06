@@ -211,11 +211,21 @@ export async function verificarElegiveis() {
 
   // status_atendimento mora em sdr_conversas (por telefone), não em leads — filtra
   // fora qualquer lead que o vendedor já assumiu manualmente.
-  const elegiveis = []
-  for (const lead of candidatos || []) {
-    const statusAtendimento = await statusAtendimentoDoLead(lead.telefone)
-    if (statusAtendimento !== 'vendedor_assumiu') elegiveis.push(lead)
+  // Batch único em vez de N queries (uma por lead) — resolve N+1.
+  const todosTelefones = (candidatos || []).flatMap(lead => candidatosParaSdrConversas(lead.telefone))
+  const { data: conversasBatch } = todosTelefones.length
+    ? await supabase.from('sdr_conversas').select('telefone, status_atendimento').in('telefone', todosTelefones)
+    : { data: [] }
+
+  const conversasMap = {}
+  for (const c of conversasBatch || []) {
+    conversasMap[c.telefone] = c.status_atendimento
   }
+
+  const elegiveis = (candidatos || []).filter(lead => {
+    const candidatosTel = candidatosParaSdrConversas(lead.telefone)
+    return !candidatosTel.some(t => conversasMap[t] === 'vendedor_assumiu')
+  })
 
   await incrementarMetrica('elegiveis', elegiveis.length)
   console.log(`[reativacao] ${elegiveis.length} leads elegíveis hoje`)

@@ -57,6 +57,10 @@ router.get('/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Tarefa não encontrada' })
 
+    if (req.user.role === 'vendedor' && data.responsavel_id !== req.user.id) {
+      return res.status(403).json({ erro: 'Sem permissão para acessar esta tarefa' })
+    }
+
     res.json(data)
   } catch (err) {
     res.status(500).json({ erro: err.message })
@@ -98,6 +102,13 @@ router.post('/', async (req, res) => {
 // PATCH /api/tarefas/:id — atualização parcial (ex: marcar concluída)
 router.patch('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: t } = await supabase.from('tarefas').select('responsavel_id').eq('id', req.params.id).single()
+      if (!t || t.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar esta tarefa' })
+      }
+    }
+
     const campos = { ...req.body }
     delete campos.id
     delete campos.criado_em
@@ -122,6 +133,13 @@ router.patch('/:id', async (req, res) => {
 // PUT /api/tarefas/:id — atualização completa
 router.put('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: t } = await supabase.from('tarefas').select('responsavel_id').eq('id', req.params.id).single()
+      if (!t || t.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar esta tarefa' })
+      }
+    }
+
     const campos = { ...req.body }
     delete campos.id
     delete campos.criado_em
@@ -146,6 +164,13 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/tarefas/:id
 router.delete('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: t } = await supabase.from('tarefas').select('responsavel_id').eq('id', req.params.id).single()
+      if (!t || t.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para remover esta tarefa' })
+      }
+    }
+
     const { error } = await supabase
       .from('tarefas')
       .delete()

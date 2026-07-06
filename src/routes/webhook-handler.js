@@ -194,31 +194,12 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
 }
 
 async function proximoVendedor() {
-  const { data: vendedores } = await supabase
-    .from('usuarios')
-    .select('id, nome')
-    .eq('role', 'vendedor')
-    .eq('ativo', true)
-    .order('nome', { ascending: true })
-
-  if (!vendedores || vendedores.length === 0) return null
-
-  const { data: fila } = await supabase
-    .from('distribuicao_leads')
-    .select('ultimo_vendedor_id')
-    .eq('id', 1)
-    .single()
-
-  const ultimoId = fila?.ultimo_vendedor_id ?? null
-  const idx = vendedores.findIndex(v => v.id === ultimoId)
-  const proximo = vendedores[(idx + 1) % vendedores.length]
-
-  await supabase
-    .from('distribuicao_leads')
-    .update({ ultimo_vendedor_id: proximo.id, updated_at: new Date().toISOString() })
-    .eq('id', 1)
-
-  return proximo
+  const { data, error } = await supabase.rpc('proximo_vendedor_atomic')
+  if (error) {
+    console.error('[webhook] proximoVendedor RPC erro:', error.message)
+    return null
+  }
+  return data?.[0] ?? null
 }
 
 // Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser
