@@ -10,6 +10,7 @@ import leadsRouter from './routes/leads.js'
 import contatosRouter from './routes/contatos.js'
 import whatsappRouter from './routes/whatsapp.js'
 import handleWebhook from './routes/webhook-handler.js'
+import { webhookAuth } from './middleware/webhookAuth.js'
 import produtosRouter from './routes/produtos.js'
 import pedidosRouter from './routes/pedidos.js'
 import tarefasRouter from './routes/tarefas.js'
@@ -52,8 +53,8 @@ app.use((req, res, next) => {
   next()
 })
 
-// Webhook do WhatsApp — sem autenticação, registrado como rota direta
-app.post('/api/whatsapp/webhook', handleWebhook)
+// Webhook do WhatsApp — autenticado via x-webhook-token (S1-2)
+app.post('/api/whatsapp/webhook', webhookAuth, handleWebhook)
 
 // Rate limit na rota pública: máx 10 submissões por IP a cada 15 min
 const publicLeadsLimit = rateLimit({

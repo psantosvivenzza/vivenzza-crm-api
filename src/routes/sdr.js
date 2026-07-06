@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
+import { webhookAuth } from '../middleware/webhookAuth.js'
 
 const router = Router()
 
@@ -1024,7 +1025,7 @@ async function processarLara(event) {
 // (leads no Pipeline, histórico no chat das vendedoras) continua processando
 // o mesmo payload normalmente — inclusive os eventos fromMe/status, que a
 // Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
-router.post('/webhook', async (req, res) => {
+router.post('/webhook', webhookAuth, async (req, res) => {
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
 
   // messages.update é só confirmação de entrega/leitura (✓✓) — pode chegar às dezenas
