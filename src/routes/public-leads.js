@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { normalizarTelefone } from '../lib/telefone.js'
+import { enviarLeadCAPI } from '../lib/capi.js'
 
 const router = Router()
 
@@ -17,7 +18,7 @@ function resolverOrigem(campanha_origem) {
 
 router.post('/', async (req, res) => {
   try {
-    const { nome, telefone, cidade, interesse, campanha_origem } = req.body
+    const { nome, telefone, cidade, interesse, campanha_origem, event_id, event_source_url } = req.body
 
     if (!nome?.trim())     return res.status(400).json({ erro: 'Nome é obrigatório' })
     if (!telefone?.trim()) return res.status(400).json({ erro: 'WhatsApp é obrigatório' })
@@ -55,6 +56,18 @@ router.post('/', async (req, res) => {
         principal: true,
       })
     }
+
+    // CAPI server-side: fire-and-forget — não bloqueia a resposta ao usuário
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip
+    const userAgent = req.headers['user-agent'] || ''
+    enviarLeadCAPI({
+      event_id,
+      event_source_url,
+      telefone: telefoneNormalizado,
+      email: req.body.email || null,
+      client_ip: clientIp,
+      user_agent: userAgent,
+    }).catch(() => {})
 
     res.status(201).json({ ok: true })
   } catch (err) {
