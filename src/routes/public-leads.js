@@ -6,9 +6,18 @@ const router = Router()
 
 // POST /api/public/leads — criação pública de lead (sem autenticação)
 // Usado pela landing page vivenzza-distribuidores.netlify.app
+// Mapeia campanha_origem (valor livre da UTM) para o enum permitido em leads.origem
+function resolverOrigem(campanha_origem) {
+  if (!campanha_origem) return 'site'
+  const c = campanha_origem.toLowerCase()
+  if (c.startsWith('meta_') || c === 'meta_ads') return 'whatsapp'
+  if (c === 'instagram') return 'instagram'
+  return 'site'
+}
+
 router.post('/', async (req, res) => {
   try {
-    const { nome, telefone, cidade, interesse } = req.body
+    const { nome, telefone, cidade, interesse, campanha_origem } = req.body
 
     if (!nome?.trim())     return res.status(400).json({ erro: 'Nome é obrigatório' })
     if (!telefone?.trim()) return res.status(400).json({ erro: 'WhatsApp é obrigatório' })
@@ -24,13 +33,14 @@ router.post('/', async (req, res) => {
     const { data: lead, error } = await supabase
       .from('leads')
       .insert({
-        nome:           nome.trim(),
-        telefone:       telefoneNormalizado,
+        nome:             nome.trim(),
+        telefone:         telefoneNormalizado,
         observacoes,
-        tipo:           'B2B',
-        etapa:          'novo',
-        origem:         'google_ads_search',
-        responsavel_id: null,
+        tipo:             'B2B',
+        etapa:            'novo',
+        origem:           resolverOrigem(campanha_origem),
+        campanha_origem:  campanha_origem || 'landing_direto',
+        responsavel_id:   null,
       })
       .select('id')
       .single()
