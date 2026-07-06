@@ -331,8 +331,11 @@ export async function processWhatsappEvent(payload) {
       media_data: mediaData,
     })
 
-    // Fire-and-forget: baixa mídia e salva no Supabase Storage
-    if (mediaTipo && evolutionId && !fromMe) {
+    // Fire-and-forget: baixa mídia e salva no Supabase Storage.
+    // Inclui fromMe=true (mensagens da Ana enviadas do celular) — a função já verifica
+    // internamente se há mediaKey; se não houver (mensagens enviadas pela API do CRM),
+    // ela retorna sem fazer nada.
+    if (mediaTipo && evolutionId) {
       baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
     }
 

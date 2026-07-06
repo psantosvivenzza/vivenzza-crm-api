@@ -249,7 +249,7 @@ router.get('/:lead_id', async (req, res) => {
 // POST /api/whatsapp/enviar-audio — enviar áudio (PTT) via Evolution API
 router.post('/enviar-audio', async (req, res) => {
   try {
-    const { lead_id, numero, telefone, audio } = req.body
+    const { lead_id, numero, telefone, audio, mimeType } = req.body
     const destino = numero || telefone
     if (!destino || !audio) {
       return res.status(400).json({ erro: 'Campos "numero" e "audio" são obrigatórios' })
@@ -269,14 +269,18 @@ router.post('/enviar-audio', async (req, res) => {
     const evolutionId = envio?.key?.id ?? null
     let mediaUrl = null
 
-    // Salva o áudio enviado no Supabase Storage para exibir player imediatamente
+    // Salva o áudio enviado no Supabase Storage para exibir player imediatamente.
+    // Usa o mimeType enviado pelo cliente (ex: audio/webm, audio/ogg) para garantir
+    // que o Content-Type no Storage corresponda ao formato real do arquivo.
     if (audio && evolutionId) {
       try {
         const buffer = Buffer.from(audio, 'base64')
-        const path = `audio/${evolutionId}.ogg`
+        const contentType = mimeType || 'audio/webm'
+        const ext = contentType.startsWith('audio/ogg') ? 'ogg' : 'webm'
+        const path = `audio/${evolutionId}.${ext}`
         const { error: uploadError } = await supabase.storage
           .from('whatsapp-media')
-          .upload(path, buffer, { contentType: 'audio/ogg; codecs=opus', upsert: true })
+          .upload(path, buffer, { contentType, upsert: true })
         if (!uploadError) {
           const { data: { publicUrl } } = supabase.storage.from('whatsapp-media').getPublicUrl(path)
           mediaUrl = publicUrl
