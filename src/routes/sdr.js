@@ -1053,9 +1053,10 @@ router.post('/webhook', webhookAuth, async (req, res) => {
     console.error('[sdr] erro ao repassar para o fluxo humano:', err.message)
   }
 
-  // Tagueia o lead (já criado pelo fluxo humano acima) com o perfil identificado
-  // pela Lara, sem sobrescrever um "tipo" já preenchido manualmente.
-  if (resultadoLara?.parsed?.tipo_lead && resultadoLara.parsed.tipo_lead !== 'indefinido') {
+  // Tagueia o lead com o perfil identificado pela Lara.
+  // 'indefinido' também é propagado: garante que nenhum lead fica com tipo=null
+  // após a primeira resposta da Lara — fica visível na fila de revisão do CRM.
+  if (resultadoLara?.parsed?.tipo_lead) {
     try {
       const candidatos = candidatosTelefone(resultadoLara.telefone)
       await supabase
