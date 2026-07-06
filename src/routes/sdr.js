@@ -806,7 +806,7 @@ async function processarLara(event) {
     Date.now() - new Date(ultimaEntrada.timestamp).getTime() < 5 * 60 * 1000
   ) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-10)
+    let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       {
@@ -826,7 +826,7 @@ async function processarLara(event) {
   const ultimoProcessamento = ultimoProcessamentoPorTelefone.get(telefoneConversa)
   if (ultimoProcessamento && Date.now() - ultimoProcessamento < RATE_LIMIT_MS) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-10)
+    let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       { telefone: telefoneConversa, historico: historicoParaSalvar, ultimo_contato: new Date().toISOString() },
@@ -843,7 +843,7 @@ async function processarLara(event) {
 
   if (dentroDoHorario) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-10)
+    let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
     await supabase.from('sdr_conversas').upsert(
       {
@@ -861,7 +861,7 @@ async function processarLara(event) {
   // Se o vendedor havia assumido, Lara retoma o controle até o próximo horário comercial.
   const statusAtendimento = conversa?.status_atendimento || 'ia_atendendo'
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-  let historicoRecente = historico.slice(-10)
+  let historicoRecente = historico.slice(-20)
   if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
 
   // A API da Anthropic exige alternância estrita user/assistant. Se o rate-limit ou o

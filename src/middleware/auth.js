@@ -1,11 +1,6 @@
 import jwt from 'jsonwebtoken'
 
 export const auth = (req, res, next) => {
-  if (process.env.SKIP_AUTH === 'true') {
-    req.user = { id: 'dev-user', email: 'dev@vivenzza.com.br', role: 'admin' }
-    return next()
-  }
-
   const authHeader = req.headers.authorization
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ erro: 'Token de autenticação não fornecido' })

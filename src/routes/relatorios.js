@@ -10,7 +10,7 @@ router.get('/', adminOnly, async (req, res) => {
     trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30)
 
     const [leadsRes, leadsRecentesRes] = await Promise.all([
-      supabase.from('leads').select('responsavel_id, etapa, valor_negociacao, origem, usuarios(nome)'),
+      supabase.from('leads').select('responsavel_id, etapa, valor_negociacao, origem, usuarios(nome)').gte('created_at', trintaDiasAtras.toISOString()),
       supabase.from('leads').select('created_at').gte('created_at', trintaDiasAtras.toISOString()),
     ])
 
