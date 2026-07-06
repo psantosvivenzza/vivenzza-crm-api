@@ -761,6 +761,16 @@ async function processarLara(event) {
   // sem o 9º dígito após um período sem contato). Um .eq() exato perdia o histórico
   // nesse caso e a Lara reiniciava a conversa do zero.
   const candidatosConversa = candidatosTelefone(telefone)
+
+  // S1-4: Se a vendedora assumiu o atendimento, Lara não responde nem faz follow-up.
+  const { data: leadsHandoff } = await supabase
+    .from('leads')
+    .select('id')
+    .in('telefone', candidatosConversa)
+    .eq('atendimento_humano', true)
+    .limit(1)
+  if (leadsHandoff && leadsHandoff.length > 0) return null
+
   const { data: conversasExistentes } = await supabase
     .from('sdr_conversas')
     .select('*')

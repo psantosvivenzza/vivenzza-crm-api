@@ -29,6 +29,7 @@ import publicLeadsRouter from './routes/public-leads.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
+import { runHandoffAlerta } from './jobs/handoff-alerta.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -142,5 +143,15 @@ cron.schedule('0 10 * * *', async () => {
     await runMetaReport()
   } catch (err) {
     console.error('[cron meta-report] Erro:', err.message)
+  }
+})
+
+// Alerta de handoff abandonado — a cada hora, verifica leads com atendimento_humano=true
+// sem mensagem de saída há 48h (alerta para vendedora) ou 72h (escala para Peterson)
+cron.schedule('0 * * * *', async () => {
+  try {
+    await runHandoffAlerta()
+  } catch (err) {
+    console.error('[cron handoff-alerta] Erro:', err.message)
   }
 })

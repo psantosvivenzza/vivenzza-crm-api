@@ -192,7 +192,7 @@ router.get('/:lead_id', async (req, res) => {
         .eq('lead_id', lead_id)
         .order('created_at', { ascending: false })
         .range(offset, offset + limitNum - 1),
-      supabase.from('leads').select('telefone').eq('id', lead_id).single(),
+      supabase.from('leads').select('telefone, atendimento_humano').eq('id', lead_id).single(),
     ])
 
     if (error) throw error
@@ -221,7 +221,7 @@ router.get('/:lead_id', async (req, res) => {
       status_atendimento = conversas?.[0]?.status_atendimento ?? null
     }
 
-    res.json({ data: ordenado, total: count, page: Number(page), limit: limitNum, status_atendimento })
+    res.json({ data: ordenado, total: count, page: Number(page), limit: limitNum, status_atendimento, atendimento_humano: lead?.atendimento_humano ?? false })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -246,6 +246,10 @@ router.post('/enviar-audio', async (req, res) => {
     })
 
     await marcarVendedorAssumiu(numero_limpo)
+
+    if (lead_id) {
+      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
+    }
 
     const evolutionId = envio?.key?.id ?? null
     let mediaUrl = null
@@ -315,6 +319,10 @@ router.post('/enviar-midia', async (req, res) => {
 
     await marcarVendedorAssumiu(numero_limpo)
 
+    if (lead_id) {
+      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
+    }
+
     const evolutionId = envio?.key?.id ?? null
     const tipoMap = { image: 'image', video: 'video', document: 'document' }
     const labelMap = { image: '[imagem]', video: '[vídeo]' }
@@ -382,6 +390,10 @@ router.post('/enviar', async (req, res) => {
     })
 
     await marcarVendedorAssumiu(numero_limpo)
+
+    if (lead_id) {
+      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
+    }
 
     if (lead_id) {
       await supabase.from('whatsapp_mensagens').insert({

@@ -180,6 +180,32 @@ router.put('/:id/etapa', async (req, res) => {
   }
 })
 
+// PUT /api/leads/:id/devolver-lara — devolve o lead para Lara (atendimento_humano = false)
+router.put('/:id/devolver-lara', async (req, res) => {
+  try {
+    if (req.user.role === 'vendedor') {
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', req.params.id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar este lead' })
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('leads')
+      .update({ atendimento_humano: false, handoff_alerta_nivel: 0, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single()
+
+    if (error) throw error
+    if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
+
+    res.json({ sucesso: true, lead: data })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // DELETE /api/leads/:id — remover (admin only)
 router.delete('/:id', async (req, res) => {
   try {

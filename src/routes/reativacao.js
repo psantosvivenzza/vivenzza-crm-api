@@ -202,6 +202,7 @@ export async function verificarElegiveis() {
     .not('telefone', 'is', null)
     .neq('telefone', '')
     .in('tipo', TIPOS_ELEGIVEIS)
+    .eq('atendimento_humano', false)
     .or(`ultimo_followup_automatico.is.null,ultimo_followup_automatico.lte.${limiteFollowup}`)
 
   if (error) {
