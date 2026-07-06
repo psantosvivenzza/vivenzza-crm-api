@@ -30,6 +30,8 @@ import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
 import { runHandoffAlerta } from './jobs/handoff-alerta.js'
+import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
+import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -87,6 +89,7 @@ app.use('/api/relatorios', auth, relatoriosRouter)
 app.use('/api/admin', auth, adminRouter)
 app.use('/api/admin/campanhas', auth, adminOnly, campanhasRouter)
 app.use('/api/admin/google-ads', auth, adminOnly, googleAdsRouter)
+app.use('/api/admin/evolution-health', auth, adminOnly, evolutionHealthRouter)
 app.use('/api/ligacoes', auth, ligacoesRouter)
 app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
@@ -153,5 +156,14 @@ cron.schedule('0 * * * *', async () => {
     await runHandoffAlerta()
   } catch (err) {
     console.error('[cron handoff-alerta] Erro:', err.message)
+  }
+})
+
+// Monitoramento de saúde da Evolution API — a cada 15 min
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    await runEvolutionHealthCheck()
+  } catch (err) {
+    console.error('[cron evolution-health] Erro:', err.message)
   }
 })
