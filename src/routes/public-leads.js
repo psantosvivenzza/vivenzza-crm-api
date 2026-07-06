@@ -36,7 +36,7 @@ router.post('/', async (req, res) => {
         nome:             nome.trim(),
         telefone:         telefoneNormalizado,
         observacoes,
-        tipo:             'B2B',
+        tipo:             'distribuidor',
         etapa:            'novo',
         origem:           resolverOrigem(campanha_origem),
         campanha_origem:  campanha_origem || 'landing_direto',
