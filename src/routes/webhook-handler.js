@@ -237,7 +237,10 @@ export async function processWhatsappEvent(payload) {
 
     const fromMe = msg.key?.fromMe === true
     const remoteJid = msg.key?.remoteJid ?? ''
-    const telefone = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '')
+    const realJid = (remoteJid.endsWith('@lid') && msg.key?.remoteJidAlt)
+      ? msg.key.remoteJidAlt
+      : remoteJid
+    const telefone = realJid.replace('@s.whatsapp.net', '').replace('@lid', '')
 
     // Mensagens efêmeras ("apagar após visualização") e de visualização única embrulham
     // o conteúdo real um nível mais profundo — sem isso, a mídia/texto real nunca é

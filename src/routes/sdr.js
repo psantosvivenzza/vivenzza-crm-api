@@ -707,7 +707,11 @@ async function processarLara(event) {
   const msg = Array.isArray(event.data) ? event.data[0] : event.data
   if (!msg || msg.key?.fromMe) return null
 
-  const telefone = msg.key?.remoteJid?.replace('@s.whatsapp.net', '').replace('@lid', '')
+  const remoteJidSdr = msg.key?.remoteJid ?? ''
+  const realJidSdr = (remoteJidSdr.endsWith('@lid') && msg.key?.remoteJidAlt)
+    ? msg.key.remoteJidAlt
+    : remoteJidSdr
+  const telefone = realJidSdr.replace('@s.whatsapp.net', '').replace('@lid', '')
   if (!telefone) return null
 
   // Interruptor geral da Lara, controlado pela página /automacoes — quando desativado,

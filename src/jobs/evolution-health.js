@@ -52,17 +52,17 @@ export async function runEvolutionHealthCheck() {
     // Evolution API v2 retorna array. Cada item tem instance.instanceName e instance.connectionStatus
     const lista = Array.isArray(instancias) ? instancias : Object.values(instancias || {})
     const instancia = lista.find(
-      (i) => (i.instance?.instanceName || i.instanceName) === INSTANCE
+      (i) => (i.name || i.instance?.instanceName || i.instanceName) === INSTANCE
     )
 
-    const connStatus = instancia?.instance?.connectionStatus
+    const connStatus = instancia?.connectionStatus
+      || instancia?.instance?.connectionStatus
       || instancia?.instance?.status
-      || instancia?.connectionStatus
       || instancia?.status
       || 'unknown'
 
     status = connStatus === 'open' ? 'open' : connStatus
-    detalhes = { instanceName: instancia?.instance?.instanceName || INSTANCE, raw_status: connStatus }
+    detalhes = { instanceName: instancia?.name || instancia?.instance?.instanceName || INSTANCE, raw_status: connStatus }
 
   } catch (err) {
     latencia = Date.now() - inicio
