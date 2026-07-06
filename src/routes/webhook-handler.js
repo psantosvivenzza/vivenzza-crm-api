@@ -4,7 +4,7 @@ import { candidatosTelefone } from '../lib/telefone.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
-const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'vivenzza2026'
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
 const evolutionApi = axios.create({
@@ -320,7 +320,7 @@ export async function processWhatsappEvent(payload) {
 
     const evolutionId = msg.key?.id ?? null
 
-    await supabase.from('whatsapp_mensagens').insert({
+    await supabase.from('whatsapp_mensagens').upsert({
       lead_id: lead?.id ?? null,
       mensagem: texto,
       direcao,
@@ -329,7 +329,7 @@ export async function processWhatsappEvent(payload) {
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_data: mediaData,
-    })
+    }, { onConflict: 'evolution_id', ignoreDuplicates: true })
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.
     // Inclui fromMe=true (mensagens da Ana enviadas do celular) — a função já verifica

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { supabase } from '../lib/supabase.js'
+import { auth } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -50,7 +51,7 @@ router.post('/login', async (req, res) => {
 })
 
 // GET /api/auth/me — retorna o usuário logado
-router.get('/me', async (req, res) => {
+router.get('/me', auth, async (req, res) => {
   res.json({ usuario: req.user })
 })
 

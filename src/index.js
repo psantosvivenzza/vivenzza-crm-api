@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import express from 'express'
+import rateLimit from 'express-rate-limit'
 import { corsMiddleware } from './middleware/cors.js'
 import { auth, adminOnly } from './middleware/auth.js'
 
@@ -51,8 +52,17 @@ app.use((req, res, next) => {
 // Webhook do WhatsApp — sem autenticação, registrado como rota direta
 app.post('/api/whatsapp/webhook', handleWebhook)
 
+// Rate limit na rota pública: máx 10 submissões por IP a cada 15 min
+const publicLeadsLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { erro: 'Muitas tentativas. Aguarde alguns minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
 // Leads de landing pages — sem autenticação
-app.use('/api/public/leads', publicLeadsRouter)
+app.use('/api/public/leads', publicLeadsLimit, publicLeadsRouter)
 
 // SDR digital (Lara) — sem autenticação, a Evolution API chama direto
 app.use('/api/sdr', sdrRouter)

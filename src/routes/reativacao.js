@@ -8,7 +8,7 @@ import { marcarVendedorAssumiu } from '../lib/sdrConversas.js'
 const router = Router()
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
-const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'vivenzza2026'
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
 const evolutionApi = axios.create({

@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone } from '../lib/telefone.js'
+import { auth } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -580,7 +581,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
 }
 
 // GET /api/sdr/estado/:telefone — estado atual da conversa
-router.get('/estado/:telefone', async (req, res) => {
+router.get('/estado/:telefone', auth, async (req, res) => {
   try {
     const { telefone } = req.params
     const { data, error } = await supabase
@@ -599,7 +600,7 @@ router.get('/estado/:telefone', async (req, res) => {
 })
 
 // POST /api/sdr/estado — salvar estado da conversa
-router.post('/estado', async (req, res) => {
+router.post('/estado', auth, async (req, res) => {
   try {
     const { telefone, estado, tipo_lead, historico, nome_cliente } = req.body
     const { data, error } = await supabase
