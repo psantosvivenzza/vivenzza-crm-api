@@ -26,6 +26,7 @@ import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
 import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
+import erpRouter from './routes/erp.js'
 import publicLeadsRouter from './routes/public-leads.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
@@ -94,6 +95,7 @@ app.use('/api/admin/evolution-health', auth, adminOnly, evolutionHealthRouter)
 app.use('/api/ligacoes', auth, ligacoesRouter)
 app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
+app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 
 // Health check
 app.get('/health', (req, res) => {
