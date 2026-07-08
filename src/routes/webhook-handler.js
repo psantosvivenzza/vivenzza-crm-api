@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
 import { candidatosTelefone } from '../lib/telefone.js'
+import { proximoVendedor } from '../lib/distribuicao.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
@@ -191,15 +192,6 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
   } catch (err) {
     console.error('[webhook] erro ao baixar mídia:', evolutionId, '|', err.message)
   }
-}
-
-async function proximoVendedor() {
-  const { data, error } = await supabase.rpc('proximo_vendedor_atomic')
-  if (error) {
-    console.error('[webhook] proximoVendedor RPC erro:', error.message)
-    return null
-  }
-  return data?.[0] ?? null
 }
 
 // Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { normalizarTelefone } from '../lib/telefone.js'
 import { enviarLeadCAPI } from '../lib/capi.js'
+import { proximoVendedor } from '../lib/distribuicao.js'
 
 const router = Router()
 
@@ -47,6 +48,22 @@ router.post('/', async (req, res) => {
       .single()
 
     if (error) throw error
+
+    // Distribuição automática por rodízio — mesmo mecanismo usado nos leads
+    // via WhatsApp (proximo_vendedor_atomic). O formulário público não tinha
+    // isso; leads caíam sem responsavel_id e não apareciam pra ninguém.
+    const vendedor = await proximoVendedor()
+    if (vendedor) {
+      const { error: erroAtribuicao } = await supabase
+        .from('leads')
+        .update({ responsavel_id: vendedor.id })
+        .eq('id', lead.id)
+      if (erroAtribuicao) {
+        console.error('[public/leads] erro ao atribuir responsavel_id:', erroAtribuicao.message)
+      }
+    } else {
+      console.error('[public/leads] sem vendedor ativo disponível para distribuição — lead', lead.id, 'ficou sem responsavel_id')
+    }
 
     if (telefoneNormalizado) {
       await supabase.from('contatos').insert({
