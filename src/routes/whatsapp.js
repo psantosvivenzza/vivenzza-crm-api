@@ -206,7 +206,10 @@ router.get('/:lead_id', async (req, res) => {
     // de 9º dígito, senão a variante "55"+telefone-como-está nunca é testada.
     let status_atendimento = null
     if (lead?.telefone) {
-      const semPrefixo = lead.telefone.replace(/^55/, '')
+      // Mesma regra de candidatosTelefone(): só é código de país com 12+ dígitos — com 10/11
+      // dígitos "55" inicial é o próprio DDD (Caxias do Sul/RS) e não deve ser removido.
+      const temCodigoPais = lead.telefone.length >= 12 && lead.telefone.startsWith('55')
+      const semPrefixo = temCodigoPais ? lead.telefone.replace(/^55/, '') : lead.telefone
       const com9 = semPrefixo.length === 10 ? semPrefixo.slice(0, 2) + '9' + semPrefixo.slice(2) : null
       const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
       const locais = [semPrefixo, com9, sem9].filter(Boolean)
@@ -237,7 +240,7 @@ router.post('/enviar-audio', async (req, res) => {
     }
 
     let numero_limpo = destino.replace(/\D/g, '')
-    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
+    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
 
     const { data: envio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${INSTANCE}`, {
       number: numero_limpo,
@@ -306,7 +309,7 @@ router.post('/enviar-midia', async (req, res) => {
     }
 
     let numero_limpo = destino.replace(/\D/g, '')
-    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
+    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
 
     const { data: envio } = await evolutionApi.post(`/message/sendMedia/${INSTANCE}`, {
       number: numero_limpo,
@@ -382,7 +385,7 @@ router.post('/enviar', async (req, res) => {
     }
 
     let numero_limpo = destino.replace(/\D/g, '')
-    if (!numero_limpo.startsWith('55')) numero_limpo = '55' + numero_limpo
+    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
       number: numero_limpo,

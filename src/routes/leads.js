@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { query as dbQuery } from '../lib/db.js'
-import { normalizarTelefone } from '../lib/telefone.js'
+import { normalizarTelefone, candidatosTelefone } from '../lib/telefone.js'
 
 const router = Router()
 
@@ -73,6 +73,24 @@ router.post('/', async (req, res) => {
     // as variações geradas por candidatosTelefone, e o webhook acabava criando um lead
     // duplicado quando o cliente respondia pelo WhatsApp.
     const telefoneNormalizado = normalizarTelefone(telefone)
+
+    // Sem constraint UNIQUE no banco, um telefone repetido era inserido sem aviso — a
+    // vendedora não tinha como saber que já existia lead pra esse número.
+    if (telefoneNormalizado) {
+      const { data: existente } = await supabase
+        .from('leads')
+        .select('id, nome')
+        .in('telefone', candidatosTelefone(telefoneNormalizado))
+        .limit(1)
+        .maybeSingle()
+
+      if (existente) {
+        return res.status(409).json({
+          erro: `Já existe um lead com esse telefone: "${existente.nome}".`,
+          lead_id: existente.id,
+        })
+      }
+    }
 
     const { data: lead, error: leadError } = await supabase
       .from('leads')
