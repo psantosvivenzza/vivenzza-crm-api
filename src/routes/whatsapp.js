@@ -2,6 +2,7 @@ import { Router } from 'express'
 import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
 import { marcarVendedorAssumiu } from './sdr.js'
+import { paraJidWhatsapp } from '../lib/telefone.js'
 
 const router = Router()
 
@@ -239,8 +240,7 @@ router.post('/enviar-audio', async (req, res) => {
       return res.status(400).json({ erro: 'Campos "numero" e "audio" são obrigatórios' })
     }
 
-    let numero_limpo = destino.replace(/\D/g, '')
-    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
+    const numero_limpo = paraJidWhatsapp(destino)
 
     const { data: envio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${INSTANCE}`, {
       number: numero_limpo,
@@ -308,8 +308,7 @@ router.post('/enviar-midia', async (req, res) => {
       return res.status(400).json({ erro: 'Campos "numero" e "media" são obrigatórios' })
     }
 
-    let numero_limpo = destino.replace(/\D/g, '')
-    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
+    const numero_limpo = paraJidWhatsapp(destino)
 
     const { data: envio } = await evolutionApi.post(`/message/sendMedia/${INSTANCE}`, {
       number: numero_limpo,
@@ -384,8 +383,7 @@ router.post('/enviar', async (req, res) => {
       return res.status(400).json({ erro: 'Campos "numero" e "mensagem" são obrigatórios' })
     }
 
-    let numero_limpo = destino.replace(/\D/g, '')
-    if (!(numero_limpo.startsWith('55') && numero_limpo.length >= 12)) numero_limpo = '55' + numero_limpo
+    const numero_limpo = paraJidWhatsapp(destino)
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
       number: numero_limpo,
