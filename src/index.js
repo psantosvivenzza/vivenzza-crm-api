@@ -28,6 +28,7 @@ import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
 import erpRouter from './routes/erp.js'
 import publicLeadsRouter from './routes/public-leads.js'
+import publicAlertRouter from './routes/public-alert.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
@@ -68,6 +69,18 @@ const publicLeadsLimit = rateLimit({
 
 // Leads de landing pages — sem autenticação
 app.use('/api/public/leads', publicLeadsLimit, publicLeadsRouter)
+
+// Alertas de rotinas automatizadas (ex: monitoramento de campanhas) — autenticado
+// via header x-alert-token (ALERT_WEBHOOK_TOKEN), não via API_SECRET_KEY. Destino
+// do WhatsApp é fixo no próprio route handler, não vem do corpo da requisição.
+const publicAlertLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  message: { erro: 'Muitas tentativas. Aguarde.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+app.use('/api/public/alerta-whatsapp', publicAlertLimit, publicAlertRouter)
 
 // SDR digital (Lara) — sem autenticação, a Evolution API chama direto
 app.use('/api/sdr', sdrRouter)
