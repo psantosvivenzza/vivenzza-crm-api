@@ -34,6 +34,9 @@ npm run dev
 | `NUVEMSHOP_CLIENT_SECRET` | Client secret do app Nuvemshop |
 | `GOOGLE_PLACES_API_KEY` | API key do Google Places (Place Details - Legacy) |
 | `GOOGLE_PLACE_ID` | Place ID do Google Business Profile da Vivenzza |
+| `WORDPRESS_URL` | URL base do site WordPress (ex: `https://blog.vivenzzaprofessional.com.br`) |
+| `WORDPRESS_USER` | Usuário WordPress usado na Application Password |
+| `WORDPRESS_APP_PASSWORD` | Application Password gerada em Usuário → Perfil → Senhas de Aplicativo |
 
 ## Tabelas esperadas no Supabase
 
@@ -162,6 +165,7 @@ create table tarefas (
 | GET | `/api/dashboard` | Métricas consolidadas |
 | GET | `/api/nuvemshop/oauth/callback` | Callback OAuth Nuvemshop (sem auth, chamado pela Nuvemshop) |
 | POST | `/api/blog/nuvemshop/publish` | Publica post no blog Nuvemshop |
+| POST | `/api/blog/wordpress/publish` | Publica post no blog WordPress (Basic Auth via Application Password) |
 | POST | `/api/avaliacoes` | Envia avaliação da loja (sem auth, entra em moderação, rate limit 1/10min por IP) |
 | GET | `/api/avaliacoes` | Lista avaliações aprovadas (`?produto_id=`) + média + total |
 | GET | `/api/admin/avaliacoes/pendentes` | Lista avaliações não aprovadas |
