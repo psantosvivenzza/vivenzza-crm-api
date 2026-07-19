@@ -1,4 +1,6 @@
 import 'dotenv/config'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { corsMiddleware } from './middleware/cors.js'
@@ -31,6 +33,9 @@ import publicLeadsRouter from './routes/public-leads.js'
 import publicAlertRouter from './routes/public-alert.js'
 import nuvemshopOAuthRouter from './routes/nuvemshop-oauth.js'
 import blogRouter from './routes/blog.js'
+import avaliacoesRouter from './routes/avaliacoes.js'
+import avaliacoesAdminRouter from './routes/avaliacoes-admin.js'
+import googleReviewsRouter from './routes/google-reviews.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
@@ -40,9 +45,19 @@ import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// Railway fica atrás de 1 hop de proxy — sem isso, req.ip vê sempre o IP
+// interno do proxy, e todo rate-limit por IP (leads, alerta, avaliações)
+// acaba contando "todo mundo" como o mesmo IP.
+app.set('trust proxy', 1)
 
 app.use(corsMiddleware)
 app.use(express.json({ limit: '50mb' }))
+
+// Widgets estáticos (avaliações da loja, Google Reviews) pro tema Nuvemshop
+// carregar via <script src=".../widgets/xxx.js">
+app.use('/widgets', express.static(path.join(__dirname, '..', 'public', 'widgets'), { maxAge: '1h' }))
 
 // Loga requisições que passam de 2s — sem isso, uma lentidão intermitente só aparece
 // como média/p99 agregado no painel do Railway, sem dizer qual rota é a culpada.
@@ -90,6 +105,13 @@ app.use('/api/sdr', sdrRouter)
 // Callback OAuth Nuvemshop — sem autenticação, é a própria Nuvemshop quem chama
 app.use('/api/nuvemshop', nuvemshopOAuthRouter)
 
+// Avaliações da loja — formulário público (rate limit próprio na rota POST)
+// e listagem pública das aprovadas
+app.use('/api/avaliacoes', avaliacoesRouter)
+
+// Avaliações do Google — nota geral + 5 mais recentes, cache diário
+app.use('/api/google-reviews', googleReviewsRouter)
+
 // Login — sem autenticação
 app.use('/api/auth', authRouter)
 
@@ -115,6 +137,7 @@ app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
+app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
 
 // Health check
 app.get('/health', (req, res) => {

@@ -32,6 +32,8 @@ npm run dev
 | `EVOLUTION_INSTANCE` | Nome da instância WhatsApp na Evolution API |
 | `NUVEMSHOP_CLIENT_ID` | Client ID do app Nuvemshop (Portal de Parceiros) |
 | `NUVEMSHOP_CLIENT_SECRET` | Client secret do app Nuvemshop |
+| `GOOGLE_PLACES_API_KEY` | API key do Google Places (Place Details - Legacy) |
+| `GOOGLE_PLACE_ID` | Place ID do Google Business Profile da Vivenzza |
 
 ## Tabelas esperadas no Supabase
 
@@ -160,6 +162,32 @@ create table tarefas (
 | GET | `/api/dashboard` | Métricas consolidadas |
 | GET | `/api/nuvemshop/oauth/callback` | Callback OAuth Nuvemshop (sem auth, chamado pela Nuvemshop) |
 | POST | `/api/blog/nuvemshop/publish` | Publica post no blog Nuvemshop |
+| POST | `/api/avaliacoes` | Envia avaliação da loja (sem auth, entra em moderação, rate limit 1/10min por IP) |
+| GET | `/api/avaliacoes` | Lista avaliações aprovadas (`?produto_id=`) + média + total |
+| GET | `/api/admin/avaliacoes/pendentes` | Lista avaliações não aprovadas |
+| PATCH | `/api/admin/avaliacoes/:id/aprovar` | Aprova avaliação |
+| DELETE | `/api/admin/avaliacoes/:id` | Remove avaliação |
+| GET | `/api/google-reviews` | Nota geral + 5 reviews mais recentes do Google (cache 24h) |
+| GET | `/widgets/avaliacoes.js` | Widget estático de avaliações da loja (embed no tema) |
+| GET | `/widgets/google-reviews.js` | Widget estático de avaliações do Google (embed no tema) |
+
+### Widgets no tema Nuvemshop
+
+Cole no bloco de código adicional do tema (ou na página desejada):
+
+```html
+<!-- Avaliações da loja (geral) -->
+<script src="https://vivenzza-crm-api-production.up.railway.app/widgets/avaliacoes.js"></script>
+
+<!-- Avaliações de um produto específico (na página do produto) -->
+<script src="https://vivenzza-crm-api-production.up.railway.app/widgets/avaliacoes.js"
+        data-produto-id="{{ product.id }}"></script>
+
+<!-- Avaliações do Google -->
+<script src="https://vivenzza-crm-api-production.up.railway.app/widgets/google-reviews.js"></script>
+```
+
+O widget se insere logo após a própria tag `<script>`, então basta colar onde quiser que ele apareça.
 
 ## Autenticação
 
