@@ -29,6 +29,8 @@ import reativacaoRouter from './routes/reativacao.js'
 import erpRouter from './routes/erp.js'
 import publicLeadsRouter from './routes/public-leads.js'
 import publicAlertRouter from './routes/public-alert.js'
+import nuvemshopOAuthRouter from './routes/nuvemshop-oauth.js'
+import blogRouter from './routes/blog.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
@@ -85,6 +87,9 @@ app.use('/api/public/alerta-whatsapp', publicAlertLimit, publicAlertRouter)
 // SDR digital (Lara) — sem autenticação, a Evolution API chama direto
 app.use('/api/sdr', sdrRouter)
 
+// Callback OAuth Nuvemshop — sem autenticação, é a própria Nuvemshop quem chama
+app.use('/api/nuvemshop', nuvemshopOAuthRouter)
+
 // Login — sem autenticação
 app.use('/api/auth', authRouter)
 
@@ -109,6 +114,7 @@ app.use('/api/ligacoes', auth, ligacoesRouter)
 app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
+app.use('/api/blog', auth, blogRouter)
 
 // Health check
 app.get('/health', (req, res) => {

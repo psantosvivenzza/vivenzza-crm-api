@@ -30,6 +30,8 @@ npm run dev
 | `EVOLUTION_API_URL` | URL base da Evolution API |
 | `EVOLUTION_API_KEY` | Chave de autenticação da Evolution API |
 | `EVOLUTION_INSTANCE` | Nome da instância WhatsApp na Evolution API |
+| `NUVEMSHOP_CLIENT_ID` | Client ID do app Nuvemshop (Portal de Parceiros) |
+| `NUVEMSHOP_CLIENT_SECRET` | Client secret do app Nuvemshop |
 
 ## Tabelas esperadas no Supabase
 
@@ -156,6 +158,8 @@ create table tarefas (
 | PUT | `/api/tarefas/:id` | Atualizar tarefa |
 | DELETE | `/api/tarefas/:id` | Remover tarefa |
 | GET | `/api/dashboard` | Métricas consolidadas |
+| GET | `/api/nuvemshop/oauth/callback` | Callback OAuth Nuvemshop (sem auth, chamado pela Nuvemshop) |
+| POST | `/api/blog/nuvemshop/publish` | Publica post no blog Nuvemshop |
 
 ## Autenticação
 
