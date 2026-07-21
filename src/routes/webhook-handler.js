@@ -88,6 +88,23 @@ function detectarAnuncio(msg) {
   return null
 }
 
+// Click-to-WhatsApp Click ID — identifica o anúncio/criativo específico que gerou
+// a conversa (campanha_origem já identifica a campanha, mas não o anúncio dentro
+// dela). Meta manda em dois formatos possíveis dependendo de como a instância está
+// conectada: referral.ctwa_clid (Cloud API oficial, snake_case) ou
+// contextInfo.externalAdReply.ctwaClid (Baileys/multi-device, camelCase).
+function detectarCtwaClid(msg) {
+  const ref = msg.referral
+  if (ref?.ctwa_clid) return ref.ctwa_clid
+
+  const tipos = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'buttonsMessage']
+  for (const tipo of tipos) {
+    const adReply = msg.message?.[tipo]?.contextInfo?.externalAdReply
+    if (adReply?.ctwaClid) return adReply.ctwaClid
+  }
+  return null
+}
+
 function detectarMidia(msg, conteudo) {
   const messageType = msg.messageType || Object.keys(conteudo || {}).find(k => k !== 'messageContextInfo') || ''
   const map = {
@@ -273,6 +290,7 @@ export async function processWhatsappEvent(payload) {
       const vendedor = await proximoVendedor()
       const origem = detectarAnuncio(msg) ?? detectarCampanha(texto)
       const campanha_origem = detectarCampanhaOrigem(msg, texto)
+      const ctwa_clid = detectarCtwaClid(msg)
       const { data: novoLead, error } = await supabase
         .from('leads')
         .insert({
@@ -281,6 +299,7 @@ export async function processWhatsappEvent(payload) {
           etapa: 'novo',
           origem,
           campanha_origem,
+          ctwa_clid,
           responsavel_id: vendedor?.id ?? null,
         })
         .select('id, nome, responsavel_id')
@@ -288,7 +307,7 @@ export async function processWhatsappEvent(payload) {
 
       if (!error && novoLead) {
         lead = novoLead
-        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem)
+        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
       }
