@@ -93,7 +93,7 @@ function detectarAnuncio(msg) {
 // dela). Meta manda em dois formatos possíveis dependendo de como a instância está
 // conectada: referral.ctwa_clid (Cloud API oficial, snake_case) ou
 // contextInfo.externalAdReply.ctwaClid (Baileys/multi-device, camelCase).
-function detectarCtwaClid(msg) {
+export function detectarCtwaClid(msg) {
   const ref = msg.referral
   if (ref?.ctwa_clid) return ref.ctwa_clid
 
