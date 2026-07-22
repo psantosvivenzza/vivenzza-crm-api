@@ -30,19 +30,26 @@ router.get('/', async (req, res) => {
     leadIdsVendedor = (meusLeads || []).map((l) => l.id)
   }
 
+  // Etapas válidas (mesmo CHECK constraint da tabela leads) — contadas uma a uma via
+  // COUNT exato (head: true, sem trazer linha nenhuma). Antes disso era um único
+  // .select('etapa') sem count nem range: caía no max-rows padrão do PostgREST
+  // (1000) e "total" virava a soma desse array truncado, não o total real —
+  // travava em 1000 leads mesmo com a tabela tendo mais.
+  const ETAPAS = ['novo', 'contato', 'proposta', 'negociacao', 'fechado', 'perdido']
+
   const [r1, r2, r3, r4, r5, r6, r7, r8, r9] = await Promise.all([
     safe(
-      (() => {
-        let q = supabase.from('leads').select('etapa')
-        if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
-        return q
-      })().then(({ data, error }) => {
-        if (error) throw error
-        return (data ?? []).reduce((acc, l) => {
-          acc[l.etapa] = (acc[l.etapa] || 0) + 1
-          return acc
-        }, {})
-      }),
+      (async () => {
+        const porEtapa = {}
+        await Promise.all(ETAPAS.map(async (etapa) => {
+          let q = supabase.from('leads').select('id', { count: 'exact', head: true }).eq('etapa', etapa)
+          if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
+          const { count, error } = await q
+          if (error) throw error
+          porEtapa[etapa] = count ?? 0
+        }))
+        return porEtapa
+      })(),
       {}
     ),
 
