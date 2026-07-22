@@ -16,9 +16,11 @@ export const EMITENTE = {
   cPais: '1058',
   xPais: 'BRASIL',
   fone: '',
-  // Certificado
+  // Certificado — caminho ainda aponta pra rede local (DESKTOP-Q6O54R1), inacessível
+  // a partir do Railway; ver auditoria. Senha nunca deve ir pro código — vem de
+  // NFE_CERT_SENHA (Railway → Variables, marcado como secret).
   CERT_PATH: String.raw`\\DESKTOP-Q6O54R1\NetMdb\Certificado\LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx`,
-  CERT_SENHA: '123456',
+  CERT_SENHA: process.env.NFE_CERT_SENHA,
 }
 
 // Configurações SEFAZ para RS (SVRS)

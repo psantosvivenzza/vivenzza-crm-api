@@ -85,11 +85,17 @@ export function gerarXmlNFe(nfe) {
   }
   dest.ele('xNome').txt(nfe.dest_nome || 'CONSUMIDOR NAO IDENTIFICADO')
   if (SEFAZ.tpAmb === '1' && (nfe.dest_logradouro || nfe.dest_municipio)) {
+    // cMun é obrigatório e não tem valor "aproximado" seguro — se não foi resolvido
+    // na criação da NFe (ver POST /api/nfe em routes/nfe.js), falha aqui em vez de
+    // emitir com o município errado.
+    if (!nfe.dest_cmun) {
+      throw new Error(`cMun do destinatário não resolvido para "${nfe.dest_municipio}/${nfe.dest_uf}" — corrija o município da NFe antes de emitir`)
+    }
     const endDest = dest.ele('enderDest')
     endDest.ele('xLgr').txt(nfe.dest_logradouro || 'NAO INFORMADO')
     endDest.ele('nro').txt(nfe.dest_numero || 'SN')
     endDest.ele('xBairro').txt(nfe.dest_bairro || 'NAO INFORMADO')
-    endDest.ele('cMun').txt('4314902') // placeholder — idealmente buscar por nome
+    endDest.ele('cMun').txt(nfe.dest_cmun)
     endDest.ele('xMun').txt(nfe.dest_municipio || 'NAO INFORMADO')
     endDest.ele('UF').txt(nfe.dest_uf || 'RS')
     endDest.ele('CEP').txt((nfe.dest_cep || '00000000').replace(/\D/g, ''))

@@ -6,14 +6,14 @@ const router = Router()
 // GET /api/estoque — saldo atual de todos os produtos
 router.get('/', async (req, res) => {
   try {
-    const { categoria, alerta, page = 1, limit = 100 } = req.query
+    const { linha_id, alerta, page = 1, limit = 100 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
 
     let query = supabase
       .from('estoque')
       .select(`
         *,
-        produtos(id, nome, sku, categoria, preco, ativo)
+        produtos(id, nome, sku, linha_id, linhas(id, nome), preco_b2c, preco_b2b, preco_distribuidor, ativo)
       `, { count: 'exact' })
       .order('updated_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
@@ -23,8 +23,8 @@ router.get('/', async (req, res) => {
 
     let resultado = data
 
-    if (categoria) {
-      resultado = resultado.filter(e => e.produtos?.categoria === categoria)
+    if (linha_id) {
+      resultado = resultado.filter(e => e.produtos?.linha_id === linha_id)
     }
 
     if (alerta === 'true') {
@@ -40,13 +40,16 @@ router.get('/', async (req, res) => {
 // GET /api/estoque/alertas — produtos abaixo do mínimo
 router.get('/alertas', async (req, res) => {
   try {
+    // supabase-js não suporta comparar duas colunas entre si na query (o antigo
+    // supabase.raw() nem existe no client) — busca tudo e filtra em memória,
+    // mesmo padrão já usado no alerta=true da rota GET / acima.
     const { data, error } = await supabase
       .from('estoque')
-      .select('*, produtos(id, nome, sku, categoria)')
-      .filter('quantidade', 'lte', supabase.raw('quantidade_minima'))
+      .select('*, produtos(id, nome, sku, linha_id)')
 
     if (error) throw error
-    res.json(data)
+    const emAlerta = (data || []).filter(e => Number(e.quantidade) <= Number(e.quantidade_minima))
+    res.json(emAlerta)
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

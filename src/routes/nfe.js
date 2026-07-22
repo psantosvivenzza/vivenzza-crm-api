@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { gerarXmlNFe } from '../services/nfe/xml.js'
 import { assinarNFe } from '../services/nfe/assinar.js'
 import { enviarNFe, consultarNFe, cancelarNFe, statusSefaz } from '../services/nfe/sefaz.js'
+import { buscarCodigoMunicipio } from '../lib/ibge.js'
 
 const router = Router()
 
@@ -105,6 +106,12 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ erro: 'Ao menos um item é obrigatório' })
     }
 
+    // Resolve o código IBGE do município do destinatário dinamicamente (uf + nome) —
+    // usado no XML em vez de um valor fixo. Best-effort: se não resolver (nome não
+    // bate, API fora do ar), fica null e a emissão em produção barra com erro claro
+    // em vez de sair com o município errado (ver services/nfe/xml.js).
+    const dest_cmun = await buscarCodigoMunicipio(dest_uf, dest_municipio)
+
     // Calcula totais
     const valorProdutos = itens.reduce((acc, i) => acc + Number(i.valor_total), 0)
     const valorTotal = valorProdutos + Number(valor_frete) - Number(valor_desconto)
@@ -119,7 +126,7 @@ router.post('/', async (req, res) => {
         tipo, serie, natureza_operacao, finalidade, forma_pagamento,
         dest_nome, dest_cnpj_cpf, dest_ie,
         dest_logradouro, dest_numero, dest_complemento,
-        dest_bairro, dest_municipio, dest_uf, dest_cep, dest_fone, dest_email,
+        dest_bairro, dest_municipio, dest_uf, dest_cmun, dest_cep, dest_fone, dest_email,
         transp_modalidade, valor_frete: Number(valor_frete),
         valor_produtos: valorProdutos,
         valor_desconto: Number(valor_desconto),
