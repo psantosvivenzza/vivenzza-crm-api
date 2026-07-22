@@ -45,26 +45,44 @@ export const SEFAZ = {
   // Ambiente: 1=Produção, 2=Homologação
   tpAmb: '2',   // ← mudar para '1' quando for produção
   versao: '4.00',
-  // Endpoints SVRS
+  // Endpoints — domínio CORRETO é sefazrs.rs.gov.br (infra própria da SEFAZ-RS pro
+  // cUF=43), não svrs.rs.gov.br (SVRS = Sefaz Virtual que a RS opera como serviço de
+  // CONTINGÊNCIA pra outros estados contratantes — daí o cStat 410 "UF informada no
+  // campo cUF nao e atendida", confirmado com teste diferencial: cUF=41/PR funcionava
+  // no domínio svrs.rs.gov.br, cUF=43/RS não).
+  // statusServico validado de verdade (cStat 107 "Servico em Operacao", testado via
+  // railway run contra o domínio sefazrs.rs.gov.br). Os outros 4 endpoints de
+  // homologação seguem o mesmo domínio confirmado por fonte externa (nfephp-org/
+  // sped-nfe, lib PHP de NFe amplamente usada), mas não foram testados
+  // individualmente um a um.
   endpoints: {
     homologacao: {
       nfe: {
-        autorizacao: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
-        retAutorizacao: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
-        inutilizacao: 'https://nfe-homologacao.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
-        consultaProtocolo: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeConsulta2/NfeConsulta2.asmx',
-        statusServico: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
-        cancelamento: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeCancelamento4/NfeCancelamento4.asmx',
+        autorizacao: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+        retAutorizacao: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+        inutilizacao: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+        consultaProtocolo: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+        statusServico: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+        // ATENÇÃO: a fonte consultada aponta recepcaoevento4.asmx (serviço unificado de
+        // eventos do NFe 4.00) para cancelamento, não um "NfeCancelamento4" dedicado —
+        // diferente do que estava aqui antes. Ajustei a URL, mas o xmlns de
+        // nfeDadosMsg em montarEnvelopeCancelamento() (sefaz.js) ainda usa
+        // ".../NfeCancelamento4" — provavelmente também precisa virar
+        // ".../RecepcaoEvento4". Não mudei isso agora (não testei essa parte, só o
+        // status), fica como próximo passo antes de cancelar uma NFe de verdade.
+        cancelamento: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
       },
     },
+    // Mesmo domínio (sefazrs.rs.gov.br) aplicado por consistência com o padrão
+    // confirmado em homologação — NÃO testado empiricamente em produção.
     producao: {
       nfe: {
-        autorizacao: 'https://nfe.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
-        retAutorizacao: 'https://nfe.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
-        inutilizacao: 'https://nfe.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
-        consultaProtocolo: 'https://nfe.svrs.rs.gov.br/ws/NfeConsulta2/NfeConsulta2.asmx',
-        statusServico: 'https://nfe.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
-        cancelamento: 'https://nfe.svrs.rs.gov.br/ws/NfeCancelamento4/NfeCancelamento4.asmx',
+        autorizacao: 'https://nfe.sefazrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+        retAutorizacao: 'https://nfe.sefazrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+        inutilizacao: 'https://nfe.sefazrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+        consultaProtocolo: 'https://nfe.sefazrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+        statusServico: 'https://nfe.sefazrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+        cancelamento: 'https://nfe.sefazrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
       },
     },
   },
