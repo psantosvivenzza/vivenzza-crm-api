@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs'
+
 // Dados fixos do emitente — LD SUL COSMÉTICOS LTDA
 export const EMITENTE = {
   CNPJ: '13602526000193',
@@ -16,11 +18,24 @@ export const EMITENTE = {
   cPais: '1058',
   xPais: 'BRASIL',
   fone: '',
-  // Certificado — caminho ainda aponta pra rede local (DESKTOP-Q6O54R1), inacessível
-  // a partir do Railway; ver auditoria. Senha nunca deve ir pro código — vem de
-  // NFE_CERT_SENHA (Railway → Variables, marcado como secret).
+  // Certificado — caminho de rede local (DESKTOP-Q6O54R1), só alcançável de máquinas
+  // na mesma LAN. Usado como fallback de desenvolvimento por getCertBuffer() abaixo —
+  // em produção (Railway) o certificado vem de CERT_BASE64, não deste caminho.
+  // Senha nunca vai pro código — vem de NFE_CERT_SENHA (Railway → Variables, secret).
   CERT_PATH: String.raw`\\DESKTOP-Q6O54R1\NetMdb\Certificado\LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx`,
   CERT_SENHA: process.env.NFE_CERT_SENHA,
+}
+
+// Bytes do .pfx — prioriza CERT_BASE64 (Railway → Variables), que é o único jeito do
+// Railway acessar o certificado já que CERT_PATH é um caminho de rede local
+// inatingível da nuvem. Só cai para o arquivo local se CERT_BASE64 não estiver
+// setada, o que mantém isso funcionando em desenvolvimento local na mesma LAN do
+// DESKTOP-Q6O54R1 sem precisar de nenhuma env var.
+export function getCertBuffer() {
+  if (process.env.CERT_BASE64) {
+    return Buffer.from(process.env.CERT_BASE64, 'base64')
+  }
+  return readFileSync(EMITENTE.CERT_PATH)
 }
 
 // Configurações SEFAZ para RS (SVRS)

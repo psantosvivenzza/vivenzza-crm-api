@@ -1,6 +1,5 @@
 import forge from 'node-forge'
-import { readFileSync } from 'fs'
-import { EMITENTE } from './emitente.js'
+import { EMITENTE, getCertBuffer } from './emitente.js'
 
 // Carrega o certificado .pfx uma vez em memória
 let _cert = null
@@ -9,7 +8,7 @@ let _key = null
 function carregarCertificado() {
   if (_cert && _key) return { cert: _cert, key: _key }
 
-  const pfxBuf = readFileSync(EMITENTE.CERT_PATH)
+  const pfxBuf = getCertBuffer()
   const pfxDer = forge.util.createBuffer(pfxBuf.toString('binary'))
   const pfxAsn1 = forge.asn1.fromDer(pfxDer)
   const pfx = forge.pkcs12.pkcs12FromAsn1(pfxAsn1, false, EMITENTE.CERT_SENHA)

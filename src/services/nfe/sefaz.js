@@ -1,8 +1,7 @@
 import https from 'https'
 import axios from 'axios'
-import { readFileSync } from 'fs'
 import { parseStringPromise } from 'xml2js'
-import { EMITENTE, SEFAZ } from './emitente.js'
+import { EMITENTE, SEFAZ, getCertBuffer } from './emitente.js'
 
 // Envelope SOAP para envio de lote de NFe
 function montarEnvelopeAutorizacao(xmlNFe) {
@@ -81,7 +80,7 @@ function montarEnvelopeCancelamento(chave, protocolo, justificativa) {
 // Carrega o certificado para TLS mútuo
 function carregarAgenteTLS() {
   try {
-    const pfxBuf = readFileSync(EMITENTE.CERT_PATH)
+    const pfxBuf = getCertBuffer()
     return new https.Agent({
       pfx: pfxBuf,
       passphrase: EMITENTE.CERT_SENHA,
