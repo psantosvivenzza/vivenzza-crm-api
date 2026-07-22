@@ -34,7 +34,22 @@ router.get('/', async (req, res) => {
 
     if (error) throw error
 
-    res.json({ data, total: count, page: Number(page), pageSize: pageLimit })
+    // Indicador "mensagem pendente" (cliente falou por último, ainda sem resposta) —
+    // uma chamada só pra página inteira via RPC, não N+1 por lead.
+    let leadIdsComMensagemPendente = new Set()
+    if (data?.length) {
+      const { data: pendentes, error: erroPendentes } = await supabase.rpc('leads_com_mensagem_pendente', {
+        p_lead_ids: data.map((l) => l.id),
+      })
+      if (erroPendentes) console.error('[leads] erro ao checar mensagens pendentes:', erroPendentes.message)
+      else leadIdsComMensagemPendente = new Set(pendentes.map((p) => p.lead_id))
+    }
+    const dataComPendencia = (data ?? []).map((lead) => ({
+      ...lead,
+      tem_mensagem_pendente: leadIdsComMensagemPendente.has(lead.id),
+    }))
+
+    res.json({ data: dataComPendencia, total: count, page: Number(page), pageSize: pageLimit })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
