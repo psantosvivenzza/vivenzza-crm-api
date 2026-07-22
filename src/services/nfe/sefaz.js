@@ -1,11 +1,25 @@
 import https from 'https'
 import axios from 'axios'
 import { parseStringPromise } from 'xml2js'
-import { EMITENTE, SEFAZ, getCertBuffer } from './emitente.js'
+import { EMITENTE, SEFAZ } from './emitente.js'
+import { getCertKeyPem } from './assinar.js'
 
-// Envelope SOAP para envio de lote de NFe
+// A SEFAZ rejeita XML com espaço em branco (quebra de linha, indentação) ENTRE tags —
+// cStat 588, "Rejeicao: Nao eh permitida a presenca de caracteres de edicao no
+// inicio/fim da mensagem ou entre as tags da mensagem". Os templates abaixo são
+// escritos formatados por legibilidade; isso compacta o resultado final antes de
+// mandar pra rede. Só mexe no que fica entre `>` e `<` — nunca no texto de dentro de
+// um elemento (ex: o conteúdo de xJust).
+function compactarXml(xml) {
+  return xml.replace(/>\s+</g, '><').trim()
+}
+
+// Envelope SOAP para envio de lote de NFe. xmlNFe já é XML assinado (assinar.js) —
+// entra via placeholder e é colado DEPOIS da compactação, pra nunca passar pela
+// regex de compactação (o digest da assinatura foi calculado sobre esse conteúdo
+// exato; não é seguro reprocessar o texto depois de assinado).
 function montarEnvelopeAutorizacao(xmlNFe) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  const envelope = compactarXml(`<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
   xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -14,15 +28,16 @@ function montarEnvelopeAutorizacao(xmlNFe) {
       <enviNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
         <idLote>${Date.now()}</idLote>
         <indSinc>1</indSinc>
-        ${xmlNFe}
+        __XML_NFE__
       </enviNFe>
     </nfeDadosMsg>
   </soap12:Body>
-</soap12:Envelope>`
+</soap12:Envelope>`)
+  return envelope.replace('__XML_NFE__', xmlNFe)
 }
 
 function montarEnvelopeConsulta(chave) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  return compactarXml(`<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
   xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -35,7 +50,7 @@ function montarEnvelopeConsulta(chave) {
       </consSitNFe>
     </nfeDadosMsg>
   </soap12:Body>
-</soap12:Envelope>`
+</soap12:Envelope>`)
 }
 
 function montarEnvelopeCancelamento(chave, protocolo, justificativa) {
@@ -62,7 +77,7 @@ function montarEnvelopeCancelamento(chave, protocolo, justificativa) {
   </infEvento>
 </eventoCancNFe>`
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  return compactarXml(`<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
   xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -74,16 +89,19 @@ function montarEnvelopeCancelamento(chave, protocolo, justificativa) {
       </envEvento>
     </nfeDadosMsg>
   </soap12:Body>
-</soap12:Envelope>`
+</soap12:Envelope>`)
 }
 
 // Carrega o certificado para TLS mútuo
 function carregarAgenteTLS() {
   try {
-    const pfxBuf = getCertBuffer()
+    // cert/key em PEM (via node-forge, ver assinar.js) em vez de { pfx, passphrase }
+    // bruto — o parser PKCS12 nativo do Node/OpenSSL 3.x rejeita este .pfx com
+    // "Unsupported PKCS12 PFX data" (algoritmo legado). O forge lê sem problema.
+    const { certPem, keyPem } = getCertKeyPem()
     return new https.Agent({
-      pfx: pfxBuf,
-      passphrase: EMITENTE.CERT_SENHA,
+      cert: certPem,
+      key: keyPem,
       rejectUnauthorized: false, // SEFAZ usa cadeia própria
     })
   } catch (e) {
@@ -169,7 +187,7 @@ export async function cancelarNFe(chave, protocolo, justificativa) {
 
 // Verifica status do serviço SEFAZ
 export async function statusSefaz() {
-  const envelope = `<?xml version="1.0" encoding="UTF-8"?>
+  const envelope = compactarXml(`<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
   xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -182,7 +200,7 @@ export async function statusSefaz() {
       </consStatServ>
     </nfeDadosMsg>
   </soap12:Body>
-</soap12:Envelope>`
+</soap12:Envelope>`)
 
   try {
     const respXml = await soapPost(SEFAZ.urls.statusServico, envelope)

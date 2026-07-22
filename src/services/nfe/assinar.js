@@ -30,6 +30,21 @@ export function getCertBase64() {
   return forge.util.encode64(der)
 }
 
+// Cert + chave em PEM, pro https.Agent (mTLS com a SEFAZ, ver services/nfe/sefaz.js).
+// Não usar https.Agent({ pfx, passphrase }) direto com o .pfx bruto — o Node usa o
+// parser nativo de PKCS12 (via OpenSSL) pra isso, e o OpenSSL 3.x rejeita PKCS12
+// exportado com algoritmos legados (comum em certificados brasileiros mais antigos)
+// com "Unsupported PKCS12 PFX data". O node-forge (usado aqui) é um parser PKCS12 em
+// JS puro que não tem essa restrição — por isso extraímos cert/key aqui, uma vez, e
+// passamos como PEM em vez do .pfx bruto.
+export function getCertKeyPem() {
+  const { cert, key } = carregarCertificado()
+  return {
+    certPem: forge.pki.certificateToPem(cert),
+    keyPem: forge.pki.privateKeyToPem(key),
+  }
+}
+
 // Assina o XML da NFe conforme padrão XML-DSig
 export function assinarNFe(xmlStr, chave) {
   const { cert, key } = carregarCertificado()
