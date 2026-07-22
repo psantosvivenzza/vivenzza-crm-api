@@ -6,6 +6,7 @@ import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
+import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
 
 const router = Router()
 
@@ -40,10 +41,6 @@ const evolutionApi = axios.create({
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
 })
-
-const CATALOGO_PROFISSIONAL = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/Catalogos/catalogo-profissional.pdf'
-const CATALOGO_COLORACAO = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/Catalogos/catalogo-coloracao.pdf'
-const CATALOGO_HOME_CARE = 'https://vkncsyhugotyfwmxpzgq.supabase.co/storage/v1/object/public/whatsapp-media/catalogo-home-care.pdf'
 
 const ACOES_CATALOGO = ['ENVIAR_CATALOGO_PRO', 'ENVIAR_CATALOGO_HOME', 'ENVIAR_APRESENTACAO_B2B']
 

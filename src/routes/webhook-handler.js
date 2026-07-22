@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { proximoVendedor } from '../lib/distribuicao.js'
 import { detectarRespostaReativacao } from './reativacao.js'
+import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -149,6 +150,23 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
   try {
     if (!mediaData?.mediaKey || !mediaData?.messageType) {
       console.log('[webhook] mídia sem mediaKey — download ignorado:', evolutionId)
+      return
+    }
+
+    // Catálogo fixo enviado pela Lara (sdr.js) ecoando de volta no webhook: já tem
+    // URL pública permanente no bucket Catalogos/whatsapp-media — baixar e re-subir
+    // uma cópia nova a cada envio só inflava o Storage (achado em auditoria: 90% da
+    // pasta document/ eram cópias redundantes do mesmo catálogo). Só se aplica ao que
+    // a própria Vivenzza mandou (fromMe) — um arquivo de cliente com nome coincidente
+    // continua sendo arquivado normalmente.
+    const urlFixa = mediaData.fromMe ? CATALOGOS_POR_NOME_ARQUIVO[mediaData.fileName] : null
+    if (urlFixa) {
+      const { error: updateError } = await supabase
+        .from('whatsapp_mensagens')
+        .update({ media_url: urlFixa })
+        .eq('evolution_id', evolutionId)
+      if (updateError) console.error('[webhook] erro ao registrar URL fixa do catálogo:', updateError.message)
+      else console.log('[webhook] catálogo fixo reconhecido, sem re-upload:', mediaData.fileName, '→', evolutionId)
       return
     }
 
