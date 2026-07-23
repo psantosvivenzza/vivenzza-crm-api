@@ -5,6 +5,27 @@ const router = Router()
 
 const STATUS_VALIDOS = ['rascunho', 'confirmado', 'em_producao', 'enviado', 'entregue', 'cancelado']
 
+const SELECT_PEDIDO = '*, leads(id, nome, empresa), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(nome, preco_b2c)), contas_financeiras(*)'
+
+// Resolve o preço unitário do produto de acordo com a lista de preço do pedido.
+// 'b2c'/'b2b'/'distribuidor' são as 3 colunas fixas; qualquer outro valor busca
+// em produtos.extra_precos (as outras 10 listas migradas do legado).
+function resolverPreco(produto, listaPreco) {
+  if (listaPreco === 'b2c') return produto.preco_b2c ?? produto.preco_b2b ?? 0
+  if (listaPreco === 'b2b') return produto.preco_b2b ?? produto.preco_b2c ?? 0
+  if (listaPreco === 'distribuidor') return produto.preco_distribuidor ?? produto.preco_b2c ?? 0
+  if (listaPreco && produto.extra_precos?.[listaPreco] != null) return produto.extra_precos[listaPreco]
+  return produto.preco_b2c ?? produto.preco_b2b ?? 0
+}
+
+// Converte a condição de pagamento ("30/60/90", "a_vista", ...) na lista de dias
+// de cada parcela. Formato não reconhecido cai em 1 parcela à vista — não trava a confirmação.
+function gerarDiasParcelas(condicao) {
+  if (!condicao || condicao === 'a_vista') return [0]
+  if (/^\d+(\/\d+)*$/.test(condicao)) return condicao.split('/').map(Number)
+  return [0]
+}
+
 // GET /api/pedidos — listar
 router.get('/', async (req, res) => {
   try {
@@ -13,7 +34,7 @@ router.get('/', async (req, res) => {
 
     let query = supabase
       .from('pedidos')
-      .select('*, leads(id, nome, empresa), pedido_itens(*, produtos(nome, preco_b2c))', { count: 'exact' })
+      .select(SELECT_PEDIDO, { count: 'exact' })
       .order('criado_em', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
 
@@ -34,7 +55,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('pedidos')
-      .select('*, leads(id, nome, empresa), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b))')
+      .select(SELECT_PEDIDO)
       .eq('id', req.params.id)
       .single()
 
@@ -50,38 +71,54 @@ router.get('/:id', async (req, res) => {
 // POST /api/pedidos — criar pedido com itens
 router.post('/', async (req, res) => {
   try {
-    const { lead_id, itens, observacoes, desconto = 0 } = req.body
+    const {
+      lead_id, itens, observacoes, desconto = 0,
+      condicao_pagamento, forma_pagamento, lista_preco,
+      representante_id, representante_nome, comissao_percentual,
+      valor_frete = 0, tipo_frete, peso_bruto, peso_liquido, qtde_volumes,
+    } = req.body
     const usuario_id = req.user?.id
 
     if (!lead_id || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ erro: '"lead_id" e ao menos um item são obrigatórios' })
     }
 
-    // Busca preços dos produtos
+    // Busca preços dos produtos (inclui extra_precos pras listas migradas do legado)
     const ids = itens.map(i => i.produto_id)
     const { data: produtos, error: errProd } = await supabase
       .from('produtos')
-      .select('id, preco_b2c, preco_b2b')
+      .select('id, preco_b2c, preco_b2b, preco_distribuidor, extra_precos')
       .in('id', ids)
 
     if (errProd) throw errProd
 
-    const precoMap = Object.fromEntries(produtos.map(p => [p.id, p.preco_b2c ?? p.preco_b2b ?? 0]))
+    const produtoMap = Object.fromEntries(produtos.map(p => [p.id, p]))
 
     let subtotal = 0
     const itensPreparados = itens.map(item => {
-      const preco = item.preco_unitario ?? precoMap[item.produto_id] ?? 0
+      const produto = produtoMap[item.produto_id] || {}
+      const preco = item.preco_unitario ?? resolverPreco(produto, lista_preco)
       const quantidade = item.quantidade
       const sub = preco * quantidade
       subtotal += sub
-      return { produto_id: item.produto_id, quantidade, preco_unitario: preco, subtotal: sub }
+      // subtotal NÃO entra aqui: pedido_itens.subtotal é GENERATED ALWAYS (quantidade * preco_unitario) no banco.
+      return { produto_id: item.produto_id, quantidade, preco_unitario: preco }
     })
 
-    const total = subtotal - Number(desconto)
+    const total = subtotal - Number(desconto) + Number(valor_frete)
 
     const { data: pedido, error: errPedido } = await supabase
       .from('pedidos')
-      .insert({ lead_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho' })
+      .insert({
+        lead_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho',
+        condicao_pagamento, forma_pagamento, lista_preco,
+        representante_id: representante_id || null, representante_nome,
+        comissao_percentual: comissao_percentual != null ? Number(comissao_percentual) : null,
+        valor_frete: Number(valor_frete), tipo_frete,
+        peso_bruto: peso_bruto != null ? Number(peso_bruto) : null,
+        peso_liquido: peso_liquido != null ? Number(peso_liquido) : null,
+        qtde_volumes: qtde_volumes != null ? Number(qtde_volumes) : null,
+      })
       .select()
       .single()
 
@@ -118,16 +155,61 @@ router.put('/:id/status', async (req, res) => {
       .from('pedidos')
       .update({ status, atualizado_em: new Date().toISOString() })
       .eq('id', req.params.id)
-      .select()
+      .select('*, leads(nome)')
       .single()
 
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Pedido não encontrado' })
+
+    if (status === 'confirmado') {
+      await gerarParcelas(data)
+    }
 
     res.json(data)
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
 })
+
+// Gera as parcelas (contas_financeiras) do pedido confirmado — idempotente:
+// não gera de novo se o pedido for confirmado mais de uma vez.
+async function gerarParcelas(pedido) {
+  const { count } = await supabase
+    .from('contas_financeiras')
+    .select('id', { count: 'exact', head: true })
+    .eq('pedido_id', pedido.id)
+
+  if (count > 0) return
+
+  const dias = gerarDiasParcelas(pedido.condicao_pagamento)
+  const n = dias.length
+  const total = Number(pedido.total) || 0
+  const hoje = new Date()
+
+  let acumulado = 0
+  const parcelas = dias.map((d, i) => {
+    const ehUltima = i === n - 1
+    const valor = ehUltima
+      ? Math.round((total - acumulado) * 100) / 100
+      : Math.round((total / n) * 100) / 100
+    acumulado += valor
+
+    const vencimento = new Date(hoje)
+    vencimento.setDate(vencimento.getDate() + d)
+
+    return {
+      tipo: 'receber',
+      pedido_id: pedido.id,
+      descricao: `Pedido #${pedido.id.slice(-8).toUpperCase()} — Parcela ${i + 1}/${n}`,
+      valor,
+      vencimento: vencimento.toISOString().split('T')[0],
+      status: 'aberta',
+      categoria: 'Venda',
+      pessoa_nome: pedido.leads?.nome ?? null,
+    }
+  })
+
+  await supabase.from('contas_financeiras').insert(parcelas)
+}
 
 export default router
