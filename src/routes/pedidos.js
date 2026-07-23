@@ -9,8 +9,10 @@ const STATUS_VALIDOS = ['rascunho', 'confirmado', 'em_producao', 'enviado', 'ent
 // precisa de produtos aninhado); count:'exact' com o embed pesado original já dava
 // timeout em produção com 9k+ pedidos / 55k+ itens, mesmo antes destas mudanças.
 // O detalhe (GET /:id) usa o select completo abaixo.
-const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), pedido_itens(id)'
-const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b)), contas_financeiras(*)'
+// clientes_erp ao lado de leads: pedido novo usa cliente_erp_id, pedido antigo (migrado
+// do legado) só tem lead_id — os dois embeds convivem, cada pedido só preenche um.
+const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf), pedido_itens(id)'
+const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b)), contas_financeiras(*)'
 
 // Resolve o preço unitário do produto de acordo com a lista de preço do pedido.
 // 'b2c'/'b2b'/'distribuidor' são as 3 colunas fixas; qualquer outro valor busca
@@ -80,15 +82,15 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const {
-      lead_id, itens, observacoes, desconto = 0,
+      cliente_erp_id, itens, observacoes, desconto = 0,
       condicao_pagamento, forma_pagamento, lista_preco,
       representante_id, representante_nome, comissao_percentual,
       valor_frete = 0, tipo_frete, peso_bruto, peso_liquido, qtde_volumes,
     } = req.body
     const usuario_id = req.user?.id
 
-    if (!lead_id || !Array.isArray(itens) || itens.length === 0) {
-      return res.status(400).json({ erro: '"lead_id" e ao menos um item são obrigatórios' })
+    if (!cliente_erp_id || !Array.isArray(itens) || itens.length === 0) {
+      return res.status(400).json({ erro: '"cliente_erp_id" e ao menos um item são obrigatórios' })
     }
 
     // Busca preços dos produtos (inclui extra_precos pras listas migradas do legado)
@@ -118,7 +120,7 @@ router.post('/', async (req, res) => {
     const { data: pedido, error: errPedido } = await supabase
       .from('pedidos')
       .insert({
-        lead_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho',
+        cliente_erp_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho',
         condicao_pagamento, forma_pagamento, lista_preco,
         representante_id: representante_id || null, representante_nome,
         comissao_percentual: comissao_percentual != null ? Number(comissao_percentual) : null,
@@ -163,7 +165,7 @@ router.put('/:id/status', async (req, res) => {
       .from('pedidos')
       .update({ status, atualizado_em: new Date().toISOString() })
       .eq('id', req.params.id)
-      .select('*, leads(nome)')
+      .select('*, leads(nome), clientes_erp(razao_social)')
       .single()
 
     if (error) throw error
@@ -213,7 +215,7 @@ async function gerarParcelas(pedido) {
       vencimento: vencimento.toISOString().split('T')[0],
       status: 'aberta',
       categoria: 'Venda',
-      pessoa_nome: pedido.leads?.nome ?? null,
+      pessoa_nome: pedido.clientes_erp?.razao_social ?? pedido.leads?.nome ?? null,
     }
   })
 

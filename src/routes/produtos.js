@@ -6,7 +6,7 @@ const router = Router()
 // GET /api/produtos — listar produtos
 router.get('/', async (req, res) => {
   try {
-    const { ativo, linha_id, page = 1, limit = 200 } = req.query
+    const { ativo, linha_id, search, page = 1, limit = 200 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
 
     let query = supabase
@@ -17,6 +17,7 @@ router.get('/', async (req, res) => {
 
     if (ativo !== undefined && ativo !== 'todos') query = query.eq('ativo', ativo === 'true')
     if (linha_id) query = query.eq('linha_id', linha_id)
+    if (search) query = query.or(`nome.ilike.%${search}%,sku.ilike.%${search}%`)
 
     const { data, error, count } = await query
     if (error) throw error

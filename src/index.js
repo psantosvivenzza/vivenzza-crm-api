@@ -29,6 +29,7 @@ import ligacoesRouter from './routes/ligacoes.js'
 import automacoesRouter from './routes/automacoes.js'
 import reativacaoRouter from './routes/reativacao.js'
 import erpRouter from './routes/erp.js'
+import clientesErpRouter from './routes/clientes-erp.js'
 import publicLeadsRouter from './routes/public-leads.js'
 import publicAlertRouter from './routes/public-alert.js'
 import nuvemshopOAuthRouter from './routes/nuvemshop-oauth.js'
@@ -122,6 +123,7 @@ app.use('/api/contatos', auth, contatosRouter)
 app.use('/api/whatsapp', auth, whatsappRouter)
 app.use('/api/produtos', auth, produtosRouter)
 app.use('/api/pedidos', auth, pedidosRouter)
+app.use('/api/clientes-erp', auth, clientesErpRouter)
 app.use('/api/tarefas', auth, tarefasRouter)
 app.use('/api/dashboard', auth, dashboardRouter)
 app.use('/api/estoque', auth, estoqueRouter)
