@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
 
     let query = supabase
       .from('leads')
-      .select('*, usuarios!leads_responsavel_id_fkey(id, nome)', { count: 'exact' })
+      .select('*, usuarios!leads_responsavel_id_fkey(id, nome), clientes_erp!leads_cliente_erp_id_fkey(id, legacy_id, razao_social, cnpj_cpf, data_ultima_compra)', { count: 'exact' })
       .order('criado_em', { ascending: false })
       .range(offset, offset + pageLimit - 1)
 
@@ -47,6 +47,7 @@ router.get('/', async (req, res) => {
     const dataComPendencia = (data ?? []).map((lead) => ({
       ...lead,
       tem_mensagem_pendente: leadIdsComMensagemPendente.has(lead.id),
+      cliente_erp_vinculado: lead.clientes_erp ?? null,
     }))
 
     res.json({ data: dataComPendencia, total: count, page: Number(page), pageSize: pageLimit })
@@ -60,7 +61,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('leads')
-      .select('*, tarefas(*), whatsapp_mensagens(id, direcao, mensagem, created_at)')
+      .select('*, tarefas(*), whatsapp_mensagens(id, direcao, mensagem, created_at), clientes_erp!leads_cliente_erp_id_fkey(id, legacy_id, razao_social, cnpj_cpf, data_ultima_compra)')
       .eq('id', req.params.id)
       .single()
 
@@ -71,7 +72,7 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ erro: 'Sem permissão para acessar este lead' })
     }
 
-    res.json(data)
+    res.json({ ...data, cliente_erp_vinculado: data.clientes_erp ?? null })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

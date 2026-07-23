@@ -2,6 +2,7 @@ import axios from 'axios'
 import { supabase } from '../lib/supabase.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { proximoVendedor } from '../lib/distribuicao.js'
+import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 
@@ -326,6 +327,17 @@ export async function processWhatsappEvent(payload) {
       if (!error && novoLead) {
         lead = novoLead
         console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
+
+        // Tenta vincular ao cadastro do ERP pelo telefone — não bloqueia a criação do lead se falhar.
+        try {
+          const clienteErp = await buscarClienteErpPorTelefone(semPrefixo)
+          if (clienteErp) {
+            await supabase.from('leads').update({ cliente_erp_id: clienteErp.legacy_id }).eq('id', novoLead.id)
+            console.log('[webhook] lead vinculado ao cliente ERP:', clienteErp.legacy_id, clienteErp.razao_social)
+          }
+        } catch (err) {
+          console.error('[webhook] erro ao vincular cliente_erp:', err.message)
+        }
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
       }
