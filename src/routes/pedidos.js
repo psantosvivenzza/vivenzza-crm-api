@@ -5,7 +5,12 @@ const router = Router()
 
 const STATUS_VALIDOS = ['rascunho', 'confirmado', 'em_producao', 'enviado', 'entregue', 'cancelado']
 
-const SELECT_PEDIDO = '*, leads(id, nome, empresa), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(nome, preco_b2c)), contas_financeiras(*)'
+// Select "leve" pra listagem — a tabela da lista só usa pedido_itens.length (não
+// precisa de produtos aninhado); count:'exact' com o embed pesado original já dava
+// timeout em produção com 9k+ pedidos / 55k+ itens, mesmo antes destas mudanças.
+// O detalhe (GET /:id) usa o select completo abaixo.
+const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), pedido_itens(id)'
+const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b)), contas_financeiras(*)'
 
 // Resolve o preço unitário do produto de acordo com a lista de preço do pedido.
 // 'b2c'/'b2b'/'distribuidor' são as 3 colunas fixas; qualquer outro valor busca
@@ -32,9 +37,12 @@ router.get('/', async (req, res) => {
     const { status, lead_id, page = 1, limit = 50 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
 
+    // count:'planned' (estimativa via estatísticas do Postgres) em vez de 'exact' —
+    // a lista não usa o total pra nada hoje, e o exato exigia escanear/contar o
+    // join inteiro (9k+ pedidos x 55k+ itens) a cada request.
     let query = supabase
       .from('pedidos')
-      .select(SELECT_PEDIDO, { count: 'exact' })
+      .select(SELECT_PEDIDO_LISTA, { count: 'planned' })
       .order('criado_em', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
 
@@ -55,7 +63,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('pedidos')
-      .select(SELECT_PEDIDO)
+      .select(SELECT_PEDIDO_DETALHE)
       .eq('id', req.params.id)
       .single()
 
