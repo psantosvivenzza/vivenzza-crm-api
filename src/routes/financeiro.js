@@ -117,7 +117,7 @@ router.post('/', async (req, res) => {
   try {
     const {
       tipo, descricao, valor, vencimento,
-      categoria, pessoa_nome, documento_ref, observacoes, pedido_id
+      categoria, categoria_dre, pessoa_nome, documento_ref, observacoes, pedido_id
     } = req.body
 
     if (!tipo || !descricao || !valor || !vencimento) {
@@ -132,7 +132,7 @@ router.post('/', async (req, res) => {
       .from('contas_financeiras')
       .insert({
         tipo, descricao, valor: Number(valor), vencimento,
-        categoria, pessoa_nome, documento_ref, observacoes,
+        categoria, categoria_dre: categoria_dre || null, pessoa_nome, documento_ref, observacoes,
         pedido_id: pedido_id || null,
         usuario_id: req.user?.id,
         status: 'aberta',
