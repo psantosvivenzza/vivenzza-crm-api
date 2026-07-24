@@ -14,7 +14,7 @@ router.get('/busca', async (req, res) => {
     const like = `%${termo}%`
     const { data, error } = await supabase
       .from('clientes_erp')
-      .select('id, tipo, razao_social, nome_fantasia, cnpj_cpf')
+      .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, data_ultima_compra')
       .eq('ativo', true)
       .or(`razao_social.ilike.${like},nome_fantasia.ilike.${like},cnpj_cpf.ilike.${like}`)
       .order('razao_social')
