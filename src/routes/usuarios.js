@@ -5,12 +5,14 @@ import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
 
+const SELECT_FIELDS = 'id, nome, email, role, ativo, criado_em, meta_mensal, comissao_sem_meta, comissao_com_meta'
+
 // GET /api/usuarios — listar (só admin)
 router.get('/', adminOnly, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('usuarios')
-      .select('id, nome, email, role, ativo, criado_em')
+      .select(SELECT_FIELDS)
       .order('criado_em', { ascending: true })
 
     if (error) throw error
@@ -25,7 +27,7 @@ router.get('/:id', adminOnly, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('usuarios')
-      .select('id, nome, email, role, ativo, criado_em')
+      .select(SELECT_FIELDS)
       .eq('id', req.params.id)
       .single()
 
@@ -40,17 +42,21 @@ router.get('/:id', adminOnly, async (req, res) => {
 // POST /api/usuarios — criar (só admin)
 router.post('/', adminOnly, async (req, res) => {
   try {
-    const { nome, email, senha, role = 'vendedor', ativo = true } = req.body
+    const { nome, email, senha, role = 'vendedor', ativo = true, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
     if (!nome || !email || !senha) {
       return res.status(400).json({ erro: 'nome, email e senha são obrigatórios' })
     }
 
     const senha_hash = await bcrypt.hash(senha, 12)
+    const insertData = { nome, email: email.toLowerCase().trim(), senha_hash, role, ativo }
+    if (meta_mensal !== undefined) insertData.meta_mensal = meta_mensal
+    if (comissao_sem_meta !== undefined) insertData.comissao_sem_meta = comissao_sem_meta
+    if (comissao_com_meta !== undefined) insertData.comissao_com_meta = comissao_com_meta
 
     const { data, error } = await supabase
       .from('usuarios')
-      .insert({ nome, email: email.toLowerCase().trim(), senha_hash, role, ativo })
-      .select('id, nome, email, role, ativo, criado_em')
+      .insert(insertData)
+      .select(SELECT_FIELDS)
       .single()
 
     if (error) throw error
@@ -63,13 +69,16 @@ router.post('/', adminOnly, async (req, res) => {
 // PATCH /api/usuarios/:id — atualizar nome, email, senha, role, ativo (só admin)
 router.patch('/:id', adminOnly, async (req, res) => {
   try {
-    const { nome, email, senha, role, ativo } = req.body
+    const { nome, email, senha, role, ativo, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
     const updates = {}
     if (nome !== undefined) updates.nome = nome
     if (email !== undefined) updates.email = email.toLowerCase().trim()
     if (role !== undefined) updates.role = role
     if (ativo !== undefined) updates.ativo = ativo
     if (senha) updates.senha_hash = await bcrypt.hash(senha, 12)
+    if (meta_mensal !== undefined) updates.meta_mensal = meta_mensal
+    if (comissao_sem_meta !== undefined) updates.comissao_sem_meta = comissao_sem_meta
+    if (comissao_com_meta !== undefined) updates.comissao_com_meta = comissao_com_meta
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ erro: 'Nenhum campo para atualizar' })
@@ -79,7 +88,7 @@ router.patch('/:id', adminOnly, async (req, res) => {
       .from('usuarios')
       .update(updates)
       .eq('id', req.params.id)
-      .select('id, nome, email, role, ativo, criado_em')
+      .select(SELECT_FIELDS)
       .single()
 
     if (error) throw error

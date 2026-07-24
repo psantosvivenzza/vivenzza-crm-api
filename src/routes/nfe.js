@@ -4,6 +4,7 @@ import { gerarXmlNFe } from '../services/nfe/xml.js'
 import { assinarNFe } from '../services/nfe/assinar.js'
 import { enviarNFe, consultarNFe, cancelarNFe, statusSefaz } from '../services/nfe/sefaz.js'
 import { buscarCodigoMunicipio } from '../lib/ibge.js'
+import { gerarComissao } from '../lib/comissoes.js'
 
 const router = Router()
 
@@ -106,6 +107,17 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ erro: 'Ao menos um item é obrigatório' })
     }
 
+    if (pedido_id) {
+      const { count: jaAutorizada } = await supabase
+        .from('nfe')
+        .select('id', { count: 'exact', head: true })
+        .eq('pedido_id', pedido_id)
+        .eq('status', 'autorizada')
+      if (jaAutorizada > 0) {
+        return res.status(409).json({ erro: 'Este pedido já tem NF-e autorizada' })
+      }
+    }
+
     // Resolve o código IBGE do município do destinatário dinamicamente (uf + nome) —
     // usado no XML em vez de um valor fixo. Best-effort: se não resolver (nome não
     // bate, API fora do ar), fica null e a emissão em produção barra com erro claro
@@ -192,6 +204,17 @@ router.post('/:id/emitir', async (req, res) => {
       return res.status(400).json({ erro: `NFe com status "${nfe.status}" não pode ser emitida novamente` })
     }
 
+    if (nfe.pedido_id) {
+      const { count: jaAutorizada } = await supabase
+        .from('nfe')
+        .select('id', { count: 'exact', head: true })
+        .eq('pedido_id', nfe.pedido_id)
+        .eq('status', 'autorizada')
+      if (jaAutorizada > 0) {
+        return res.status(409).json({ erro: 'Este pedido já tem NF-e autorizada' })
+      }
+    }
+
     // Obtém próximo número da sequência
     const { data: seq } = await supabase.rpc('proxima_nfe', { p_serie: nfe.serie })
     const numero = seq || 1
@@ -231,6 +254,19 @@ router.post('/:id/emitir', async (req, res) => {
       xml_autorizado: autorizado ? retorno.respXml : null,
       motivo_rejeicao: autorizado ? null : `${retorno.cStat} - ${retorno.xMotivo}`,
     }).eq('id', nfe.id)
+
+    if (nfe.pedido_id) {
+      await supabase.from('pedidos').update({
+        status_fiscal: autorizado ? 'autorizado' : 'rejeitado',
+        numero_nfe: autorizado ? String(numero) : null,
+      }).eq('id', nfe.pedido_id)
+
+      if (autorizado) {
+        // Não deixa erro ao gerar comissão derrubar a resposta de emissão da NF-e —
+        // a NF-e já está autorizada na SEFAZ nesse ponto, isso não pode ser desfeito.
+        await gerarComissao(nfe.id).catch(err => console.error('[nfe] erro ao gerar comissão:', err.message))
+      }
+    }
 
     const { data: atualizada } = await supabase.from('nfe').select('*').eq('id', nfe.id).single()
     res.json({ ...atualizada, sefaz: retorno })

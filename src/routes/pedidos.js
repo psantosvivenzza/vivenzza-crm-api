@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
+import { calcularComissaoEstimada } from '../lib/comissoes.js'
 
 const router = Router()
 
@@ -12,7 +13,7 @@ const STATUS_VALIDOS = ['rascunho', 'confirmado', 'em_producao', 'enviado', 'ent
 // clientes_erp ao lado de leads: pedido novo usa cliente_erp_id, pedido antigo (migrado
 // do legado) só tem lead_id — os dois embeds convivem, cada pedido só preenche um.
 const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf), pedido_itens(id)'
-const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b)), contas_financeiras(*)'
+const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf, ie, endereco, contatos), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b, ncm, cst, cfop_padrao, unidade)), contas_financeiras(*)'
 
 // Resolve o preço unitário do produto de acordo com a lista de preço do pedido.
 // 'b2c'/'b2b'/'distribuidor' são as 3 colunas fixas; qualquer outro valor busca
@@ -84,7 +85,7 @@ router.post('/', async (req, res) => {
     const {
       cliente_erp_id, itens, observacoes, desconto = 0,
       condicao_pagamento, forma_pagamento, lista_preco,
-      representante_id, representante_nome, comissao_percentual,
+      vendedor_id, vendedor_nome,
       valor_frete = 0, tipo_frete, peso_bruto, peso_liquido, qtde_volumes,
     } = req.body
     const usuario_id = req.user?.id
@@ -122,8 +123,7 @@ router.post('/', async (req, res) => {
       .insert({
         cliente_erp_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho',
         condicao_pagamento, forma_pagamento, lista_preco,
-        representante_id: representante_id || null, representante_nome,
-        comissao_percentual: comissao_percentual != null ? Number(comissao_percentual) : null,
+        vendedor_id: vendedor_id || null, vendedor_nome,
         valor_frete: Number(valor_frete), tipo_frete,
         peso_bruto: peso_bruto != null ? Number(peso_bruto) : null,
         peso_liquido: peso_liquido != null ? Number(peso_liquido) : null,
@@ -173,6 +173,22 @@ router.put('/:id/status', async (req, res) => {
 
     if (status === 'confirmado') {
       await gerarParcelas(data)
+
+      // Trava o valor base e uma estimativa de percentual no momento da confirmação —
+      // o valor real e final da comissão só é calculado quando a NF-e é autorizada
+      // (lib/comissoes.js gerarComissao), podendo diferir se as vendas do vendedor
+      // mudarem entre a confirmação e a autorização.
+      const estimativa = data.vendedor_id ? await calcularComissaoEstimada(data.vendedor_id) : null
+      const { data: pedidoAtualizado } = await supabase
+        .from('pedidos')
+        .update({
+          valor_base_comissao: data.total,
+          comissao_percentual_snapshot: estimativa?.percentual_estimado ?? null,
+        })
+        .eq('id', data.id)
+        .select('*, leads(nome), clientes_erp(razao_social)')
+        .single()
+      if (pedidoAtualizado) Object.assign(data, pedidoAtualizado)
     }
 
     res.json(data)
