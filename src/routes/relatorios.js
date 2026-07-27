@@ -41,7 +41,7 @@ router.get('/dre', adminOnly, async (req, res) => {
       buscarTudo((from, to) =>
         supabase
           .from('nfe')
-          .select('data_emissao, forma_pagamento, status, valor_produtos, valor_icms, valor_pis, valor_cofins, valor_total')
+          .select('data_emissao, forma_pagamento, status, serie, valor_produtos, valor_icms, valor_pis, valor_cofins, valor_total')
           .gte('data_emissao', inicioAno)
           .lt('data_emissao', inicioProxAno)
           .range(from, to)
@@ -49,7 +49,7 @@ router.get('/dre', adminOnly, async (req, res) => {
       buscarTudo((from, to) =>
         supabase
           .from('nfe_itens')
-          .select('quantidade, produto_id, nfe!inner(data_emissao, status)')
+          .select('quantidade, produto_id, nfe!inner(data_emissao, status, serie)')
           .gte('nfe.data_emissao', inicioAno)
           .lt('nfe.data_emissao', inicioProxAno)
           .range(from, to)
@@ -88,9 +88,12 @@ router.get('/dre', adminOnly, async (req, res) => {
 function calcularSecoesDoMes({ mes, notas, itens, contas, custoPorProduto }) {
   const doMes = (dataStr) => new Date(dataStr).getUTCMonth() + 1 === mes
 
-  const notasDoMes = notas.filter(n => doMes(n.data_emissao))
-  const notasValidas = notasDoMes.filter(n => n.status !== 'cancelada')
-  const notasCanceladas = notasDoMes.filter(n => n.status === 'cancelada')
+  // Só entram na apuração fiscal notas série 1 (NF-e SEFAZ) realmente autorizadas —
+  // nota interna (série 99) não tem validade fiscal e rascunho/rejeitada não são
+  // vendas de fato ocorridas.
+  const notasFiscaisDoMes = notas.filter(n => doMes(n.data_emissao) && n.serie === 1)
+  const notasValidas = notasFiscaisDoMes.filter(n => n.status === 'autorizada')
+  const notasCanceladas = notasFiscaisDoMes.filter(n => n.status === 'cancelada')
 
   const aVista = notasValidas.filter(n => FORMAS_A_VISTA.has(n.forma_pagamento)).reduce((s, n) => s + Number(n.valor_produtos || 0), 0)
   const aPrazo = notasValidas.filter(n => !FORMAS_A_VISTA.has(n.forma_pagamento)).reduce((s, n) => s + Number(n.valor_produtos || 0), 0)
@@ -101,7 +104,7 @@ function calcularSecoesDoMes({ mes, notas, itens, contas, custoPorProduto }) {
   const receitaLiquida = receitaBruta - deducoes - impostos
 
   const custoDireto = itens
-    .filter(i => doMes(i.nfe.data_emissao) && i.nfe.status !== 'cancelada')
+    .filter(i => doMes(i.nfe.data_emissao) && i.nfe.serie === 1 && i.nfe.status === 'autorizada')
     .reduce((s, i) => s + Number(i.quantidade || 0) * (custoPorProduto[i.produto_id] || 0), 0)
   const lucroBruto = receitaLiquida - custoDireto
 

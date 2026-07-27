@@ -19,6 +19,9 @@ function intervaloMes(mes, ano) {
 // Busca todas as linhas paginando em blocos de 1000 (limite padrão do PostgREST) —
 // necessário aqui porque o resumo soma comissoes do mês inteiro, que pode passar de
 // 1000 linhas em meses de pico.
+// Exclui estornada/cancelada — uma venda desfeita (NF-e cancelada na SEFAZ ou
+// nota interna cancelada) não deve contar como "vendido no mês" nem inflar o
+// total de comissão devida.
 async function buscarTodasComissoesDoMes(inicio, fim) {
   const PAGE = 1000
   let offset = 0
@@ -29,6 +32,7 @@ async function buscarTodasComissoesDoMes(inicio, fim) {
       .select('vendedor_id, valor_base, valor_comissao')
       .gte('data_geracao', inicio)
       .lt('data_geracao', fim)
+      .not('status', 'in', '(estornada,cancelada)')
       .range(offset, offset + PAGE - 1)
     if (error) throw error
     todas = todas.concat(data)

@@ -4,7 +4,7 @@ import { gerarXmlNFe } from '../services/nfe/xml.js'
 import { assinarNFe } from '../services/nfe/assinar.js'
 import { enviarNFe, consultarNFe, cancelarNFe, statusSefaz } from '../services/nfe/sefaz.js'
 import { buscarCodigoMunicipio } from '../lib/ibge.js'
-import { gerarComissao } from '../lib/comissoes.js'
+import { gerarComissao, estornarComissao } from '../lib/comissoes.js'
 
 const router = Router()
 
@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
 
     let query = supabase
       .from('nfe')
-      .select('id, tipo, numero, serie, chave, status, protocolo, data_emissao, dest_nome, dest_cnpj_cpf, valor_total, natureza_operacao, created_at', { count: 'exact' })
+      .select('id, tipo, numero, serie, tipo_documento, chave, status, protocolo, data_emissao, dest_nome, dest_cnpj_cpf, valor_total, natureza_operacao, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
 
@@ -118,11 +118,19 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // Série 99 = Nota Interna: documento sem validade fiscal, nunca vai à SEFAZ.
+    // Nasce e morre nesta requisição (sem rascunho → emitir em duas etapas como
+    // a série 1) — já sai com número da série 99 e status final.
+    const serieNum = Number(serie) === 99 ? 99 : 1
+    const notaInterna = serieNum === 99
+    const tipo_documento = notaInterna ? 'nota_interna' : 'nfe_sefaz'
+
     // Resolve o código IBGE do município do destinatário dinamicamente (uf + nome) —
     // usado no XML em vez de um valor fixo. Best-effort: se não resolver (nome não
     // bate, API fora do ar), fica null e a emissão em produção barra com erro claro
-    // em vez de sair com o município errado (ver services/nfe/xml.js).
-    const dest_cmun = await buscarCodigoMunicipio(dest_uf, dest_municipio)
+    // em vez de sair com o município errado (ver services/nfe/xml.js). Nota interna
+    // não gera XML fiscal, então não precisa resolver isso.
+    const dest_cmun = notaInterna ? null : await buscarCodigoMunicipio(dest_uf, dest_municipio)
 
     // Calcula totais
     const valorProdutos = itens.reduce((acc, i) => acc + Number(i.valor_total), 0)
@@ -131,11 +139,17 @@ router.post('/', async (req, res) => {
     const valorPis = itens.reduce((acc, i) => acc + Number(i.valor_pis || 0), 0)
     const valorCofins = itens.reduce((acc, i) => acc + Number(i.valor_cofins || 0), 0)
 
+    let numero = null
+    if (notaInterna) {
+      const { data: seq } = await supabase.rpc('proxima_nfe', { p_serie: 99 })
+      numero = seq || 1
+    }
+
     // Cria a NFe
     const { data: nfe, error: errNfe } = await supabase
       .from('nfe')
       .insert({
-        tipo, serie, natureza_operacao, finalidade, forma_pagamento,
+        tipo, serie: serieNum, tipo_documento, numero, natureza_operacao, finalidade, forma_pagamento,
         dest_nome, dest_cnpj_cpf, dest_ie,
         dest_logradouro, dest_numero, dest_complemento,
         dest_bairro, dest_municipio, dest_uf, dest_cmun, dest_cep, dest_fone, dest_email,
@@ -148,7 +162,7 @@ router.post('/', async (req, res) => {
         valor_cofins: valorCofins,
         observacoes, pedido_id: pedido_id || null, lead_id: lead_id || null,
         usuario_id: req.user?.id,
-        status: 'rascunho',
+        status: notaInterna ? 'emitida_interna' : 'rascunho',
       })
       .select()
       .single()
@@ -183,6 +197,12 @@ router.post('/', async (req, res) => {
       if (errItens) throw errItens
     }
 
+    // Nota interna gera comissão de imediato — não há autorização da SEFAZ pra
+    // esperar. O gatilho da série 1 continua sendo a autorização, em POST /:id/emitir.
+    if (notaInterna && pedido_id) {
+      await gerarComissao(nfe.id).catch(err => console.error('[nfe] erro ao gerar comissão (nota interna):', err.message))
+    }
+
     const { data: completo } = await supabase.from('nfe').select('*, nfe_itens(*)').eq('id', nfe.id).single()
     res.status(201).json(completo)
   } catch (err) {
@@ -200,6 +220,9 @@ router.post('/:id/emitir', async (req, res) => {
       .single()
 
     if (error || !nfe) return res.status(404).json({ erro: 'NFe não encontrada' })
+    if (nfe.tipo_documento === 'nota_interna') {
+      return res.status(400).json({ erro: 'Nota interna não pode ser transmitida à SEFAZ' })
+    }
     if (!['rascunho', 'rejeitada'].includes(nfe.status)) {
       return res.status(400).json({ erro: `NFe com status "${nfe.status}" não pode ser emitida novamente` })
     }
@@ -280,12 +303,29 @@ router.post('/:id/cancelar', async (req, res) => {
   try {
     const { justificativa } = req.body
 
+    const { data: nfe } = await supabase.from('nfe').select('*').eq('id', req.params.id).single()
+    if (!nfe) return res.status(404).json({ erro: 'NFe não encontrada' })
+
+    // Nota interna: cancelamento é só uma baixa no próprio banco, nunca fala com a
+    // SEFAZ. Estorna a comissão gerada (se ainda 'disponivel') — a venda foi desfeita.
+    if (nfe.tipo_documento === 'nota_interna') {
+      if (nfe.status !== 'emitida_interna') {
+        return res.status(400).json({ erro: `Nota interna com status "${nfe.status}" não pode ser cancelada` })
+      }
+
+      await supabase.from('nfe').update({
+        status: 'cancelada_interna',
+        motivo_rejeicao: justificativa || null,
+      }).eq('id', nfe.id)
+
+      await estornarComissao(nfe.id).catch(err => console.error('[nfe] erro ao estornar comissão (nota interna):', err.message))
+
+      return res.json({ cancelado: true })
+    }
+
     if (!justificativa || justificativa.length < 15) {
       return res.status(400).json({ erro: 'Justificativa deve ter ao menos 15 caracteres' })
     }
-
-    const { data: nfe } = await supabase.from('nfe').select('*').eq('id', req.params.id).single()
-    if (!nfe) return res.status(404).json({ erro: 'NFe não encontrada' })
     if (nfe.status !== 'autorizada') return res.status(400).json({ erro: 'Somente NFe autorizada pode ser cancelada' })
     if (!nfe.protocolo) return res.status(400).json({ erro: 'NFe sem protocolo de autorização' })
 
@@ -297,6 +337,13 @@ router.post('/:id/cancelar', async (req, res) => {
       xml_cancelamento: retorno.respXml,
       motivo_rejeicao: cancelado ? null : `${retorno.cStat} - ${retorno.xMotivo}`,
     }).eq('id', req.params.id)
+
+    if (cancelado) {
+      // NF-e cancelada na SEFAZ = venda desfeita — estorna a comissão gerada na
+      // autorização (se ainda 'disponivel'), senão o vendedor fica com comissão
+      // de uma venda que não existe mais.
+      await estornarComissao(nfe.id).catch(err => console.error('[nfe] erro ao estornar comissão:', err.message))
+    }
 
     res.json({ cancelado, ...retorno })
   } catch (err) {

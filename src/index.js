@@ -21,6 +21,7 @@ import estoqueRouter from './routes/estoque.js'
 import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
 import comissoesRouter from './routes/comissoes.js'
+import cfopsRouter from './routes/cfops.js'
 import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter from './routes/sdr.js'
@@ -131,6 +132,7 @@ app.use('/api/estoque', auth, estoqueRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/comissoes', auth, comissoesRouter)
+app.use('/api/cfops', auth, cfopsRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
 app.use('/api/admin', auth, adminRouter)
 app.use('/api/admin/campanhas', auth, adminOnly, campanhasRouter)

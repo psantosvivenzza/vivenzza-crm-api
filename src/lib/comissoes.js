@@ -17,13 +17,15 @@ async function buscarVendedor(vendedor_id) {
 
 // Soma comissoes.valor_base já geradas pro vendedor no mês corrente — a tabela
 // comissoes é o ledger confiável do mês (evita reabrir discussão sobre qual data
-// de pedido usar pra "vendas do mês").
+// de pedido usar pra "vendas do mês"). Exclui estornada/cancelada: uma venda
+// desfeita (NF-e cancelada, nota interna cancelada) não deve contar pra meta.
 async function somaComissoesDoMes(vendedor_id) {
   const { data, error } = await supabase
     .from('comissoes')
     .select('valor_base')
     .eq('vendedor_id', vendedor_id)
     .gte('data_geracao', inicioMesAtual())
+    .not('status', 'in', '(estornada,cancelada)')
   if (error) throw error
   return (data || []).reduce((acc, c) => acc + Number(c.valor_base), 0)
 }
@@ -49,18 +51,27 @@ export async function calcularComissaoEstimada(vendedor_id) {
   }
 }
 
-// Chamado logo após a NF-e ser autorizada pela SEFAZ (src/routes/nfe.js). Idempotente:
-// se já existe comissão pra esse par (nfe_id, vendedor_id) — corrida ou nova tentativa
-// de emissão do mesmo fluxo — retorna a existente em vez de duplicar (UNIQUE no banco
-// é a garantia final; o SELECT prévio evita o round-trip de erro no caminho comum).
+// Gatilho de geração por série: série 1 (NF-e SEFAZ) gera na autorização;
+// série 99 (Nota Interna) gera imediatamente ao ser registrada — não passa
+// pela SEFAZ, então não existe "autorizada" nesse fluxo.
+function gatilhoValido(nfe) {
+  if (nfe.serie === 99) return nfe.status === 'emitida_interna'
+  return nfe.status === 'autorizada'
+}
+
+// Chamado após a NF-e ser autorizada pela SEFAZ (série 1) ou registrada como nota
+// interna (série 99) — src/routes/nfe.js. Idempotente: se já existe comissão pra
+// esse par (nfe_id, vendedor_id) — corrida ou nova tentativa do mesmo fluxo —
+// retorna a existente em vez de duplicar (UNIQUE no banco é a garantia final; o
+// SELECT prévio evita o round-trip de erro no caminho comum).
 export async function gerarComissao(nfeId) {
   const { data: nfe, error: errNfe } = await supabase
     .from('nfe')
-    .select('id, pedido_id, status')
+    .select('id, pedido_id, status, serie')
     .eq('id', nfeId)
     .single()
   if (errNfe) throw errNfe
-  if (!nfe || nfe.status !== 'autorizada' || !nfe.pedido_id) return null
+  if (!nfe || !nfe.pedido_id || !gatilhoValido(nfe)) return null
 
   const { data: pedido, error: errPedido } = await supabase
     .from('pedidos')
@@ -120,4 +131,20 @@ export async function gerarComissao(nfeId) {
   }
 
   return comissao
+}
+
+// Estorna a comissão de uma NF-e cancelada (SEFAZ ou nota interna) — a venda foi
+// desfeita, então a comissão não deve mais contar. Só mexe em comissão ainda
+// 'disponivel': se já foi 'paga', o estorno de dinheiro já repassado é decisão
+// manual do admin, não algo pra reverter sozinho aqui.
+export async function estornarComissao(nfeId) {
+  const { data, error } = await supabase
+    .from('comissoes')
+    .update({ status: 'estornada', atualizado_em: new Date().toISOString() })
+    .eq('nfe_id', nfeId)
+    .eq('status', 'disponivel')
+    .select()
+    .maybeSingle()
+  if (error) throw error
+  return data
 }

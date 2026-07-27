@@ -1,0 +1,23 @@
+-- Achado durante o teste local da série 99 (Nota Interna): a tabela `nfe` já
+-- tinha 6.861 notas legadas com serie=99 (numero 7 a 7107, legacy_id tipo
+-- '001-7107-99'), inseridas direto na importação do ERP legado, sem nunca
+-- passar por proxima_nfe(). O contador nfe_numeracao pra serie=99 nunca tinha
+-- sido usado (ultimo_numero=0), então a primeira nota interna real geraria
+-- numero=1, 2, 3... colidindo com uma nota legada assim que chegasse em 7.
+--
+-- Avança o contador pro maior numero já usado pela série 99, pra toda nota
+-- interna nova nascer com número inédito. Execute no Supabase SQL Editor
+-- (já aplicado via MCP em 2026-07-27).
+--
+-- ATENÇÃO — achado relacionado, NÃO corrigido por esta migration: a série 1
+-- também tem 3.534 notas legadas (numero variando de -1066 a 5.241.175, ex.
+-- legacy_id '001-5241175-1') e o contador de serie=1 também está zerado. Isso
+-- significa que a primeira NF-e real emitida via SEFAZ por este sistema (série 1)
+-- vai colidir com uma nota legada já em numero=1 ('001-1-E'). Não mexi nisso
+-- porque decidir o próximo número da série 1 fiscal é uma decisão contábil/fiscal
+-- (o padrão desses números legados não é claro — parecem vir direto de um campo
+-- do ERP antigo, não necessariamente uma sequência fiscal real) e está fora do
+-- escopo desta tarefa (série 99). Precisa de decisão antes da primeira emissão
+-- real de NF-e SEFAZ neste sistema.
+
+UPDATE nfe_numeracao SET ultimo_numero = 7107 WHERE serie = 99;
