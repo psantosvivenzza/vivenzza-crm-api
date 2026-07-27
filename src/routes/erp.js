@@ -88,24 +88,30 @@ router.put('/clientes/:id', async (req, res) => {
   }
 })
 
-// GET /api/admin/erp/notas — listar vendas_legado (NFs modelo 01/55)
-router.get('/notas', async (req, res) => {
+// GET /api/admin/erp/notas-legado — histórico unificado de duas fontes legadas:
+// vendas_legado (série 99 — notas internas, migração validada) e nfe.serie=1
+// (série "E" do NetVision — NF-e SEFAZ reais, legacy_id termina em "-E"). As
+// demais séries em `nfe` (0,2,3,5,10,33,55,890) são artefato de importação sem
+// cliente real vinculado e ficam de fora — ver notas_legado_unificado_view.sql.
+router.get('/notas-legado', async (req, res) => {
   try {
     const { q, data_inicio, data_fim, status, serie, page = 1, limit = 50 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
     let query = supabase
-      .from('vendas_legado')
-      .select('id, numero_nf, serie, modelo, data_emissao, natureza_operacao, valor_total, valor_produtos, status, em_revisao, clientes_erp(razao_social, cnpj_cpf)', { count: 'exact' })
+      .from('notas_legado_unificado')
+      .select('id, origem, numero, serie, serie_label, data_emissao, valor_total, status, em_revisao, cliente_nome, cliente_cnpj', { count: 'exact' })
       .order('data_emissao', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
+
     if (data_inicio) query = query.gte('data_emissao', data_inicio)
     if (data_fim) query = query.lte('data_emissao', data_fim)
     if (status) query = query.eq('status', status)
     // Trata qualquer valor "vazio" (string vazia, 'todas', 'null', 'undefined') como
-    // "sem filtro" — defesa contra o frontend mandar um sentinela diferente do esperado.
+    // "sem filtro" — mesma defesa já usada nos outros filtros de série do sistema.
     const serieValida = serie && !['todas', 'null', 'undefined'].includes(String(serie).toLowerCase())
-    if (serieValida) query = query.eq('serie', Number(serie))
-    if (q) query = query.ilike('numero_nf', `%${q}%`)
+    if (serieValida) query = query.eq('serie', serie)
+    if (q) query = query.ilike('numero', `%${q}%`)
+
     const { data, error, count } = await query
     if (error) throw error
     res.json({ data, total: count, page: Number(page), limit: Number(limit) })
@@ -114,16 +120,85 @@ router.get('/notas', async (req, res) => {
   }
 })
 
-// GET /api/admin/erp/notas/:id — detalhe com itens (JSONB)
-router.get('/notas/:id', async (req, res) => {
+// GET /api/admin/erp/notas-legado/:id — detalhe normalizado, funciona pras duas
+// origens (tenta vendas_legado primeiro, depois nfe serie=1) sem o frontend
+// precisar saber de qual tabela veio.
+router.get('/notas-legado/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data: viaVendas, error: errV } = await supabase
       .from('vendas_legado')
       .select('*, clientes_erp(razao_social, cnpj_cpf, ie, endereco)')
       .eq('id', req.params.id)
-      .single()
-    if (error) throw error
-    res.json(data)
+      .maybeSingle()
+    if (errV) throw errV
+
+    if (viaVendas) {
+      // itens é jsonb com chaves compactas (c/q/u/vd/vt/vu) — sem nome de produto,
+      // só o código legado (limitação da fonte, não do backend).
+      const itens = (viaVendas.itens || []).map(it => ({
+        codigo: it.c,
+        descricao: it.c,
+        ncm: null,
+        quantidade: it.q,
+        valor_unitario: it.vu,
+        valor_desconto: it.vd,
+        valor_total: it.vt,
+      }))
+      return res.json({
+        origem: 'vendas_legado',
+        serie: '99',
+        serie_label: 'Interna',
+        numero_nf: viaVendas.numero_nf,
+        modelo: viaVendas.modelo,
+        data_emissao: viaVendas.data_emissao,
+        natureza_operacao: viaVendas.natureza_operacao,
+        status: viaVendas.status,
+        em_revisao: viaVendas.em_revisao,
+        valor_produtos: viaVendas.valor_produtos,
+        valor_desconto: viaVendas.valor_desconto,
+        valor_total: viaVendas.valor_total,
+        clientes_erp: viaVendas.clientes_erp,
+        itens,
+      })
+    }
+
+    const { data: viaNfe, error: errN } = await supabase
+      .from('nfe')
+      .select('*, nfe_itens(*)')
+      .eq('id', req.params.id)
+      .eq('serie', 1)
+      .maybeSingle()
+    if (errN) throw errN
+    if (!viaNfe) return res.status(404).json({ erro: 'Nota não encontrada' })
+
+    const itens = (viaNfe.nfe_itens || [])
+      .sort((a, b) => (a.numero_item || 0) - (b.numero_item || 0))
+      .map(it => ({
+        codigo: it.codigo,
+        descricao: it.descricao,
+        ncm: it.ncm,
+        quantidade: it.quantidade,
+        valor_unitario: it.valor_unitario,
+        valor_desconto: it.valor_desconto,
+        valor_total: it.valor_total,
+      }))
+
+    res.json({
+      origem: 'nfe',
+      serie: 'E',
+      serie_label: 'NF-e SEFAZ',
+      numero_nf: String(viaNfe.numero),
+      modelo: '55',
+      data_emissao: viaNfe.data_emissao,
+      natureza_operacao: viaNfe.natureza_operacao,
+      status: viaNfe.status,
+      em_revisao: false,
+      valor_produtos: viaNfe.valor_produtos,
+      valor_desconto: viaNfe.valor_desconto,
+      valor_total: viaNfe.valor_total,
+      clientes_erp: { razao_social: viaNfe.dest_nome, cnpj_cpf: viaNfe.dest_cnpj_cpf, ie: viaNfe.dest_ie, endereco: null },
+      itens,
+    })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
