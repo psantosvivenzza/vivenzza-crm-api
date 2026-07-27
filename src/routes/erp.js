@@ -41,10 +41,57 @@ router.get('/clientes/:id', async (req, res) => {
   }
 })
 
+// PUT /api/admin/erp/clientes/:id — edição de cadastro
+router.put('/clientes/:id', async (req, res) => {
+  try {
+    const {
+      razao_social, nome_fantasia, cnpj_cpf, ie,
+      telefone, celular, email,
+      logradouro, numero, complemento, bairro, cidade, estado, cep, pais,
+      observacoes, ativo,
+    } = req.body
+
+    if (!razao_social) return res.status(400).json({ erro: 'razao_social é obrigatório' })
+
+    // contatos/endereco são JSONB — o form manda o estado completo, então
+    // reconstrói os dois objetos inteiros em vez de fazer merge parcial.
+    const contatos = [
+      telefone && { tipo: 'telefone', valor: telefone },
+      celular && { tipo: 'celular', valor: celular },
+      email && { tipo: 'email', valor: email },
+    ].filter(Boolean)
+
+    const endereco = {
+      logradouro: logradouro || null,
+      numero: numero || null,
+      complemento: complemento || null,
+      bairro: bairro || null,
+      cidade: cidade || null,
+      estado: estado || null,
+      cep: cep || null,
+      pais: pais || null,
+    }
+
+    const { data, error } = await supabase
+      .from('clientes_erp')
+      .update({ razao_social, nome_fantasia, cnpj_cpf, ie, contatos, endereco, observacoes, ativo })
+      .eq('id', req.params.id)
+      .select()
+      .single()
+
+    if (error) throw error
+    if (!data) return res.status(404).json({ erro: 'Cliente não encontrado' })
+
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // GET /api/admin/erp/notas — listar vendas_legado (NFs modelo 01/55)
 router.get('/notas', async (req, res) => {
   try {
-    const { q, data_inicio, data_fim, status, page = 1, limit = 50 } = req.query
+    const { q, data_inicio, data_fim, status, serie, page = 1, limit = 50 } = req.query
     const offset = (Number(page) - 1) * Number(limit)
     let query = supabase
       .from('vendas_legado')
@@ -54,6 +101,7 @@ router.get('/notas', async (req, res) => {
     if (data_inicio) query = query.gte('data_emissao', data_inicio)
     if (data_fim) query = query.lte('data_emissao', data_fim)
     if (status) query = query.eq('status', status)
+    if (serie) query = query.eq('serie', Number(serie))
     if (q) query = query.ilike('numero_nf', `%${q}%`)
     const { data, error, count } = await query
     if (error) throw error
