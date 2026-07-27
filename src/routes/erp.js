@@ -101,7 +101,10 @@ router.get('/notas', async (req, res) => {
     if (data_inicio) query = query.gte('data_emissao', data_inicio)
     if (data_fim) query = query.lte('data_emissao', data_fim)
     if (status) query = query.eq('status', status)
-    if (serie) query = query.eq('serie', Number(serie))
+    // Trata qualquer valor "vazio" (string vazia, 'todas', 'null', 'undefined') como
+    // "sem filtro" — defesa contra o frontend mandar um sentinela diferente do esperado.
+    const serieValida = serie && !['todas', 'null', 'undefined'].includes(String(serie).toLowerCase())
+    if (serieValida) query = query.eq('serie', Number(serie))
     if (q) query = query.ilike('numero_nf', `%${q}%`)
     const { data, error, count } = await query
     if (error) throw error
