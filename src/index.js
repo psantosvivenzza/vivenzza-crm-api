@@ -132,6 +132,10 @@ app.use('/api/clientes-erp', auth, clientesErpRouter)
 app.use('/api/tarefas', auth, tarefasRouter)
 app.use('/api/dashboard', auth, dashboardRouter)
 app.use('/api/estoque', auth, estoqueRouter)
+// Precisa vir ANTES de '/api/financeiro' — senão financeiroRouter (que tem
+// GET /:id) intercepta "/aging" como se fosse um id de conta, e a Postgres
+// rejeita "aging" como uuid inválido antes da requisição chegar no agingRouter.
+app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/comissoes', auth, comissoesRouter)
@@ -147,7 +151,6 @@ app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
 app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
-app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
 app.use('/api/cobrancas', auth, adminOnly, cobrancasRouter)
 
 // Health check
