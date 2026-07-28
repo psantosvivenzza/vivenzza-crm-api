@@ -3,7 +3,15 @@
 // quanto no disparo manual (individual e em massa).
 
 const fmtBRL = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-const fmtData = (d) => new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+
+// `vencimento` vem do banco como 'YYYY-MM-DD' sem horário (coluna `date`).
+// new Date('2026-07-31') é interpretado como meia-noite UTC — convertendo pra
+// America/Sao_Paulo (UTC-3) isso vira 30/07 às 21h, exibindo o dia errado pro
+// cliente. Formata os componentes da string direto, sem passar por Date/fuso.
+const fmtData = (d) => {
+  const [ano, mes, dia] = String(d).slice(0, 10).split('-')
+  return `${dia}/${mes}/${ano}`
+}
 
 // Faixas (não dia exato) — se o cron falhar num dia, ninguém fica de fora
 // na próxima execução. `diasAtraso` = hoje - vencimento (negativo = ainda não venceu).
