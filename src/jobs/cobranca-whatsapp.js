@@ -25,13 +25,23 @@ export async function executarReguaCobranca() {
     return { ativo: false, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, quitados: 0, erros: 0 }
   }
 
-  const { data: contas, error } = await supabase
-    .from('contas_financeiras')
-    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca')
-    .eq('tipo', 'receber')
-    .in('status', ['aberta', 'vencida'])
-
-  if (error) throw error
+  // PostgREST limita a 1000 linhas por padrão — pagina pra não deixar clientes
+  // de fora da régua silenciosamente (mesmo bug corrigido em aging.js).
+  const contas = []
+  {
+    const PAGE = 1000
+    for (let offset = 0; ; offset += PAGE) {
+      const { data, error } = await supabase
+        .from('contas_financeiras')
+        .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca')
+        .eq('tipo', 'receber')
+        .in('status', ['aberta', 'vencida'])
+        .range(offset, offset + PAGE - 1)
+      if (error) throw error
+      contas.push(...data)
+      if (data.length < PAGE) break
+    }
+  }
 
   const resumo = { ativo: true, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, quitados: 0, erros: 0 }
 

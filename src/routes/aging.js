@@ -25,18 +25,32 @@ const SCORE_POR_ORDEM = ['verde', 'amarelo', 'laranja', 'vermelho']
 // `valor` é sempre o valor cheio do título (migração não descontou baixa
 // parcial do legado) — `saldo` é o que realmente falta receber, e é isso que
 // deve alimentar buckets/cards/mensagens de cobrança daqui pra frente.
+//
+// PostgREST limita a 1000 linhas por resposta por padrão — com ~1.100 títulos
+// abertos hoje (acima do limite), sem paginar aqui o Aging Report vinha
+// truncando resultado de forma silenciosa e não-determinística (a ordem física
+// das linhas muda a cada INSERT/UPDATE/DELETE, então quem ficava de fora
+// variava a cada execução — bug real já visto antes em clienteErpMatch.js e
+// nos scripts de auditoria desta sessão).
 async function buscarContasAbertas({ vendedor_id }) {
-  let query = supabase
-    .from('contas_financeiras')
-    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, vendedor_id, pedido_id, documento_ref')
-    .eq('tipo', 'receber')
-    .in('status', ['aberta', 'vencida'])
+  const contas = []
+  const PAGE = 1000
+  for (let offset = 0; ; offset += PAGE) {
+    let query = supabase
+      .from('contas_financeiras')
+      .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, vendedor_id, pedido_id, documento_ref')
+      .eq('tipo', 'receber')
+      .in('status', ['aberta', 'vencida'])
+      .range(offset, offset + PAGE - 1)
 
-  if (vendedor_id) query = query.eq('vendedor_id', vendedor_id)
+    if (vendedor_id) query = query.eq('vendedor_id', vendedor_id)
 
-  const { data, error } = await query
-  if (error) throw error
-  return (data ?? []).map((c) => ({ ...c, saldo: Number(c.valor || 0) - Number(c.valor_pago || 0) }))
+    const { data, error } = await query
+    if (error) throw error
+    contas.push(...data)
+    if (data.length < PAGE) break
+  }
+  return contas.map((c) => ({ ...c, saldo: Number(c.valor || 0) - Number(c.valor_pago || 0) }))
 }
 
 // GET /api/financeiro/aging/resumo — os 6 cards
