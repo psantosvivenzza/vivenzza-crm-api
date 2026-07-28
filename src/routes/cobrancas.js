@@ -53,7 +53,14 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
     const etapa = calcularEtapa(diasAtraso) ?? 1
 
     const mensagem = montarMensagem(etapa, { nome: pessoaNome, valor: valorTotal, vencimento: pior.vencimento, diasAtraso })
-    await enviarTextoFinanceiro(telefone, mensagem)
+
+    try {
+      await enviarTextoFinanceiro(telefone, mensagem)
+    } catch (erroEnvio) {
+      // Número inválido/sem WhatsApp é problema do dado, não do servidor — 400 com
+      // mensagem clara em vez do 500 genérico que a Evolution API devolveria.
+      return res.status(400).json({ erro: erroEnvio.message })
+    }
 
     const { data: registro, error: erroInsert } = await supabase.from('cobrancas_whatsapp').insert({
       contas_financeiras_id: pior.id,
