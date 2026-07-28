@@ -22,23 +22,31 @@ function diasAtrasoDe(vencimento) {
 export async function executarReguaCobranca() {
   if (!(await cobrancaEstaAtiva())) {
     console.log('[cobranca-whatsapp] desligado (automacoes_config.cobranca_whatsapp_ativa=false) — nada enviado')
-    return { ativo: false, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, erros: 0 }
+    return { ativo: false, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, quitados: 0, erros: 0 }
   }
 
   const { data: contas, error } = await supabase
     .from('contas_financeiras')
-    .select('id, pessoa_nome, valor, vencimento, telefone_cobranca')
+    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca')
     .eq('tipo', 'receber')
     .in('status', ['aberta', 'vencida'])
 
   if (error) throw error
 
-  const resumo = { ativo: true, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, erros: 0 }
+  const resumo = { ativo: true, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, quitados: 0, erros: 0 }
 
   for (const conta of contas ?? []) {
     const diasAtraso = diasAtrasoDe(conta.vencimento)
     const etapa = calcularEtapa(diasAtraso)
     if (etapa === null) continue
+
+    // Baixa parcial pode já ter quitado o título inteiro mesmo com status
+    // ainda 'aberta/vencida' no legado (status não é atualizado em tempo real).
+    const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
+    if (saldo <= 0) {
+      resumo.quitados++
+      continue
+    }
     resumo.elegiveis++
 
     if (!conta.telefone_cobranca) {
@@ -59,7 +67,7 @@ export async function executarReguaCobranca() {
     }
 
     const mensagem = montarMensagem(etapa, {
-      nome: conta.pessoa_nome, valor: conta.valor, vencimento: conta.vencimento, diasAtraso,
+      nome: conta.pessoa_nome, valor: saldo, vencimento: conta.vencimento, diasAtraso,
     })
 
     try {
@@ -68,7 +76,7 @@ export async function executarReguaCobranca() {
         contas_financeiras_id: conta.id,
         cliente_nome: conta.pessoa_nome,
         cliente_telefone: conta.telefone_cobranca,
-        valor: conta.valor,
+        valor: saldo,
         vencimento: conta.vencimento,
         dias_atraso: diasAtraso,
         etapa,

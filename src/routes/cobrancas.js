@@ -33,7 +33,7 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
 
     const { data: contas, error } = await supabase
       .from('contas_financeiras')
-      .select('id, valor, vencimento, telefone_cobranca')
+      .select('id, valor, valor_pago, vencimento, telefone_cobranca')
       .eq('tipo', 'receber')
       .in('status', ['aberta', 'vencida'])
       .eq('pessoa_nome', pessoaNome)
@@ -44,8 +44,15 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
     const telefone = req.body?.telefone || contas.find((c) => c.telefone_cobranca)?.telefone_cobranca
     if (!telefone) return res.status(400).json({ erro: 'Telefone não configurado para este cliente' })
 
-    const valorTotal = contas.reduce((soma, c) => soma + Number(c.valor || 0), 0)
-    const pior = contas.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
+    // Baixa parcial pode já ter quitado alguns títulos mesmo com status ainda
+    // aberto — soma só o saldo real, e ignora títulos já quitados na prática.
+    const comSaldo = contas
+      .map((c) => ({ ...c, saldo: Number(c.valor || 0) - Number(c.valor_pago || 0) }))
+      .filter((c) => c.saldo > 0)
+    if (!comSaldo.length) return res.status(400).json({ erro: 'Todos os títulos deste cliente já estão quitados (baixa parcial cobre o valor total)' })
+
+    const valorTotal = comSaldo.reduce((soma, c) => soma + c.saldo, 0)
+    const pior = comSaldo.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
     const diasAtraso = diasAtrasoDe(pior.vencimento)
     // Disparo manual pode ser clicado fora das janelas exatas da régua (ex.: título vence
     // daqui a 10 dias) — nesse caso não há template aplicável ainda; usa a etapa 1 como
