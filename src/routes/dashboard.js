@@ -6,12 +6,34 @@ const router = Router()
 const safe = (promise, fallback) =>
   promise.then((r) => ({ ok: true, value: r })).catch(() => ({ ok: false, value: fallback }))
 
+// Resolve o período do filtro do Dashboard a partir de data_inicio/data_fim
+// ("YYYY-MM-DD"). Sem os dois, cai no padrão "Este Mês" — mesmo comportamento
+// de antes do filtro existir, então chamadas sem esses params continuam OK.
+function resolverPeriodo(query) {
+  const agora = new Date()
+  const parseData = (str, fimDoDia) => {
+    if (!str) return null
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str)
+    if (!m) return null
+    const [, ano, mes, dia] = m.map(Number)
+    return fimDoDia
+      ? new Date(ano, mes - 1, dia, 23, 59, 59, 999)
+      : new Date(ano, mes - 1, dia)
+  }
+
+  const inicio = parseData(query.data_inicio, false)
+    ?? new Date(agora.getFullYear(), agora.getMonth(), 1)
+  const fim = parseData(query.data_fim, true)
+    ?? new Date(agora.getFullYear(), agora.getMonth() + 1, 0, 23, 59, 59, 999)
+
+  return { inicio: inicio.toISOString(), fim: fim.toISOString() }
+}
+
 router.get('/', async (req, res) => {
   const agora = new Date()
   const inicioDia = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).toISOString()
   const fimDia   = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 23, 59, 59, 999).toISOString()
-  const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString()
-  const fimMes    = new Date(agora.getFullYear(), agora.getMonth() + 1, 0, 23, 59, 59, 999).toISOString()
+  const { inicio: inicioMes, fim: fimMes } = resolverPeriodo(req.query)
 
   // Vendedor sempre filtra pelos seus próprios dados. Admin filtra por vendedor_id
   // só quando passado via query (seletor "Empresa (geral)" / "Ana" / "Tatiane").
@@ -43,6 +65,7 @@ router.get('/', async (req, res) => {
         const porEtapa = {}
         await Promise.all(ETAPAS.map(async (etapa) => {
           let q = supabase.from('leads').select('id', { count: 'exact', head: true }).eq('etapa', etapa)
+            .gte('created_at', inicioMes).lte('created_at', fimMes)
           if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
           const { count, error } = await q
           if (error) throw error
@@ -56,6 +79,7 @@ router.get('/', async (req, res) => {
     safe(
       (() => {
         let q = supabase.from('leads').select('valor_negociacao').in('etapa', ['contato', 'proposta', 'negociacao'])
+          .gte('created_at', inicioMes).lte('created_at', fimMes)
         if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ data, error }) => {
@@ -86,7 +110,7 @@ router.get('/', async (req, res) => {
       (async () => {
         if (filtrarPorVendedor && leadIdsVendedor.length === 0) return 0
         let q = supabase.from('whatsapp_mensagens').select('id', { count: 'exact' })
-          .eq('direcao', 'entrada').gte('created_at', inicioDia).lte('created_at', fimDia)
+          .eq('direcao', 'entrada').gte('created_at', inicioMes).lte('created_at', fimMes)
         if (filtrarPorVendedor) q = q.in('lead_id', leadIdsVendedor)
         const { count, error } = await q
         if (error) throw error
@@ -98,7 +122,7 @@ router.get('/', async (req, res) => {
     safe(
       (() => {
         let q = supabase.from('tarefas').select('id', { count: 'exact' })
-          .lte('prazo', fimDia).neq('status', 'concluida')
+          .lte('prazo', fimMes).neq('status', 'concluida')
         if (filtrarPorVendedor) q = q.eq('responsavel_id', filtroVendedorId)
         return q
       })().then(({ count, error }) => {
@@ -142,7 +166,7 @@ router.get('/', async (req, res) => {
     safe(
       (() => {
         let q = supabase.from('ligacoes').select('id', { count: 'exact', head: true })
-          .gte('iniciada_em', inicioDia).lte('iniciada_em', fimDia)
+          .gte('iniciada_em', inicioMes).lte('iniciada_em', fimMes)
         if (filtrarPorVendedor) q = q.eq('vendedor_id', filtroVendedorId)
         return q
       })().then(({ count, error }) => {
@@ -152,6 +176,8 @@ router.get('/', async (req, res) => {
       0
     ),
 
+    // Histórico completo — deliberadamente sem filtro de período (card
+    // "Total de Ligações" mostra o total histórico, não o do período selecionado).
     safe(
       (() => {
         let q = supabase.from('ligacoes').select('id', { count: 'exact', head: true })
