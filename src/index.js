@@ -39,11 +39,14 @@ import blogRouter from './routes/blog.js'
 import avaliacoesRouter from './routes/avaliacoes.js'
 import avaliacoesAdminRouter from './routes/avaliacoes-admin.js'
 import googleReviewsRouter from './routes/google-reviews.js'
+import agingRouter from './routes/aging.js'
+import cobrancasRouter from './routes/cobrancas.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
 import { runHandoffAlerta } from './jobs/handoff-alerta.js'
 import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
+import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
@@ -144,6 +147,8 @@ app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
 app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
+app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
+app.use('/api/cobrancas', auth, adminOnly, cobrancasRouter)
 
 // Health check
 app.get('/health', (req, res) => {
@@ -216,5 +221,16 @@ cron.schedule('*/15 * * * *', async () => {
     await runEvolutionHealthCheck()
   } catch (err) {
     console.error('[cron evolution-health] Erro:', err.message)
+  }
+})
+
+// Régua de cobrança WhatsApp — diário às 08:00 BRT (11:00 UTC), seg-sex.
+// Desligada por padrão (automacoes_config.cobranca_whatsapp_ativa=false) até
+// ser ativada explicitamente pela tela de Cobranças.
+cron.schedule('0 11 * * 1-5', async () => {
+  try {
+    await executarReguaCobranca()
+  } catch (err) {
+    console.error('[cron cobranca-whatsapp] Erro:', err.message)
   }
 })

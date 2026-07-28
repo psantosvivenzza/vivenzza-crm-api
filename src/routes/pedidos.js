@@ -232,6 +232,7 @@ async function gerarParcelas(pedido) {
       status: 'aberta',
       categoria: 'Venda',
       pessoa_nome: pedido.clientes_erp?.razao_social ?? pedido.leads?.nome ?? null,
+      vendedor_id: pedido.vendedor_id || null,
     }
   })
 
