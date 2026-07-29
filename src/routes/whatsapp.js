@@ -133,6 +133,41 @@ router.get('/nao-lidas', async (req, res) => {
   }
 })
 
+// GET /api/whatsapp/status-espera — direção + horário da última mensagem por lead,
+// pra derivar "aguardando_vendedor" (última foi entrada) vs "aguardando_cliente"
+// (última foi saída) na lista de conversas. DEVE vir antes de /:lead_id.
+router.get('/status-espera', async (req, res) => {
+  try {
+    let leadIds = null
+    if (req.user.role === 'vendedor') {
+      const { data: meusLeads } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('responsavel_id', req.user.id)
+      leadIds = (meusLeads || []).map(l => l.id)
+      if (leadIds.length === 0) return res.json({ data: [] })
+    }
+
+    // PostgREST limita a 1000 linhas por padrão — inclusive em RPC — e com 2.400+
+    // leads isso trunca silenciosamente sem paginar (mesmo bug já visto em
+    // aging.js e no job da régua de cobrança).
+    const resultado = []
+    const PAGE = 1000
+    for (let offset = 0; ; offset += PAGE) {
+      const { data, error } = await supabase
+        .rpc('get_ultima_mensagem_por_lead', { p_lead_ids: leadIds ?? null })
+        .range(offset, offset + PAGE - 1)
+      if (error) throw error
+      resultado.push(...data)
+      if (data.length < PAGE) break
+    }
+
+    res.json({ data: resultado })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // GET /api/whatsapp/recentes?desde=ISO — mensagens de entrada recentes para polling de notificações
 // DEVE vir antes de /:lead_id
 router.get('/recentes', async (req, res) => {
