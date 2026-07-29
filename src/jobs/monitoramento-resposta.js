@@ -35,14 +35,23 @@ async function buscarUltimaMensagemEntradaId(leadId) {
 export async function runMonitoramentoResposta() {
   const agora = Date.now()
 
-  // Só leads ativos — 'fechado'/'perdido' são os estados terminais do funil (leads.js)
-  const { data: leadsAtivos, error: leadsError } = await supabase
-    .from('leads')
-    .select('id, nome, responsavel_id')
-    .not('etapa', 'in', '(fechado,perdido)')
-  if (leadsError) {
-    console.error('[monitoramento-resposta] erro ao buscar leads:', leadsError.message)
-    return { verificados: 0, notificados: 0 }
+  // Só leads ativos — 'fechado'/'perdido' são os estados terminais do funil (leads.js).
+  // Paginado: PostgREST limita a 1000 linhas por padrão — sem isso, com milhares de
+  // leads ativos, só os primeiros 1000 eram verificados e o resto nunca escalonava.
+  const leadsAtivos = []
+  const PAGE_LEADS = 1000
+  for (let offset = 0; ; offset += PAGE_LEADS) {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('id, nome, responsavel_id')
+      .not('etapa', 'in', '(fechado,perdido)')
+      .range(offset, offset + PAGE_LEADS - 1)
+    if (error) {
+      console.error('[monitoramento-resposta] erro ao buscar leads:', error.message)
+      return { verificados: 0, notificados: 0 }
+    }
+    leadsAtivos.push(...data)
+    if (data.length < PAGE_LEADS) break
   }
   if (leadsAtivos.length === 0) return { verificados: 0, notificados: 0 }
 

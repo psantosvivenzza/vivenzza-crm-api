@@ -218,16 +218,24 @@ router.get('/atendimento', async (req, res) => {
     else if (req.user.role === 'admin' && req.query.vendedor_id) filtroVendedorId = req.query.vendedor_id
 
     // Só leads ativos — 'fechado'/'perdido' são os estados terminais do funil.
-    let leadsQuery = supabase
-      .from('leads')
-      .select('id, responsavel_id, usuarios!leads_responsavel_id_fkey(nome)')
-      .not('etapa', 'in', '(fechado,perdido)')
-    if (filtroVendedorId) leadsQuery = leadsQuery.eq('responsavel_id', filtroVendedorId)
+    // Paginado: PostgREST limita a 1000 linhas por padrão — sem isso, com milhares de
+    // leads ativos, os indicadores contavam só os primeiros 1000.
+    const leads = []
+    const PAGE_LEADS = 1000
+    for (let offset = 0; ; offset += PAGE_LEADS) {
+      let leadsQuery = supabase
+        .from('leads')
+        .select('id, responsavel_id, usuarios!leads_responsavel_id_fkey(nome)')
+        .not('etapa', 'in', '(fechado,perdido)')
+        .range(offset, offset + PAGE_LEADS - 1)
+      if (filtroVendedorId) leadsQuery = leadsQuery.eq('responsavel_id', filtroVendedorId)
+      const { data, error } = await leadsQuery
+      if (error) throw error
+      leads.push(...data)
+      if (data.length < PAGE_LEADS) break
+    }
 
-    const { data: leads, error: leadsError } = await leadsQuery
-    if (leadsError) throw leadsError
-
-    if (!leads || leads.length === 0) {
+    if (leads.length === 0) {
       return res.json({
         aguardando_agora: 0,
         criticas: 0,
