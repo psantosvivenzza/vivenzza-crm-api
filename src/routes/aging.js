@@ -38,7 +38,7 @@ async function buscarContasAbertas({ vendedor_id }) {
   for (let offset = 0; ; offset += PAGE) {
     let query = supabase
       .from('contas_financeiras')
-      .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, vendedor_id, pedido_id, documento_ref')
+      .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, vendedor_id, pedido_id, documento_ref, codigo_cliente')
       .eq('tipo', 'receber')
       .in('status', ['aberta', 'vencida'])
       .range(offset, offset + PAGE - 1)
@@ -85,6 +85,7 @@ router.get('/', async (req, res) => {
       if (!porCliente.has(c.pessoa_nome)) {
         porCliente.set(c.pessoa_nome, {
           pessoa_nome: c.pessoa_nome,
+          codigo_cliente: null,
           total_devido: 0,
           a_vencer: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_mais: 0,
           telefone_cobranca: null,
@@ -99,6 +100,7 @@ router.get('/', async (req, res) => {
       cliente.pior_ordem_score = Math.max(cliente.pior_ordem_score, ORDEM_SCORE[bucket])
       if (!cliente.telefone_cobranca && c.telefone_cobranca) cliente.telefone_cobranca = c.telefone_cobranca
       if (!cliente.vendedor_id && c.vendedor_id) cliente.vendedor_id = c.vendedor_id
+      if (!cliente.codigo_cliente && c.codigo_cliente) cliente.codigo_cliente = c.codigo_cliente
       // Detalhamento por título — usado ao expandir o cliente no Aging Report.
       cliente.titulos.push({
         id: c.id,

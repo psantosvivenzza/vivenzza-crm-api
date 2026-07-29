@@ -12,8 +12,8 @@ const STATUS_VALIDOS = ['rascunho', 'confirmado', 'em_producao', 'enviado', 'ent
 // O detalhe (GET /:id) usa o select completo abaixo.
 // clientes_erp ao lado de leads: pedido novo usa cliente_erp_id, pedido antigo (migrado
 // do legado) só tem lead_id — os dois embeds convivem, cada pedido só preenche um.
-const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf), pedido_itens(id)'
-const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), clientes_erp(id, razao_social, nome_fantasia, cnpj_cpf, ie, endereco, contatos), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b, ncm, cst, cfop_padrao, unidade)), contas_financeiras(*)'
+const SELECT_PEDIDO_LISTA = '*, leads(id, nome, empresa), clientes_erp(id, legacy_id, razao_social, nome_fantasia, cnpj_cpf), pedido_itens(id)'
+const SELECT_PEDIDO_DETALHE = '*, leads(id, nome, empresa), clientes_erp(id, legacy_id, razao_social, nome_fantasia, cnpj_cpf, ie, endereco, contatos), usuarios!pedidos_representante_id_fkey(id, nome), pedido_itens(*, produtos(id, nome, sku, preco_b2c, preco_b2b, ncm, cst, cfop_padrao, unidade)), contas_financeiras(*)'
 
 // Resolve o preço unitário do produto de acordo com a lista de preço do pedido.
 // 'b2c'/'b2b'/'distribuidor' são as 3 colunas fixas; qualquer outro valor busca
@@ -165,7 +165,7 @@ router.put('/:id/status', async (req, res) => {
       .from('pedidos')
       .update({ status, atualizado_em: new Date().toISOString() })
       .eq('id', req.params.id)
-      .select('*, leads(nome), clientes_erp(razao_social)')
+      .select('*, leads(nome), clientes_erp(legacy_id, razao_social)')
       .single()
 
     if (error) throw error
@@ -186,7 +186,7 @@ router.put('/:id/status', async (req, res) => {
           comissao_percentual_snapshot: estimativa?.percentual_estimado ?? null,
         })
         .eq('id', data.id)
-        .select('*, leads(nome), clientes_erp(razao_social)')
+        .select('*, leads(nome), clientes_erp(legacy_id, razao_social)')
         .single()
       if (pedidoAtualizado) Object.assign(data, pedidoAtualizado)
     }
@@ -233,6 +233,7 @@ async function gerarParcelas(pedido) {
       categoria: 'Venda',
       pessoa_nome: pedido.clientes_erp?.razao_social ?? pedido.leads?.nome ?? null,
       vendedor_id: pedido.vendedor_id || null,
+      codigo_cliente: pedido.clientes_erp?.legacy_id || null,
     }
   })
 

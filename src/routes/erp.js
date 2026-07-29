@@ -10,10 +10,10 @@ router.get('/clientes', async (req, res) => {
     const offset = (Number(page) - 1) * Number(limit)
     let query = supabase
       .from('clientes_erp')
-      .select('id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, data_cadastro, ativo, em_revisao', { count: 'exact' })
+      .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, data_cadastro, ativo, em_revisao', { count: 'exact' })
       .order('razao_social')
       .range(offset, offset + Number(limit) - 1)
-    if (q) query = query.or(`razao_social.ilike.%${q}%,nome_fantasia.ilike.%${q}%,cnpj_cpf.ilike.%${q}%`)
+    if (q) query = query.or(`razao_social.ilike.%${q}%,nome_fantasia.ilike.%${q}%,cnpj_cpf.ilike.%${q}%,legacy_id.ilike.%${q}%`)
     const { data, error, count } = await query
     if (error) throw error
     res.json({ data, total: count, page: Number(page), limit: Number(limit) })
@@ -99,7 +99,7 @@ router.get('/notas-legado', async (req, res) => {
     const offset = (Number(page) - 1) * Number(limit)
     let query = supabase
       .from('notas_legado_unificado')
-      .select('id, origem, numero, serie, serie_label, data_emissao, valor_total, status, em_revisao, cliente_nome, cliente_cnpj', { count: 'exact' })
+      .select('id, origem, numero, serie, serie_label, data_emissao, valor_total, status, em_revisao, cliente_nome, cliente_cnpj, cliente_legacy_id', { count: 'exact' })
       .order('data_emissao', { ascending: false })
       .range(offset, offset + Number(limit) - 1)
 
@@ -127,7 +127,7 @@ router.get('/notas-legado/:id', async (req, res) => {
   try {
     const { data: viaVendas, error: errV } = await supabase
       .from('vendas_legado')
-      .select('*, clientes_erp(razao_social, cnpj_cpf, ie, endereco)')
+      .select('*, clientes_erp(legacy_id, razao_social, cnpj_cpf, ie, endereco)')
       .eq('id', req.params.id)
       .maybeSingle()
     if (errV) throw errV
