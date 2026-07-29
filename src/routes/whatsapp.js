@@ -205,6 +205,99 @@ router.get('/recentes', async (req, res) => {
   }
 })
 
+// Agrupa linhas de message_reactions (message_id, emoji, user_id, usuarios(id,nome))
+// em { [message_id]: [{ emoji, count, reactedByCurrentUser, users: [{id, nome}] }] }.
+// Compartilhado entre GET /:lead_id (várias mensagens de uma vez) e os endpoints
+// de reactions de uma mensagem só.
+function agruparReacoesPorMensagem(rows, currentUserId) {
+  const porMensagem = new Map()
+  for (const r of rows) {
+    if (!porMensagem.has(r.message_id)) porMensagem.set(r.message_id, new Map())
+    const porEmoji = porMensagem.get(r.message_id)
+    if (!porEmoji.has(r.emoji)) {
+      porEmoji.set(r.emoji, { emoji: r.emoji, count: 0, reactedByCurrentUser: false, users: [] })
+    }
+    const grupo = porEmoji.get(r.emoji)
+    grupo.count++
+    if (r.user_id === currentUserId) grupo.reactedByCurrentUser = true
+    grupo.users.push({ id: r.usuarios?.id ?? r.user_id, nome: r.usuarios?.nome ?? null })
+  }
+  const resultado = {}
+  for (const [messageId, porEmoji] of porMensagem) resultado[messageId] = [...porEmoji.values()]
+  return resultado
+}
+
+async function buscarReacoesDaMensagem(messageId, currentUserId) {
+  const { data, error } = await supabase
+    .from('message_reactions')
+    .select('message_id, emoji, user_id, usuarios(id, nome)')
+    .eq('message_id', messageId)
+  if (error) throw error
+  const agrupado = agruparReacoesPorMensagem(data || [], currentUserId)
+  return agrupado[messageId] || []
+}
+
+// POST /api/whatsapp/mensagens/:messageId/reactions — reagir a uma mensagem.
+// Toggle: clicar na mesma reação remove; clicar em outra substitui (1 reação por
+// usuário por mensagem, garantido pelo UNIQUE(message_id, user_id) da migration).
+router.post('/mensagens/:messageId/reactions', async (req, res) => {
+  try {
+    const { messageId } = req.params
+    const { emoji } = req.body
+    if (!emoji) return res.status(400).json({ erro: 'Campo "emoji" é obrigatório' })
+    const userId = req.user.id
+
+    const { data: existente, error: buscaError } = await supabase
+      .from('message_reactions')
+      .select('id, emoji')
+      .eq('message_id', messageId)
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (buscaError) throw buscaError
+
+    if (existente && existente.emoji === emoji) {
+      const { error } = await supabase.from('message_reactions').delete().eq('id', existente.id)
+      if (error) throw error
+    } else {
+      const { error } = await supabase
+        .from('message_reactions')
+        .upsert({ message_id: messageId, user_id: userId, emoji }, { onConflict: 'message_id,user_id' })
+      if (error) throw error
+    }
+
+    res.json({ data: await buscarReacoesDaMensagem(messageId, userId) })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// DELETE /api/whatsapp/mensagens/:messageId/reactions — remove a reação do usuário atual
+router.delete('/mensagens/:messageId/reactions', async (req, res) => {
+  try {
+    const { messageId } = req.params
+    const userId = req.user.id
+    const { error } = await supabase
+      .from('message_reactions')
+      .delete()
+      .eq('message_id', messageId)
+      .eq('user_id', userId)
+    if (error) throw error
+
+    res.json({ data: await buscarReacoesDaMensagem(messageId, userId) })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/whatsapp/mensagens/:messageId/reactions — reações agrupadas de uma mensagem
+router.get('/mensagens/:messageId/reactions', async (req, res) => {
+  try {
+    res.json({ data: await buscarReacoesDaMensagem(req.params.messageId, req.user.id) })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // GET /api/whatsapp/:lead_id — histórico de mensagens
 router.get('/:lead_id', async (req, res) => {
   try {
@@ -234,6 +327,19 @@ router.get('/:lead_id', async (req, res) => {
     if (error) throw error
     const ordenado = [...(data || [])].reverse()
 
+    // Reações agrupadas por mensagem — uma query só pra todas as mensagens da página,
+    // não uma por mensagem.
+    let reactionsPorMensagem = {}
+    if (ordenado.length > 0) {
+      const { data: reacoes, error: reacoesError } = await supabase
+        .from('message_reactions')
+        .select('message_id, emoji, user_id, usuarios(id, nome)')
+        .in('message_id', ordenado.map((m) => m.id))
+      if (reacoesError) throw reacoesError
+      reactionsPorMensagem = agruparReacoesPorMensagem(reacoes || [], req.user.id)
+    }
+    const ordenadoComReacoes = ordenado.map((m) => ({ ...m, reactions: reactionsPorMensagem[m.id] || [] }))
+
     // Status do atendimento (ia_atendendo / vendedor_assumiu / ia_apoio) — usado pelo
     // badge no header do chat, pra Ana/Tatiane saberem se a Lara está respondendo agora.
     // candidatosTelefone() foi feita para o sentido contrário (entrada em formato do
@@ -260,7 +366,7 @@ router.get('/:lead_id', async (req, res) => {
       status_atendimento = conversas?.[0]?.status_atendimento ?? null
     }
 
-    res.json({ data: ordenado, total: count, page: Number(page), limit: limitNum, status_atendimento, atendimento_humano: lead?.atendimento_humano ?? false })
+    res.json({ data: ordenadoComReacoes, total: count, page: Number(page), limit: limitNum, status_atendimento, atendimento_humano: lead?.atendimento_humano ?? false })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
