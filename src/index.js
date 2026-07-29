@@ -41,12 +41,14 @@ import avaliacoesAdminRouter from './routes/avaliacoes-admin.js'
 import googleReviewsRouter from './routes/google-reviews.js'
 import agingRouter from './routes/aging.js'
 import cobrancasRouter from './routes/cobrancas.js'
+import notificationsRouter from './routes/notifications.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
 import { runHandoffAlerta } from './jobs/handoff-alerta.js'
 import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
 import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
+import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
@@ -152,6 +154,7 @@ app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
 app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOnly, cobrancasRouter)
+app.use('/api/notifications', auth, notificationsRouter)
 
 // Health check
 app.get('/health', (req, res) => {
@@ -235,5 +238,16 @@ cron.schedule('0 11 * * 1-5', async () => {
     await executarReguaCobranca()
   } catch (err) {
     console.error('[cron cobranca-whatsapp] Erro:', err.message)
+  }
+})
+
+// Monitoramento de SLA de resposta no WhatsApp — a cada 1 min, escalona notificação
+// in-app quando o cliente fica sem resposta: 15min (vendedor), 30min (vendedor+admins),
+// 2h (admins, crítico). Fase 3 do atendimento avançado.
+cron.schedule('* * * * *', async () => {
+  try {
+    await runMonitoramentoResposta()
+  } catch (err) {
+    console.error('[cron monitoramento-resposta] Erro:', err.message)
   }
 })
