@@ -179,10 +179,11 @@ router.put('/:id', async (req, res) => {
 })
 
 // PATCH /api/financeiro/contas/:id/baixa — baixa manual (total ou parcial).
-// Substitui o antigo /:id/baixar (só integral, não registrava valor_pago/forma de
-// pagamento) — nada mais no código chama a rota antiga, removida abaixo.
-// Vendedor só pode dar baixa em títulos vinculados a ele (vendedor_id); admin, em
-// qualquer um. Muitos títulos legados têm vendedor_id nulo — nesses, só admin.
+// Chama fn_baixar_titulo (RPC atômica, trava a conta com FOR UPDATE) — cria uma
+// linha em baixas_financeiras e recalcula valor_pago/status a partir da soma
+// das baixas ativas. Vendedor só pode dar baixa em títulos vinculados a ele
+// (vendedor_id); admin, em qualquer um. Muitos títulos legados têm vendedor_id
+// nulo — nesses, só admin.
 router.patch('/contas/:id/baixa', async (req, res) => {
   try {
     const { valor_recebido, data_pagamento, forma_pagamento, observacao } = req.body
@@ -194,7 +195,7 @@ router.patch('/contas/:id/baixa', async (req, res) => {
 
     const { data: conta, error: erroBusca } = await supabase
       .from('contas_financeiras')
-      .select('*')
+      .select('id, vendedor_id')
       .eq('id', req.params.id)
       .single()
     if (erroBusca) throw erroBusca
@@ -203,33 +204,182 @@ router.patch('/contas/:id/baixa', async (req, res) => {
     if (req.user.role === 'vendedor' && conta.vendedor_id !== req.user.id) {
       return res.status(403).json({ erro: 'Sem permissão para dar baixa neste título' })
     }
-    if (conta.status === 'paga') return res.status(400).json({ erro: 'Este título já está totalmente pago' })
-    if (conta.status === 'cancelada') return res.status(400).json({ erro: 'Este título está cancelado' })
 
-    const valorPagoAnterior = Number(conta.valor_pago || 0)
-    const novoValorPago = valorPagoAnterior + valorRecebidoNum
-    const novoSaldo = Number(conta.valor || 0) - novoValorPago
-    const novoStatus = novoSaldo <= 0 ? 'paga' : 'pago_parcial'
     const hoje = new Date().toISOString().split('T')[0]
-
-    const { data, error } = await supabase
-      .from('contas_financeiras')
-      .update({
-        valor_pago: novoValorPago,
-        status: novoStatus,
-        data_pagamento: data_pagamento || hoje,
-        forma_pagamento: forma_pagamento || null,
-        observacao_pagamento: observacao || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', req.params.id)
-      .select()
-      .single()
-
+    const { data, error } = await supabase.rpc('fn_baixar_titulo', {
+      p_conta_id: req.params.id,
+      p_valor: valorRecebidoNum,
+      p_data_pagamento: data_pagamento || hoje,
+      p_forma_pagamento: forma_pagamento || null,
+      p_observacao: observacao || null,
+      p_usuario_id: req.user.id,
+      p_origem: 'manual',
+    })
     if (error) throw error
+
     res.json(data)
   } catch (err) {
+    res.status(400).json({ erro: err.message })
+  }
+})
+
+// GET /api/financeiro/contas/:contaId/baixas — histórico de baixas + estornos
+// (inclusive pendentes de aprovação) de um título. Mesma regra de permissão
+// da baixa: vendedor só vê as próprias.
+router.get('/contas/:contaId/baixas', async (req, res) => {
+  try {
+    const { data: conta, error: erroConta } = await supabase
+      .from('contas_financeiras')
+      .select('id, vendedor_id')
+      .eq('id', req.params.contaId)
+      .single()
+    if (erroConta) throw erroConta
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+    if (req.user.role === 'vendedor' && conta.vendedor_id !== req.user.id) {
+      return res.status(403).json({ erro: 'Sem permissão para ver as baixas deste título' })
+    }
+
+    const [{ data: baixas, error: erroBaixas }, { data: estornos, error: erroEstornos }] = await Promise.all([
+      supabase
+        .from('baixas_financeiras')
+        .select(`
+          *,
+          criado_por:usuarios!baixas_financeiras_criado_por_usuario_id_fkey(id, nome),
+          estornado_por:usuarios!baixas_financeiras_estornado_por_usuario_id_fkey(id, nome)
+        `)
+        .eq('conta_financeira_id', req.params.contaId)
+        .order('criado_em', { ascending: false }),
+      supabase
+        .from('estornos_financeiros')
+        .select(`
+          *,
+          solicitado_por:usuarios!estornos_financeiros_solicitado_por_usuario_id_fkey(id, nome),
+          aprovado_por:usuarios!estornos_financeiros_aprovado_por_usuario_id_fkey(id, nome),
+          rejeitado_por:usuarios!estornos_financeiros_rejeitado_por_usuario_id_fkey(id, nome)
+        `)
+        .eq('conta_financeira_id', req.params.contaId)
+        .order('solicitado_em', { ascending: false }),
+    ])
+    if (erroBaixas) throw erroBaixas
+    if (erroEstornos) throw erroEstornos
+
+    res.json({ data: baixas || [], estornos: estornos || [] })
+  } catch (err) {
     res.status(500).json({ erro: err.message })
+  }
+})
+
+// POST /api/financeiro/contas/:contaId/baixas/:baixaId/estornos — solicita o
+// estorno de UMA baixa específica (nunca zera a conta inteira). Só admin.
+// Abaixo de LIMITE_ESTORNO_SEM_APROVACAO conclui na hora; acima, fica
+// pendente_aprovacao até outro admin aprovar/rejeitar (fn_estornar_baixa decide).
+const CATEGORIAS_MOTIVO_ESTORNO = [
+  'titulo_errado', 'valor_incorreto', 'pagamento_nao_confirmado', 'baixa_duplicada', 'devolucao_chargeback', 'outro',
+]
+router.post('/contas/:contaId/baixas/:baixaId/estornos', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ erro: 'Apenas administradores podem estornar baixas' })
+    }
+
+    const { motivo_categoria, motivo_detalhado, confirmacao } = req.body
+    if (!CATEGORIAS_MOTIVO_ESTORNO.includes(motivo_categoria)) {
+      return res.status(400).json({ erro: '"motivo_categoria" inválida' })
+    }
+    if (!motivo_detalhado?.trim()) {
+      return res.status(400).json({ erro: '"motivo_detalhado" é obrigatório' })
+    }
+    if (!confirmacao) {
+      return res.status(400).json({ erro: 'É necessário confirmar que revisou o impacto financeiro deste estorno' })
+    }
+
+    const { data: baixa, error: erroBaixa } = await supabase
+      .from('baixas_financeiras')
+      .select('id, conta_financeira_id')
+      .eq('id', req.params.baixaId)
+      .single()
+    if (erroBaixa) throw erroBaixa
+    if (!baixa) return res.status(404).json({ erro: 'Baixa não encontrada' })
+    if (baixa.conta_financeira_id !== req.params.contaId) {
+      return res.status(400).json({ erro: 'Esta baixa não pertence ao título informado' })
+    }
+
+    const limite = Number(process.env.LIMITE_ESTORNO_SEM_APROVACAO || 1000)
+    const { data, error } = await supabase.rpc('fn_estornar_baixa', {
+      p_baixa_id: req.params.baixaId,
+      p_usuario_id: req.user.id,
+      p_motivo_categoria: motivo_categoria,
+      p_motivo_detalhado: motivo_detalhado,
+      p_limite_sem_aprovacao: limite,
+    })
+    if (error) throw error
+
+    res.status(201).json(data)
+  } catch (err) {
+    res.status(400).json({ erro: err.message })
+  }
+})
+
+// GET /api/financeiro/estornos/pendentes — fila de aprovação (admin)
+router.get('/estornos/pendentes', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores' })
+
+    const { data, error } = await supabase
+      .from('estornos_financeiros')
+      .select(`
+        *,
+        baixas_financeiras(id, valor_baixado, data_pagamento, forma_pagamento, origem),
+        contas_financeiras(id, pessoa_nome, descricao, documento_ref, valor, valor_pago),
+        solicitado_por:usuarios!estornos_financeiros_solicitado_por_usuario_id_fkey(id, nome)
+      `)
+      .eq('status', 'pendente_aprovacao')
+      .order('solicitado_em', { ascending: true })
+    if (error) throw error
+
+    res.json({ data: data || [] })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// PATCH /api/financeiro/estornos/:estornoId/aprovar — só admin, e nunca quem solicitou
+router.patch('/estornos/:estornoId/aprovar', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores podem aprovar estornos' })
+
+    const { data, error } = await supabase.rpc('fn_aprovar_estorno', {
+      p_estorno_id: req.params.estornoId,
+      p_usuario_id: req.user.id,
+    })
+    if (error) throw error
+
+    res.json(data)
+  } catch (err) {
+    res.status(400).json({ erro: err.message })
+  }
+})
+
+// PATCH /api/financeiro/estornos/:estornoId/rejeitar — motivo obrigatório
+router.patch('/estornos/:estornoId/rejeitar', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores podem rejeitar estornos' })
+
+    const { motivo_rejeicao } = req.body
+    if (!motivo_rejeicao?.trim()) {
+      return res.status(400).json({ erro: '"motivo_rejeicao" é obrigatório' })
+    }
+
+    const { data, error } = await supabase.rpc('fn_rejeitar_estorno', {
+      p_estorno_id: req.params.estornoId,
+      p_usuario_id: req.user.id,
+      p_motivo_rejeicao: motivo_rejeicao,
+    })
+    if (error) throw error
+
+    res.json(data)
+  } catch (err) {
+    res.status(400).json({ erro: err.message })
   }
 })
 

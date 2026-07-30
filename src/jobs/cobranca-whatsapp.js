@@ -129,6 +129,7 @@ export async function executarReguaCobranca() {
           .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca')
           .eq('tipo', 'receber')
           .in('status', ['aberta', 'vencida', 'pago_parcial'])
+          .eq('em_revisao_financeira', false)
           .range(offset, offset + PAGE - 1)
         if (error) throw error
         contas.push(...data)

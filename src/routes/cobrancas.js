@@ -36,6 +36,7 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
       .select('id, valor, valor_pago, vencimento, telefone_cobranca')
       .eq('tipo', 'receber')
       .in('status', ['aberta', 'vencida', 'pago_parcial'])
+      .eq('em_revisao_financeira', false)
       .eq('pessoa_nome', pessoaNome)
 
     if (error) throw error
