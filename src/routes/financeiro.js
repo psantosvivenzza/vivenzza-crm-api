@@ -34,7 +34,7 @@ router.get('/resumo', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('contas_financeiras')
-      .select('tipo, status, valor')
+      .select('tipo, status, valor, valor_pago')
 
     if (error) throw error
 
@@ -44,14 +44,20 @@ router.get('/resumo', async (req, res) => {
       saldo_previsto: 0,
     }
 
+    // Conta como "em aberto" (total/vencidas) o SALDO — valor menos o que já foi
+    // pago — não o valor cheio original. Sem isso, um título com baixa parcial
+    // (status='pago_parcial') mostraria o valor original inteiro aqui, inflando
+    // o card mesmo depois de parte já ter sido recebida.
     for (const c of data) {
+      const saldo = Number(c.valor || 0) - Number(c.valor_pago || 0)
+      const emAberto = c.status === 'aberta' || c.status === 'vencida' || c.status === 'pago_parcial'
       if (c.tipo === 'pagar') {
-        if (c.status === 'aberta' || c.status === 'vencida') resumo.a_pagar.total += Number(c.valor)
-        if (c.status === 'vencida') resumo.a_pagar.vencidas += Number(c.valor)
+        if (emAberto) resumo.a_pagar.total += saldo
+        if (c.status === 'vencida') resumo.a_pagar.vencidas += saldo
         if (c.status === 'paga') resumo.a_pagar.pagas += Number(c.valor)
       } else {
-        if (c.status === 'aberta' || c.status === 'vencida') resumo.a_receber.total += Number(c.valor)
-        if (c.status === 'vencida') resumo.a_receber.vencidas += Number(c.valor)
+        if (emAberto) resumo.a_receber.total += saldo
+        if (c.status === 'vencida') resumo.a_receber.vencidas += saldo
         if (c.status === 'paga') resumo.a_receber.recebidas += Number(c.valor)
       }
     }
@@ -70,7 +76,7 @@ router.get('/fluxo-caixa', async (req, res) => {
     const { data, error } = await supabase
       .from('contas_financeiras')
       .select('tipo, valor, vencimento, status')
-      .in('status', ['aberta', 'vencida', 'paga'])
+      .in('status', ['aberta', 'vencida', 'paga', 'pago_parcial'])
       .gte('vencimento', new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString().split('T')[0])
       .lte('vencimento', new Date(new Date().setMonth(new Date().getMonth() + 6)).toISOString().split('T')[0])
 
@@ -172,22 +178,55 @@ router.put('/:id', async (req, res) => {
   }
 })
 
-// PATCH /api/financeiro/:id/baixar — marcar como paga/recebida
-router.patch('/:id/baixar', async (req, res) => {
+// PATCH /api/financeiro/contas/:id/baixa — baixa manual (total ou parcial).
+// Substitui o antigo /:id/baixar (só integral, não registrava valor_pago/forma de
+// pagamento) — nada mais no código chama a rota antiga, removida abaixo.
+// Vendedor só pode dar baixa em títulos vinculados a ele (vendedor_id); admin, em
+// qualquer um. Muitos títulos legados têm vendedor_id nulo — nesses, só admin.
+router.patch('/contas/:id/baixa', async (req, res) => {
   try {
-    const { data_pagamento } = req.body
+    const { valor_recebido, data_pagamento, forma_pagamento, observacao } = req.body
+    const valorRecebidoNum = Number(valor_recebido)
+
+    if (!valorRecebidoNum || valorRecebidoNum <= 0) {
+      return res.status(400).json({ erro: '"valor_recebido" deve ser maior que zero' })
+    }
+
+    const { data: conta, error: erroBusca } = await supabase
+      .from('contas_financeiras')
+      .select('*')
+      .eq('id', req.params.id)
+      .single()
+    if (erroBusca) throw erroBusca
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+
+    if (req.user.role === 'vendedor' && conta.vendedor_id !== req.user.id) {
+      return res.status(403).json({ erro: 'Sem permissão para dar baixa neste título' })
+    }
+    if (conta.status === 'paga') return res.status(400).json({ erro: 'Este título já está totalmente pago' })
+    if (conta.status === 'cancelada') return res.status(400).json({ erro: 'Este título está cancelado' })
+
+    const valorPagoAnterior = Number(conta.valor_pago || 0)
+    const novoValorPago = valorPagoAnterior + valorRecebidoNum
+    const novoSaldo = Number(conta.valor || 0) - novoValorPago
+    const novoStatus = novoSaldo <= 0 ? 'paga' : 'pago_parcial'
     const hoje = new Date().toISOString().split('T')[0]
 
     const { data, error } = await supabase
       .from('contas_financeiras')
-      .update({ status: 'paga', data_pagamento: data_pagamento || hoje, updated_at: new Date().toISOString() })
+      .update({
+        valor_pago: novoValorPago,
+        status: novoStatus,
+        data_pagamento: data_pagamento || hoje,
+        forma_pagamento: forma_pagamento || null,
+        observacao_pagamento: observacao || null,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', req.params.id)
       .select()
       .single()
 
     if (error) throw error
-    if (!data) return res.status(404).json({ erro: 'Conta não encontrada' })
-
     res.json(data)
   } catch (err) {
     res.status(500).json({ erro: err.message })

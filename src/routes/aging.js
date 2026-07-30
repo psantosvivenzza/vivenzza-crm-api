@@ -40,7 +40,7 @@ async function buscarContasAbertas({ vendedor_id }) {
       .from('contas_financeiras')
       .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, vendedor_id, pedido_id, documento_ref, codigo_cliente')
       .eq('tipo', 'receber')
-      .in('status', ['aberta', 'vencida'])
+      .in('status', ['aberta', 'vencida', 'pago_parcial'])
       .range(offset, offset + PAGE - 1)
 
     if (vendedor_id) query = query.eq('vendedor_id', vendedor_id)
@@ -142,7 +142,7 @@ router.patch('/telefone', async (req, res) => {
       .update({ telefone_cobranca: telefone }, { count: 'exact' })
       .eq('pessoa_nome', pessoa_nome)
       .eq('tipo', 'receber')
-      .in('status', ['aberta', 'vencida'])
+      .in('status', ['aberta', 'vencida', 'pago_parcial'])
 
     if (error) throw error
 
