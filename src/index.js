@@ -230,10 +230,16 @@ cron.schedule('*/15 * * * *', async () => {
   }
 })
 
-// Régua de cobrança WhatsApp — diário às 08:00 BRT (11:00 UTC), seg-sex.
-// Desligada por padrão (automacoes_config.cobranca_whatsapp_ativa=false) até
-// ser ativada explicitamente pela tela de Cobranças.
-cron.schedule('0 11 * * 1-5', async () => {
+// Régua de cobrança WhatsApp — a cada 15 min, das 08h às 17h59 BRT (11h-20h59
+// UTC), seg-sex. CORREÇÃO URGENTE 2026-07-30: antes disparava tudo de uma vez às
+// 08h, o que gerou uma rajada de ~50 mensagens e suspendeu o número. Agora o job
+// em si (executarReguaCobranca) é quem controla os limites reais — máx. 30/dia,
+// máx. 10/hora, 1 por telefone por dia, intervalo de 45-90s entre envios, e só
+// dispara dentro de 08h-17h BRT — este agendamento só define a cadência de
+// "ticks"; o job decide a cada tick se ainda pode enviar algo. Desligada por
+// padrão (automacoes_config.cobranca_whatsapp_ativa=false) até ser ativada
+// explicitamente pela tela de Cobranças.
+cron.schedule('*/15 11-20 * * 1-5', async () => {
   try {
     await executarReguaCobranca()
   } catch (err) {
