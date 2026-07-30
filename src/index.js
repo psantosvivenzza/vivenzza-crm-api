@@ -257,3 +257,11 @@ cron.schedule('* * * * *', async () => {
     console.error('[cron monitoramento-resposta] Erro:', err.message)
   }
 })
+
+// NÃO há cron.schedule aqui para a sincronização de pedidos com o legado (e01).
+// Diferente dos outros jobs desta lista, o e01 (NetVision/ES_Pedidos) só é
+// alcançável a partir de uma máquina na mesma rede do DESKTOP-Q6O54R1 — o
+// Railway não tem rota até lá (mesma limitação documentada em
+// scripts/sync-estoque-e01.js). Um cron aqui só geraria ECONNREFUSED a cada
+// execução. A sincronização roda localmente: `node scripts/sync-pedidos-legado.mjs`
+// (manual ou agendado via Task Scheduler do Windows na máquina com acesso ao e01).
