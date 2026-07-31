@@ -18,6 +18,7 @@ import pedidosRouter from './routes/pedidos.js'
 import tarefasRouter from './routes/tarefas.js'
 import dashboardRouter from './routes/dashboard.js'
 import estoqueRouter from './routes/estoque.js'
+import notasEntradaRouter from './routes/notas-entrada.js'
 import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
 import comissoesRouter from './routes/comissoes.js'
@@ -135,6 +136,7 @@ app.use('/api/clientes-erp', auth, clientesErpRouter)
 app.use('/api/tarefas', auth, tarefasRouter)
 app.use('/api/dashboard', auth, dashboardRouter)
 app.use('/api/estoque', auth, estoqueRouter)
+app.use('/api/notas-entrada', auth, notasEntradaRouter)
 // Precisa vir ANTES de '/api/financeiro' — senão financeiroRouter (que tem
 // GET /:id) intercepta "/aging" como se fosse um id de conta, e a Postgres
 // rejeita "aging" como uuid inválido antes da requisição chegar no agingRouter.
