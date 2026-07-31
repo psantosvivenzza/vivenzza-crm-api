@@ -77,12 +77,18 @@ function montarEnvelopeCancelamento(chave, protocolo, justificativa) {
   </infEvento>
 </eventoCancNFe>`
 
+  // xmlns do wrapper precisa bater com o serviço de verdade sendo chamado.
+  // O endpoint (emitente.js) já foi corrigido pra recepcaoevento/recepcaoevento4.asmx
+  // (serviço unificado de eventos do NFe 4.00) — o wsdl desse serviço é
+  // RecepcaoEvento4, não NfeCancelamento4 (que não existe mais nesse endpoint;
+  // era o nome do serviço dedicado antigo, descontinuado). Corrigido pra manter
+  // o wrapper SOAP consistente com a URL real de destino.
   return compactarXml(`<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
   xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
-    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NfeCancelamento4">
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/RecepcaoEvento4">
       <envEvento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
         <idLote>${Date.now()}</idLote>
         ${xml}
