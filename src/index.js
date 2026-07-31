@@ -49,6 +49,7 @@ import { runHandoffAlerta } from './jobs/handoff-alerta.js'
 import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
 import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
 import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
+import { reconciliarNfePendentes } from './jobs/reconciliar-nfe.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
@@ -255,6 +256,17 @@ cron.schedule('* * * * *', async () => {
     await runMonitoramentoResposta()
   } catch (err) {
     console.error('[cron monitoramento-resposta] Erro:', err.message)
+  }
+})
+
+// Reconciliação de NF-e presas em 'enviada' (timeout/queda antes de gravar o
+// resultado da SEFAZ) — a cada 5 min. Diferente do e01, a SEFAZ é alcançável
+// pela internet normal, então isso roda no Railway sem problema.
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await reconciliarNfePendentes()
+  } catch (err) {
+    console.error('[cron reconciliar-nfe] Erro:', err.message)
   }
 })
 

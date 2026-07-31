@@ -1,12 +1,23 @@
+import { randomUUID, createHash } from 'crypto'
 import { Router } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { gerarXmlNFe } from '../services/nfe/xml.js'
 import { assinarNFe } from '../services/nfe/assinar.js'
 import { enviarNFe, consultarNFe, cancelarNFe, statusSefaz } from '../services/nfe/sefaz.js'
+import { SEFAZ } from '../services/nfe/emitente.js'
+import { exigirTransicaoValida } from '../services/nfe/estados.js'
+import { registrarEvento } from '../services/nfe/eventos.js'
 import { buscarCodigoMunicipio } from '../lib/ibge.js'
 import { gerarComissao, estornarComissao } from '../lib/comissoes.js'
+import { validarDocumento } from '../lib/cnpj.js'
 
 const router = Router()
+
+function sha256(texto) {
+  return createHash('sha256').update(texto, 'utf8').digest('hex')
+}
+
+const AMBIENTE_ATUAL = SEFAZ.tpAmb === '1' ? 'producao' : 'homologacao'
 
 // GET /api/nfe/status-sefaz
 router.get('/status-sefaz', async (req, res) => {
@@ -107,6 +118,12 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ erro: 'Ao menos um item é obrigatório' })
     }
 
+    // Destinatário incorreto bloqueado na origem, antes de qualquer chamada à
+    // SEFAZ — CNPJ alfanumérico-compatível (Nota Técnica 2025.002), CPF clássico.
+    if (dest_cnpj_cpf && !validarDocumento(dest_cnpj_cpf)) {
+      return res.status(400).json({ erro: `CNPJ/CPF do destinatário inválido: "${dest_cnpj_cpf}"` })
+    }
+
     if (pedido_id) {
       const { count: jaAutorizada } = await supabase
         .from('nfe')
@@ -197,6 +214,11 @@ router.post('/', async (req, res) => {
       if (errItens) throw errItens
     }
 
+    await registrarEvento({
+      nfeId: nfe.id, tipoEvento: 'criacao', statusNovo: nfe.status,
+      usuarioId: req.user?.id, motivo: notaInterna ? 'Nota interna (série 99)' : 'Rascunho (série 1)',
+    })
+
     // Nota interna gera comissão de imediato — não há autorização da SEFAZ pra
     // esperar. O gatilho da série 1 continua sendo a autorização, em POST /:id/emitir.
     if (notaInterna && pedido_id) {
@@ -212,6 +234,7 @@ router.post('/', async (req, res) => {
 
 // POST /api/nfe/:id/emitir — gera XML, assina e envia à SEFAZ
 router.post('/:id/emitir', async (req, res) => {
+  const correlationId = randomUUID()
   try {
     const { data: nfe, error } = await supabase
       .from('nfe')
@@ -224,7 +247,21 @@ router.post('/:id/emitir', async (req, res) => {
       return res.status(400).json({ erro: 'Nota interna não pode ser transmitida à SEFAZ' })
     }
     if (!['rascunho', 'rejeitada'].includes(nfe.status)) {
-      return res.status(400).json({ erro: `NFe com status "${nfe.status}" não pode ser emitida novamente` })
+      return res.status(409).json({ erro: `NFe com status "${nfe.status}" não pode ser emitida novamente` })
+    }
+
+    // Trava de numeração real da série 1 — bloqueada até o contador confirmar
+    // o número inicial seguro (numeração legada bagunçada, ver migrations/
+    // configuracoes_fiscais.sql). Homologação também respeita a trava: evita
+    // testar com um número que depois colide com o valor real definido.
+    if (Number(nfe.serie) === 1) {
+      const { data: config } = await supabase
+        .from('configuracoes_fiscais').select('serie1_numeracao_liberada').eq('id', 1).maybeSingle()
+      if (!config?.serie1_numeracao_liberada) {
+        return res.status(423).json({
+          erro: 'Emissão da série 1 (fiscal real) está bloqueada até a numeração inicial ser confirmada com o contador. Ver tabela configuracoes_fiscais.',
+        })
+      }
     }
 
     if (nfe.pedido_id) {
@@ -238,7 +275,32 @@ router.post('/:id/emitir', async (req, res) => {
       }
     }
 
-    // Obtém próximo número da sequência
+    exigirTransicaoValida(nfe.status, 'enviada')
+
+    // Trava de concorrência: compare-and-swap atômico no próprio WHERE — só
+    // move pra 'enviada' se o status ainda for exatamente o que acabamos de
+    // ler. Duplo clique / retry / duas réplicas processando a mesma requisição
+    // ao mesmo tempo: só uma consegue 0→1 linha afetada aqui; as demais recebem
+    // 409 e nunca chegam a chamar a SEFAZ nem a tirar um número da sequência.
+    const { data: reservada, error: erroReserva } = await supabase
+      .from('nfe')
+      .update({ status: 'enviada', correlation_id: correlationId, enviada_em: new Date().toISOString() })
+      .eq('id', nfe.id)
+      .eq('status', nfe.status)
+      .select('id')
+      .maybeSingle()
+    if (erroReserva) throw erroReserva
+    if (!reservada) {
+      return res.status(409).json({ erro: 'Esta NF-e já está sendo processada por outra requisição — aguarde ou consulte o status antes de tentar de novo.' })
+    }
+
+    await registrarEvento({
+      nfeId: nfe.id, tipoEvento: 'envio', statusAnterior: nfe.status, statusNovo: 'enviada',
+      correlationId, usuarioId: req.user?.id,
+    })
+
+    // Obtém próximo número da sequência (RPC atômica — proxima_nfe.sql, UPDATE
+    // ... RETURNING — já é concorrência-segura independente da trava acima).
     const { data: seq } = await supabase.rpc('proxima_nfe', { p_serie: nfe.serie })
     const numero = seq || 1
 
@@ -251,33 +313,66 @@ router.post('/:id/emitir', async (req, res) => {
     try {
       xmlAssinado = assinarNFe(xml, chave)
     } catch (errAssin) {
+      await supabase.from('nfe').update({ status: 'rascunho', motivo_rejeicao: `Erro ao assinar: ${errAssin.message}` }).eq('id', nfe.id)
+      await registrarEvento({
+        nfeId: nfe.id, tipoEvento: 'erro_comunicacao', statusAnterior: 'enviada', statusNovo: 'rascunho',
+        correlationId, motivo: errAssin.message, usuarioId: req.user?.id,
+      })
       return res.status(500).json({ erro: `Erro ao assinar NFe: ${errAssin.message}` })
     }
 
-    // Atualiza número e chave no banco
-    await supabase.from('nfe').update({ numero, chave, xml_enviado: xmlAssinado, status: 'enviada' }).eq('id', nfe.id)
+    const hashEnviado = sha256(xmlAssinado)
+
+    // Atualiza número, chave, XML e hash no banco ANTES de enviar — se o
+    // processo cair logo depois do envio (antes de processar a resposta), o
+    // job de reconciliação (jobs/reconciliar-nfe.js) já tem chave/protocolo
+    // suficientes pra consultar a SEFAZ e concluir sem reemitir.
+    await supabase.from('nfe').update({
+      numero, chave, xml_enviado: xmlAssinado, hash_xml_enviado: hashEnviado,
+      ambiente: AMBIENTE_ATUAL, versao_schema: '4.00',
+    }).eq('id', nfe.id)
 
     // Envia à SEFAZ
     let retorno
     try {
       retorno = await enviarNFe(xmlAssinado)
     } catch (errEnvio) {
-      await supabase.from('nfe').update({ status: 'rascunho', motivo_rejeicao: errEnvio.message }).eq('id', nfe.id)
-      return res.status(502).json({ erro: `Erro de comunicação com SEFAZ: ${errEnvio.message}` })
+      // NÃO volta pra 'rascunho' automaticamente: a essa altura pode ter ido
+      // à SEFAZ e travado só na resposta (timeout de rede) — reemitir cegamente
+      // arrisca duplicar. Fica em 'enviada' pro job de reconciliação resolver
+      // consultando o protocolo; só o comunicado de erro muda.
+      await supabase.from('nfe').update({ motivo_rejeicao: `Erro de comunicação: ${errEnvio.message}` }).eq('id', nfe.id)
+      await registrarEvento({
+        nfeId: nfe.id, tipoEvento: 'erro_comunicacao', statusAnterior: 'enviada', statusNovo: 'enviada',
+        correlationId, motivo: errEnvio.message, usuarioId: req.user?.id,
+      })
+      return res.status(502).json({ erro: `Erro de comunicação com SEFAZ: ${errEnvio.message} — a nota permanece "enviada" até a reconciliação confirmar o resultado real (evita reemissão duplicada).` })
     }
 
     // Processa retorno SEFAZ
     // cStat 100 = autorizado, 150 = autorizado fora do prazo
     const autorizado = retorno.cStat === '100' || retorno.cStat === '150'
-    const novoStatus = autorizado ? 'autorizada' : 'rejeitada'
+    const denegado = retorno.cStat === '110' || retorno.cStat === '205' // denegação: CNPJ irregular/situação cadastral
+    const novoStatus = autorizado ? 'autorizada' : denegado ? 'denegada' : 'rejeitada'
+    exigirTransicaoValida('enviada', novoStatus)
 
     await supabase.from('nfe').update({
       status: novoStatus,
       protocolo: autorizado ? retorno.protocolo : null,
       xml_autorizado: autorizado ? retorno.respXml : null,
+      hash_xml_autorizado: autorizado ? sha256(retorno.respXml) : null,
       motivo_rejeicao: autorizado ? null : `${retorno.cStat} - ${retorno.xMotivo}`,
+      reconciliada: true,
     }).eq('id', nfe.id)
 
+    await registrarEvento({
+      nfeId: nfe.id, tipoEvento: autorizado ? 'autorizacao' : denegado ? 'denegacao' : 'rejeicao',
+      statusAnterior: 'enviada', statusNovo: novoStatus, correlationId,
+      cstat: retorno.cStat, xMotivo: retorno.xMotivo, protocolo: retorno.protocolo, usuarioId: req.user?.id,
+    })
+
+    // Efeitos pós-autorização — só rodam se autorizado. Rejeitada/denegada:
+    // nunca move estoque, financeiro ou comissão (a nota não existe pra SEFAZ).
     if (nfe.pedido_id) {
       await supabase.from('pedidos').update({
         status_fiscal: autorizado ? 'autorizado' : 'rejeitado',
@@ -294,6 +389,7 @@ router.post('/:id/emitir', async (req, res) => {
     const { data: atualizada } = await supabase.from('nfe').select('*').eq('id', nfe.id).single()
     res.json({ ...atualizada, sefaz: retorno })
   } catch (err) {
+    await registrarEvento({ nfeId: req.params.id, tipoEvento: 'erro_comunicacao', motivo: err.message, correlationId, usuarioId: req.user?.id })
     res.status(500).json({ erro: err.message })
   }
 })
@@ -312,13 +408,24 @@ router.post('/:id/cancelar', async (req, res) => {
       if (nfe.status !== 'emitida_interna') {
         return res.status(400).json({ erro: `Nota interna com status "${nfe.status}" não pode ser cancelada` })
       }
+      exigirTransicaoValida(nfe.status, 'cancelada_interna')
 
       await supabase.from('nfe').update({
         status: 'cancelada_interna',
         motivo_rejeicao: justificativa || null,
       }).eq('id', nfe.id)
 
+      await registrarEvento({
+        nfeId: nfe.id, tipoEvento: 'cancelamento', statusAnterior: 'emitida_interna', statusNovo: 'cancelada_interna',
+        motivo: justificativa || null, usuarioId: req.user?.id,
+      })
+
       await estornarComissao(nfe.id).catch(err => console.error('[nfe] erro ao estornar comissão (nota interna):', err.message))
+      await registrarEvento({ nfeId: nfe.id, tipoEvento: 'estorno_comissao', usuarioId: req.user?.id })
+
+      if (nfe.pedido_id) {
+        await supabase.from('pedidos').update({ status_fiscal: 'cancelado' }).eq('id', nfe.pedido_id)
+      }
 
       return res.json({ cancelado: true })
     }
@@ -328,21 +435,38 @@ router.post('/:id/cancelar', async (req, res) => {
     }
     if (nfe.status !== 'autorizada') return res.status(400).json({ erro: 'Somente NFe autorizada pode ser cancelada' })
     if (!nfe.protocolo) return res.status(400).json({ erro: 'NFe sem protocolo de autorização' })
+    exigirTransicaoValida(nfe.status, 'cancelada')
 
     const retorno = await cancelarNFe(nfe.chave, nfe.protocolo, justificativa)
 
     const cancelado = retorno.cStat === '135'
-    await supabase.from('nfe').update({
-      status: cancelado ? 'cancelada' : nfe.status,
-      xml_cancelamento: retorno.respXml,
-      motivo_rejeicao: cancelado ? null : `${retorno.cStat} - ${retorno.xMotivo}`,
-    }).eq('id', req.params.id)
+    if (cancelado) {
+      await supabase.from('nfe').update({
+        status: 'cancelada',
+        xml_cancelamento: retorno.respXml,
+        motivo_rejeicao: null,
+      }).eq('id', req.params.id)
+    } else {
+      // Não confirmado pela SEFAZ: NÃO muda o status (a nota continua
+      // 'autorizada' de verdade) — só registra o motivo pra próxima tentativa.
+      await supabase.from('nfe').update({ motivo_rejeicao: `${retorno.cStat} - ${retorno.xMotivo}` }).eq('id', req.params.id)
+    }
+
+    await registrarEvento({
+      nfeId: nfe.id, tipoEvento: 'cancelamento', statusAnterior: 'autorizada', statusNovo: cancelado ? 'cancelada' : 'autorizada',
+      cstat: retorno.cStat, xMotivo: retorno.xMotivo, motivo: justificativa, usuarioId: req.user?.id,
+    })
 
     if (cancelado) {
       // NF-e cancelada na SEFAZ = venda desfeita — estorna a comissão gerada na
       // autorização (se ainda 'disponivel'), senão o vendedor fica com comissão
       // de uma venda que não existe mais.
       await estornarComissao(nfe.id).catch(err => console.error('[nfe] erro ao estornar comissão:', err.message))
+      await registrarEvento({ nfeId: nfe.id, tipoEvento: 'estorno_comissao', usuarioId: req.user?.id })
+
+      if (nfe.pedido_id) {
+        await supabase.from('pedidos').update({ status_fiscal: 'cancelado' }).eq('id', nfe.pedido_id)
+      }
     }
 
     res.json({ cancelado, ...retorno })

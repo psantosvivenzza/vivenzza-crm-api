@@ -1,4 +1,6 @@
 import forge from 'node-forge'
+import { DOMParser } from '@xmldom/xmldom'
+import { C14nCanonicalization } from 'xml-crypto'
 import { EMITENTE, getCertBuffer } from './emitente.js'
 
 // Carrega o certificado .pfx uma vez em memória
@@ -50,11 +52,16 @@ export function assinarNFe(xmlStr, chave) {
   const { cert, key } = carregarCertificado()
   const certB64 = getCertBase64()
 
-  // Calcula o digest SHA-1 do elemento infNFe (canonicalizado C14N)
+  // Calcula o digest SHA-1 do elemento infNFe, canonicalizado com C14N de
+  // verdade (xml-crypto), não mais a normalização simplificada de antes
+  // (só trim + fim de linha — não reordenava atributos/namespaces conforme
+  // o algoritmo real, risco de rejeição da SEFAZ por divergência de digest).
+  // Canonicaliza a partir do XML COMPLETO (não um substring isolado do
+  // infNFe): o C14N inclusivo precisa do contexto de namespace herdado dos
+  // ancestrais (infNFe não redeclara xmlns próprio, herda de NFe/nfeProc) —
+  // extrair só o fragmento perderia esse contexto.
   const md = forge.md.sha1.create()
-  // Extrai o conteúdo do infNFe para hash
-  const infNFeContent = extrairElemento(xmlStr, 'infNFe')
-  const canonico = canonicalize(infNFeContent)
+  const canonico = canonicalizarInfNFe(xmlStr)
   md.update(canonico, 'utf8')
   const digestValue = forge.util.encode64(md.digest().bytes())
 
@@ -72,9 +79,12 @@ export function assinarNFe(xmlStr, chave) {
     `</Reference>` +
     `</SignedInfo>`
 
-  // Assina o SignedInfo com RSA-SHA1
+  // Assina o SignedInfo com RSA-SHA1. Diferente do infNFe acima, o SignedInfo
+  // já é um fragmento autocontido (declara seu próprio xmlns do xmldsig), não
+  // depende de contexto de ancestral — canonicaliza direto como documento
+  // isolado.
   const signMd = forge.md.sha1.create()
-  signMd.update(canonicalize(signedInfo), 'utf8')
+  signMd.update(canonicalizarFragmentoAutocontido(signedInfo), 'utf8')
   const signature = key.sign(signMd)
   const signatureValue = forge.util.encode64(signature)
 
@@ -95,18 +105,24 @@ export function assinarNFe(xmlStr, chave) {
   return xmlAssinado
 }
 
-// Extrai o conteúdo de um elemento XML pelo nome da tag
-function extrairElemento(xml, tagName) {
-  const regex = new RegExp(`<${tagName}[^>]*>[\\s\\S]*?<\\/${tagName}>`)
-  const match = xml.match(regex)
-  return match ? match[0] : xml
+const c14n = new C14nCanonicalization()
+
+// Canonicaliza o elemento <infNFe> DENTRO do documento completo (não um
+// substring isolado) — precisa manter a árvore de ancestrais porque infNFe
+// não redeclara xmlns próprio (herda de <NFe>/<nfeProc>, ver xml.js). Extrair
+// só o fragmento e canonicalizar isolado perderia esse namespace herdado,
+// gerando um digest que não bate com o que a SEFAZ calcula do lado dela.
+function canonicalizarInfNFe(xmlCompletoStr) {
+  const doc = new DOMParser().parseFromString(xmlCompletoStr, 'text/xml')
+  const nos = doc.getElementsByTagName('infNFe')
+  if (!nos.length) throw new Error('Elemento infNFe não encontrado no XML para assinatura')
+  return c14n.process(nos[0], { defaultNsForPrefix: {}, signatureNode: null })
 }
 
-// Canonicalização C14N simples (para fins de digest)
-// Para produção, usar uma biblioteca C14N completa
-function canonicalize(xml) {
-  return xml
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .trim()
+// Canonicaliza um fragmento que já é autocontido (declara o próprio xmlns na
+// raiz, ex: <SignedInfo xmlns="...">) — não depende de contexto de ancestral,
+// pode ser parseado como documento isolado.
+function canonicalizarFragmentoAutocontido(xmlFragmentoStr) {
+  const doc = new DOMParser().parseFromString(xmlFragmentoStr, 'text/xml')
+  return c14n.process(doc.documentElement, { defaultNsForPrefix: {}, signatureNode: null })
 }

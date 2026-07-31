@@ -22,7 +22,16 @@ export const EMITENTE = {
   // na mesma LAN. Usado como fallback de desenvolvimento por getCertBuffer() abaixo —
   // em produção (Railway) o certificado vem de CERT_BASE64, não deste caminho.
   // Senha nunca vai pro código — vem de NFE_CERT_SENHA (Railway → Variables, secret).
-  CERT_PATH: String.raw`\\DESKTOP-Q6O54R1\NetMdb\Certificado\LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx`,
+  //
+  // AÇÃO PENDENTE (higiene, não bloqueante): o nome do arquivo original tem a
+  // senha do certificado de homologação escrita literalmente (".../LL_SANTOS_
+  // COSMETICOS_LTDA13602526000193 senha 123456.pfx"), o que expõe a senha em
+  // texto aberto neste arquivo versionado no git. Mantive o valor original aqui
+  // pra não quebrar o fallback local (não posso confirmar o nome real do
+  // arquivo na rede sem acesso a ela). Ação recomendada: renomear o arquivo na
+  // pasta de rede removendo a senha do nome, e então setar NFE_CERT_PATH com o
+  // novo caminho (a env var abaixo já tem prioridade sobre este fallback).
+  CERT_PATH: process.env.NFE_CERT_PATH || String.raw`\\DESKTOP-Q6O54R1\NetMdb\Certificado\LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx`,
   CERT_SENHA: process.env.NFE_CERT_SENHA,
 }
 
@@ -42,8 +51,14 @@ export function getCertBuffer() {
 export const SEFAZ = {
   UF: 'RS',
   cUF: 43,
-  // Ambiente: 1=Produção, 2=Homologação
-  tpAmb: '2',   // ← mudar para '1' quando for produção
+  // Ambiente: 1=Produção, 2=Homologação. Controlado por NFE_AMBIENTE (Railway →
+  // Variables) — default é SEMPRE homologação mesmo se a env var não existir ou
+  // vier com um valor inesperado; só um "producao" explícito e exato liga o
+  // ambiente real. Isso é proposital: a troca pra produção é uma decisão de
+  // negócio (numeração da série 1 fiscal ainda não definida com o contador —
+  // ver migrations/nfe_configuracoes_fiscais.sql), nunca deve acontecer por
+  // omissão de configuração.
+  tpAmb: process.env.NFE_AMBIENTE === 'producao' ? '1' : '2',
   versao: '4.00',
   // Endpoints — domínio CORRETO é sefazrs.rs.gov.br (infra própria da SEFAZ-RS pro
   // cUF=43), não svrs.rs.gov.br (SVRS = Sefaz Virtual que a RS opera como serviço de
@@ -63,13 +78,12 @@ export const SEFAZ = {
         inutilizacao: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
         consultaProtocolo: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
         statusServico: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
-        // ATENÇÃO: a fonte consultada aponta recepcaoevento4.asmx (serviço unificado de
-        // eventos do NFe 4.00) para cancelamento, não um "NfeCancelamento4" dedicado —
-        // diferente do que estava aqui antes. Ajustei a URL, mas o xmlns de
-        // nfeDadosMsg em montarEnvelopeCancelamento() (sefaz.js) ainda usa
-        // ".../NfeCancelamento4" — provavelmente também precisa virar
-        // ".../RecepcaoEvento4". Não mudei isso agora (não testei essa parte, só o
-        // status), fica como próximo passo antes de cancelar uma NFe de verdade.
+        // Serviço unificado de eventos do NFe 4.00 (recepcaoevento4.asmx) — o xmlns de
+        // nfeDadosMsg em montarEnvelopeCancelamento() (sefaz.js) foi corrigido pra
+        // ".../RecepcaoEvento4" (era ".../NfeCancelamento4", serviço antigo
+        // descontinuado). Ainda não testado contra a SEFAZ de verdade — só
+        // statusServico foi validado empiricamente até agora. Testar em homologação
+        // antes do 1º cancelamento real.
         cancelamento: 'https://nfe-homologacao.sefazrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
       },
     },
