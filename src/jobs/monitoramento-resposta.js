@@ -101,16 +101,25 @@ export async function runMonitoramentoResposta() {
 
     // Dispara todos os níveis até o atual ainda não notificados nesse episódio — se o
     // job ficar parado e o lead pular direto pra 2h, o vendedor ainda recebe o nível 1.
+    //
+    // upsert(ignoreDuplicates) em vez de insert(): com milhares de leads ativos e o job
+    // rodando a cada 1 min, a maioria dos leads já escalonados batia em UNIQUE(lead_id,
+    // level) TODA execução — um INSERT que sempre falha ainda gera uma linha de ERRO no
+    // log do Postgres mesmo quando a aplicação trata o 23505 sem logar nada. Com
+    // ignoreDuplicates, em conflito o Postgres simplesmente não escreve (sem erro) e o
+    // .select() volta vazio — mesmo sinal de "já notificado", sem gerar erro nenhum.
     for (let nivel = 1; nivel <= nivelAtual; nivel++) {
-      const { error: logError } = await supabase
+      const { data: logInserido, error: logError } = await supabase
         .from('escalation_log')
-        .insert({ lead_id: lead.id, level: nivel })
+        .upsert({ lead_id: lead.id, level: nivel }, { onConflict: 'lead_id,level', ignoreDuplicates: true })
+        .select()
 
       if (logError) {
-        if (logError.code !== '23505') {
-          console.error('[monitoramento-resposta] erro ao gravar escalation_log:', logError.message)
-        }
-        continue // 23505 = já notificado esse nível nesse episódio, segue pro próximo
+        console.error('[monitoramento-resposta] erro ao gravar escalation_log:', logError.message)
+        continue
+      }
+      if (!logInserido || logInserido.length === 0) {
+        continue // já notificado esse nível nesse episódio, segue pro próximo
       }
 
       const destinatarios = new Set()
