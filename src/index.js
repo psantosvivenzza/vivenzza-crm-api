@@ -21,6 +21,8 @@ import estoqueRouter from './routes/estoque.js'
 import notasEntradaRouter from './routes/notas-entrada.js'
 import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
+import nfeEntradasRouter from './routes/nfe-entradas.js'
+import fornecedoresRouter from './routes/fornecedores.js'
 import comissoesRouter from './routes/comissoes.js'
 import cfopsRouter from './routes/cfops.js'
 import relatoriosRouter from './routes/relatorios.js'
@@ -143,6 +145,8 @@ app.use('/api/notas-entrada', auth, notasEntradaRouter)
 app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
+app.use('/api/nfe-entradas', auth, nfeEntradasRouter)
+app.use('/api/fornecedores', auth, fornecedoresRouter)
 app.use('/api/comissoes', auth, comissoesRouter)
 app.use('/api/cfops', auth, cfopsRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
