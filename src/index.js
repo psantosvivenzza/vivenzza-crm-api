@@ -53,6 +53,7 @@ import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
 import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
 import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
 import { reconciliarNfePendentes } from './jobs/reconciliar-nfe.js'
+import { runSincronizacaoDistribuicaoDFe } from './jobs/nfe-distribuicao-sync.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
 
 const app = express()
@@ -273,6 +274,28 @@ cron.schedule('*/5 * * * *', async () => {
     await reconciliarNfePendentes()
   } catch (err) {
     console.error('[cron reconciliar-nfe] Erro:', err.message)
+  }
+})
+
+// Sincronização automática com a SEFAZ (Distribuição DF-e) — Fase B, ligada
+// no cron em 03/08 a pedido do Peterson ("pode ativar e quando tiver o
+// certificado novo só mudamos"). SEGURO hoje: a trava de negócio
+// `configuracoes_fiscais.entrada_sync_ativa` está `false` — o job lê essa
+// flag primeiro (decidirCicloDeSincronizacao) e pula o ciclo sem tentar
+// nada na SEFAZ enquanto estiver desligada, só logando "ciclo pulado".
+// Mesmo se alguém religar a flag antes do certificado, o pior cenário é
+// só logar erro por ciclo (consultarDistribuicaoDFe ainda é um stub que
+// lança erro de propósito) — o job já trata isso em try/catch, não
+// derruba a aplicação nem repete além do intervalo normal do cron.
+// Quando o certificado novo chegar: implementar consultarDistribuicaoDFe
+// de verdade, testar em homologação, e só então ligar
+// entrada_sync_ativa=true em configuracoes_fiscais — nenhuma mudança de
+// código extra é necessária além disso.
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await runSincronizacaoDistribuicaoDFe()
+  } catch (err) {
+    console.error('[cron nfe-distribuicao-sync] Erro:', err.message)
   }
 })
 
