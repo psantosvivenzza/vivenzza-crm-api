@@ -75,14 +75,20 @@ export async function runHandoffAlerta() {
       continue
     }
 
-    // Alerta 48h: só para a vendedora responsável
+    // Alerta 48h: vendedora responsável + cópia pro Peterson (accountability
+    // de gestão — enquanto as vendedoras dividem um único número de
+    // atendimento, o lembrete se perde no meio das conversas com lead se só
+    // for pra lá; o Peterson recebendo também garante que alguém vê a tempo).
     if (msDesdeUltima >= LIMITE_48H && lead.handoff_alerta_nivel < 48) {
+      const msg48Peterson = `⏰ *Lembrete de atendimento (48h) — cópia gestão*\n\nLead: *${lead.nome}*\nResponsável: ${nomeVendedora}\n\nEsse lead está há mais de 48 horas sem resposta da vendedora responsável.`
+      await enviarWhatsApp(PETERSON_NUMERO, msg48Peterson)
+
       if (telVendedora) {
         const msg48 = `⏰ *Lembrete de atendimento*\n\nLead: *${lead.nome}*\n\nVocê assumiu este atendimento mas não enviou mensagem há mais de 48 horas. O cliente está esperando!`
         await enviarWhatsApp(telVendedora, msg48)
       } else {
         semTelefoneVendedora++
-        console.warn(`[handoff-alerta] 48h: ${nomeVendedora} (lead ${lead.id}) sem telefone cadastrado em usuarios — alerta 48h NÃO enviado (ninguém avisado)`)
+        console.warn(`[handoff-alerta] 48h: ${nomeVendedora} (lead ${lead.id}) sem telefone cadastrado em usuarios — só o Peterson foi avisado`)
       }
 
       await supabase.from('leads').update({ handoff_alerta_nivel: 48 }).eq('id', lead.id)
