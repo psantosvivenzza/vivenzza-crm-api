@@ -134,7 +134,7 @@ router.get('/', async (req, res) => {
 
     safe(
       supabase.from('pedidos').select('total', { count: 'exact' })
-        .neq('status', 'cancelado').gte('created_at', inicioMes).lte('created_at', fimMes)
+        .neq('status', 'cancelado').gte('criado_em', inicioMes).lte('criado_em', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
           return {
