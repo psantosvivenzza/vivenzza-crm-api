@@ -1,22 +1,256 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 
 const router = Router()
 
-// GET /api/admin/erp/clientes
+// Datas de corte "sem comprar há Xd" — calculadas no momento da requisição,
+// nunca hardcoded como valor de data.
+function diasAtras(dias) {
+  const d = new Date()
+  d.setDate(d.getDate() - Number(dias))
+  return d.toISOString().slice(0, 10)
+}
+
+// Sanitiza um valor antes de interpolar numa string de filtro .or() do
+// PostgREST — remove vírgula/ponto/parênteses (caracteres que quebrariam o
+// parser de filtro) pra nunca montar uma condição a partir de valor não
+// confiável vindo de query string.
+function sanitizarValorFiltro(v) {
+  return String(v).replace(/[,.()]/g, '')
+}
+
+// GET /api/admin/erp/clientes — filtros rápidos (Fase 1): pesquisa geral
+// (normalizada via função clientes_erp_busca — nome/fantasia/CNPJ-CPF/
+// telefone/celular/email/código, com ou sem máscara), estado, cidade
+// (múltiplas), vendedor responsável (por usuario_id ou "sem vendedor"),
+// situação (ativo/inativo) e última compra (nunca comprou / dias sem
+// comprar). Todas as opções de filtro vêm de dados reais — ver
+// GET /clientes/filtros-opcoes.
 router.get('/clientes', async (req, res) => {
   try {
-    const { q, page = 1, limit = 50 } = req.query
+    const {
+      q, estado, cidade, vendedor_usuario_id, sem_vendedor, situacao,
+      nunca_comprou, dias_sem_comprar,
+      page = 1, limit = 50,
+    } = req.query
     const offset = (Number(page) - 1) * Number(limit)
+
     let query = supabase
       .from('clientes_erp')
-      .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, data_cadastro, ativo, em_revisao', { count: 'exact' })
+      .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, data_cadastro, ativo, em_revisao, endereco, data_ultima_compra, vendedor_responsavel_usuario_id, vendedor_responsavel, usuarios:vendedor_responsavel_usuario_id(nome, ativo)', { count: 'exact' })
       .order('razao_social')
       .range(offset, offset + Number(limit) - 1)
-    if (q) query = query.or(`razao_social.ilike.%${q}%,nome_fantasia.ilike.%${q}%,cnpj_cpf.ilike.%${q}%,legacy_id.ilike.%${q}%`)
+
+    if (q) {
+      const { data: idsBusca, error: erroBusca } = await supabase.rpc('clientes_erp_busca', { termo: q })
+      if (erroBusca) throw erroBusca
+      const ids = (idsBusca || []).map((r) => r.id)
+      // Sem resultado nenhum: força um IN vazio pra retornar lista vazia em
+      // vez de ignorar o filtro (comportamento correto de busca sem match).
+      query = query.in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000'])
+    }
+
+    // Estado/cidade: multi-seleção real via jsonb ->> , nunca lista fixa.
+    // "__sem_endereco__" pode vir combinado com UFs reais no mesmo filtro
+    // (multi-seleção) — nesse caso o OR precisa cobrir as duas condições,
+    // não só uma ou outra.
+    if (estado) {
+      const estados = String(estado).split(',').filter(Boolean)
+      const semEndereco = estados.includes('__sem_endereco__')
+      const ufsReais = estados.filter(uf => uf !== '__sem_endereco__').map(sanitizarValorFiltro).filter(Boolean)
+      if (semEndereco && ufsReais.length) {
+        const condicoesUf = ufsReais.map(uf => `endereco->>estado.eq.${uf}`).join(',')
+        query = query.or(`endereco->>estado.is.null,endereco->>estado.eq.,${condicoesUf}`)
+      } else if (semEndereco) {
+        query = query.or(`endereco->>estado.is.null,endereco->>estado.eq.`)
+      } else if (ufsReais.length) {
+        query = query.in('endereco->>estado', ufsReais)
+      }
+    }
+    if (cidade) {
+      const cidades = String(cidade).split(',').filter(Boolean)
+      query = query.in('endereco->>cidade', cidades)
+    }
+
+    if (sem_vendedor === 'true') {
+      query = query.is('vendedor_responsavel_usuario_id', null)
+    } else if (vendedor_usuario_id) {
+      query = query.eq('vendedor_responsavel_usuario_id', vendedor_usuario_id)
+    }
+
+    if (situacao === 'ativo') query = query.eq('ativo', true)
+    if (situacao === 'inativo') query = query.eq('ativo', false)
+
+    if (nunca_comprou === 'true') {
+      query = query.is('data_ultima_compra', null)
+    } else if (dias_sem_comprar) {
+      query = query.not('data_ultima_compra', 'is', null).lte('data_ultima_compra', diasAtras(dias_sem_comprar))
+    }
+
     const { data, error, count } = await query
     if (error) throw error
     res.json({ data, total: count, page: Number(page), limit: Number(limit) })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/admin/erp/clientes/filtros-opcoes — opções reais pros filtros
+// rápidos (estado, cidade, vendedor), derivadas dos dados de clientes_erp e
+// usuarios. Nunca lista fixa — se um estado/cidade some da base, some daqui
+// também na próxima chamada.
+router.get('/clientes/filtros-opcoes', async (req, res) => {
+  try {
+    const [{ data: enderecos, error: erroEnd }, { data: vendedores, error: erroVend }] = await Promise.all([
+      supabase.from('clientes_erp').select('endereco'),
+      supabase.from('usuarios').select('id, nome, ativo').eq('disponivel_como_vendedor', true).order('nome'),
+    ])
+    if (erroEnd) throw erroEnd
+    if (erroVend) throw erroVend
+
+    const estados = new Set()
+    const cidadesPorEstado = {}
+    let semEndereco = 0
+    for (const c of enderecos || []) {
+      const uf = c.endereco?.estado
+      const cidade = c.endereco?.cidade
+      if (!uf && !cidade) { semEndereco++; continue }
+      if (uf) {
+        estados.add(uf)
+        if (cidade) {
+          cidadesPorEstado[uf] = cidadesPorEstado[uf] || new Set()
+          cidadesPorEstado[uf].add(cidade)
+        }
+      }
+    }
+
+    res.json({
+      estados: [...estados].sort(),
+      cidades_por_estado: Object.fromEntries(
+        Object.entries(cidadesPorEstado).map(([uf, set]) => [uf, [...set].sort()])
+      ),
+      clientes_sem_endereco: semEndereco,
+      vendedores: vendedores || [],
+    })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/admin/erp/clientes/:id/pedidos-abertos — contagem de pedidos em
+// aberto (rascunho/confirmado) do cliente, usada como aviso antes de trocar o
+// vendedor responsável (spec: "mostrar quantidade de pedidos abertos do
+// cliente como aviso"). Distribuição de status confirmada em produção:
+// faturado 8699, rascunho 395, confirmado 54, cancelado 3 — "aberto" =
+// rascunho + confirmado (ainda não faturado, ainda não cancelado).
+router.get('/clientes/:id/pedidos-abertos', async (req, res) => {
+  try {
+    const { count, error } = await supabase
+      .from('pedidos')
+      .select('id', { count: 'exact', head: true })
+      .eq('cliente_erp_id', req.params.id)
+      .in('status', ['rascunho', 'confirmado'])
+    if (error) throw error
+    res.json({ pedidos_abertos: count || 0 })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/admin/erp/clientes/:id/historico-vendedor — histórico de trocas de
+// vendedor responsável do cliente (nunca sobrescrito, só inserido).
+router.get('/clientes/:id/historico-vendedor', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('clientes_vendedor_historico')
+      .select(`
+        id, motivo, origem, criado_em,
+        vendedor_anterior:vendedor_anterior_id(id, nome),
+        vendedor_novo:vendedor_novo_id(id, nome),
+        usuario_alterou:usuario_alterou_id(id, nome)
+      `)
+      .eq('cliente_erp_id', req.params.id)
+      .order('criado_em', { ascending: false })
+    if (error) throw error
+    res.json(data || [])
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// PUT /api/admin/erp/clientes/:id/vendedor — troca do vendedor responsável
+// atual do cliente. Regra de negócio (spec do Peterson): vale só daqui pra
+// frente — NUNCA toca pedidos existentes, NF-e emitidas, comissões ou contas
+// financeiras já lançadas. O vendedor gravado em `pedidos.vendedor_id` (e o
+// snapshot em `comissoes.vendedor_nome_snapshot`) é histórico e permanente,
+// independente do que este endpoint muda aqui. Exige motivo. Rota já protegida
+// por adminOnly no mount (index.js: app.use('/api/admin/erp', auth, adminOnly, ...)).
+router.put('/clientes/:id/vendedor', async (req, res) => {
+  try {
+    const { vendedor_novo_id, motivo, origem = 'individual' } = req.body
+
+    if (!motivo || !String(motivo).trim()) {
+      return res.status(400).json({ erro: 'motivo é obrigatório' })
+    }
+    const origensValidas = ['individual', 'lote', 'importacao', 'integracao', 'processo_administrativo']
+    if (!origensValidas.includes(origem)) {
+      return res.status(400).json({ erro: `origem inválida — use um de: ${origensValidas.join(', ')}` })
+    }
+
+    // vendedor_novo_id é opcional (permite "Sem representante"), mas se vier,
+    // precisa ser um usuário real disponível como vendedor — nunca aceita
+    // qualquer usuário (ex.: um admin sem essa flag) sem checar antes.
+    if (vendedor_novo_id) {
+      const { data: usuarioNovo, error: erroUsuarioNovo } = await supabase
+        .from('usuarios')
+        .select('id, nome, ativo, disponivel_como_vendedor')
+        .eq('id', vendedor_novo_id)
+        .maybeSingle()
+      if (erroUsuarioNovo) throw erroUsuarioNovo
+      if (!usuarioNovo || !usuarioNovo.disponivel_como_vendedor) {
+        return res.status(400).json({ erro: 'vendedor_novo_id não corresponde a um vendedor válido' })
+      }
+    }
+
+    const { data: clienteAtual, error: erroCliente } = await supabase
+      .from('clientes_erp')
+      .select('id, vendedor_responsavel_usuario_id')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroCliente) throw erroCliente
+    if (!clienteAtual) return res.status(404).json({ erro: 'Cliente não encontrado' })
+
+    const vendedorAnteriorId = clienteAtual.vendedor_responsavel_usuario_id || null
+    const vendedorNovoId = vendedor_novo_id || null
+
+    // Sem mudança real: não grava histórico nem faz update à toa.
+    if (vendedorAnteriorId === vendedorNovoId) {
+      return res.json({ alterado: false, mensagem: 'Vendedor responsável já é este — nenhuma alteração feita.' })
+    }
+
+    // Atualiza SOMENTE clientes_erp.vendedor_responsavel_usuario_id — nunca
+    // toca pedidos/comissoes/contas_financeiras, por regra explícita.
+    const { data: clienteAtualizado, error: erroUpdate } = await supabase
+      .from('clientes_erp')
+      .update({ vendedor_responsavel_usuario_id: vendedorNovoId })
+      .eq('id', req.params.id)
+      .select('id, vendedor_responsavel_usuario_id')
+      .single()
+    if (erroUpdate) throw erroUpdate
+
+    const { error: erroHistorico } = await supabase
+      .from('clientes_vendedor_historico')
+      .insert({
+        cliente_erp_id: req.params.id,
+        vendedor_anterior_id: vendedorAnteriorId,
+        vendedor_novo_id: vendedorNovoId,
+        usuario_alterou_id: req.user?.id !== 'api-user' ? req.user?.id : null,
+        motivo: String(motivo).trim(),
+        origem,
+      })
+    if (erroHistorico) throw erroHistorico
+
+    res.json({ alterado: true, cliente: clienteAtualizado })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -26,7 +260,10 @@ router.get('/clientes', async (req, res) => {
 router.get('/clientes/:id', async (req, res) => {
   try {
     const [clienteRes, vendasRes] = await Promise.all([
-      supabase.from('clientes_erp').select('*').eq('id', req.params.id).single(),
+      // Embute nome/situação do vendedor responsável atual (join por FK) —
+      // o frontend precisa disso pra exibir o nome e avisar se está inativo,
+      // sem ter que fazer uma segunda chamada.
+      supabase.from('clientes_erp').select('*, vendedor_responsavel_atual:vendedor_responsavel_usuario_id(id, nome, ativo)').eq('id', req.params.id).single(),
       supabase
         .from('vendas_legado')
         .select('id, numero_nf, serie, data_emissao, valor_total, status')
