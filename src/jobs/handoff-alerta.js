@@ -39,7 +39,7 @@ export async function runHandoffAlerta() {
     return { verificados: 0, alertas_48h: 0, alertas_72h: 0 }
   }
 
-  let alertas48 = 0, alertas72 = 0
+  let alertas48 = 0, alertas72 = 0, semTelefoneVendedora = 0
 
   for (const lead of leads || []) {
     // Busca última mensagem de saída para este lead
@@ -62,7 +62,12 @@ export async function runHandoffAlerta() {
       const msg72 = `⚠️ *Handoff sem resposta há 72h*\n\nLead: *${lead.nome}*\nResponsável: ${nomeVendedora}\n\nO cliente não recebeu mensagem há mais de 72 horas. Ação imediata necessária.`
 
       await enviarWhatsApp(PETERSON_NUMERO, msg72)
-      if (telVendedora) await enviarWhatsApp(telVendedora, msg72)
+      if (telVendedora) {
+        await enviarWhatsApp(telVendedora, msg72)
+      } else {
+        semTelefoneVendedora++
+        console.warn(`[handoff-alerta] 72h: ${nomeVendedora} (lead ${lead.id}) sem telefone cadastrado em usuarios — alerta enviado só para o Peterson`)
+      }
 
       await supabase.from('leads').update({ handoff_alerta_nivel: 72 }).eq('id', lead.id)
       alertas72++
@@ -75,6 +80,9 @@ export async function runHandoffAlerta() {
       if (telVendedora) {
         const msg48 = `⏰ *Lembrete de atendimento*\n\nLead: *${lead.nome}*\n\nVocê assumiu este atendimento mas não enviou mensagem há mais de 48 horas. O cliente está esperando!`
         await enviarWhatsApp(telVendedora, msg48)
+      } else {
+        semTelefoneVendedora++
+        console.warn(`[handoff-alerta] 48h: ${nomeVendedora} (lead ${lead.id}) sem telefone cadastrado em usuarios — alerta 48h NÃO enviado (ninguém avisado)`)
       }
 
       await supabase.from('leads').update({ handoff_alerta_nivel: 48 }).eq('id', lead.id)
@@ -83,7 +91,7 @@ export async function runHandoffAlerta() {
     }
   }
 
-  const resultado = { verificados: (leads || []).length, alertas_48h: alertas48, alertas_72h: alertas72 }
+  const resultado = { verificados: (leads || []).length, alertas_48h: alertas48, alertas_72h: alertas72, sem_telefone_vendedora: semTelefoneVendedora }
   console.log('[handoff-alerta] concluído:', resultado)
   return resultado
 }

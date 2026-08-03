@@ -35,19 +35,32 @@ const evolutionApi = axios.create({
   timeout: 15000,
 })
 
-async function enviarAlerta(texto) {
-  try {
-    // Sempre manda pelo `INSTANCE` (comercial) — é a única que sabemos que
-    // normalmente está de pé para avisar o Peterson, mesmo quando a
-    // instância com problema é a outra (a financeira).
-    await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
-      number: PETERSON_NUMERO,
-      text: texto,
-    })
-    return true
-  } catch {
-    return false
+// CORRIGIDO 2026-08-03: antes disso, o alerta de "instância X caiu" era
+// sempre enviado ATRAVÉS da própria instância comercial (`INSTANCE`) — o que
+// falha silenciosamente exatamente quando `INSTANCE` é a que caiu (foi o que
+// aconteceu no incidente de hoje: vivenzza ficou 2h+ fora do ar e nenhum
+// alerta saiu, porque o "mensageiro" era o próprio que tinha morrido).
+// Agora tenta mandar por qualquer instância monitorada que NÃO seja a que
+// está com problema, e só tenta a própria instância com problema como último
+// recurso (caso já tenha voltado entre a checagem e o envio).
+async function enviarAlerta(texto, instanciaComProblema) {
+  const candidatas = [
+    ...INSTANCIAS_MONITORADAS.filter((i) => i !== instanciaComProblema),
+    instanciaComProblema,
+  ]
+
+  for (const instancia of candidatas) {
+    try {
+      await evolutionApi.post(`/message/sendText/${instancia}`, {
+        number: PETERSON_NUMERO,
+        text: texto,
+      })
+      return true
+    } catch {
+      continue
+    }
   }
+  return false
 }
 
 // Verifica se já enviamos alerta de "offline" para ESSA instância nos
@@ -98,7 +111,7 @@ async function registrarEAlertar(nomeInstancia, status, latencia, detalhesExtra 
       const nomeAmigavel = NOME_AMIGAVEL[nomeInstancia] || nomeInstancia
       const emoji = status === 'error' || status === 'not_found' ? '🔴' : '🟠'
       const msg = `${emoji} *${nomeAmigavel} FORA*\n\nStatus: ${status}\nLatência: ${latencia}ms\nInstância: ${nomeInstancia}\n\nVerifique em: ${EVOLUTION_URL}`
-      alertaEnviado = await enviarAlerta(msg)
+      alertaEnviado = await enviarAlerta(msg, nomeInstancia)
 
       if (registro?.id) {
         await supabase.from('evolution_health').update({ alerta_enviado: alertaEnviado }).eq('id', registro.id)
