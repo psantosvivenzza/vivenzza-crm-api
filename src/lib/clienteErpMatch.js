@@ -1,4 +1,4 @@
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 import { normalizarTelefone, candidatosTelefone } from './telefone.js'
 
 // Valores reais encontrados em clientes_erp.contatos.tipo (verificado direto no banco):

@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'

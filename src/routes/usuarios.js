@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()

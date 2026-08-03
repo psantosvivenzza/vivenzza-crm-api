@@ -8,7 +8,7 @@
  * o lead volta a ser respondido (última mensagem passa a ser 'saida'), suas linhas
  * são apagadas, liberando os níveis pra dispararem de novo na próxima espera.
  */
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 
 const LIMIAR_15MIN = 15
 const LIMIAR_30MIN = 30

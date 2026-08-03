@@ -3,7 +3,7 @@
 // de pedidos.js, injeta req.user fake — mesma técnica usada nos testes de
 // estorno financeiro. Dados sintéticos criados e apagados em finally.
 import express from 'express'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 import pedidosRouter from '../src/routes/pedidos.js'
 
 let falhas = 0

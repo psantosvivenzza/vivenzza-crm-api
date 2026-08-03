@@ -1,4 +1,4 @@
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 
 // Rodízio atômico entre vendedores ativos — ver função proximo_vendedor_atomic()
 // no Postgres (lock FOR UPDATE em distribuicao_leads.id=1, evita race condition

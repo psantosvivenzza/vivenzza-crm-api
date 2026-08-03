@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import pg from 'pg'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 const client = new pg.Client({
   host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,

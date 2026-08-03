@@ -1,4 +1,4 @@
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 
 function inicioMesAtual() {
   const agora = new Date()

@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import axios from 'axios'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { marcarVendedorAssumiu } from './sdr.js'
 import { paraJidWhatsapp } from '../lib/telefone.js'
 

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone } from '../lib/telefone.js'
 import { proximoVendedor } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'

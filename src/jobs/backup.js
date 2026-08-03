@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 
 // whatsapp_mensagens excluída do backup completo: pode ter centenas de milhares de
 // linhas e causar OOM. O Supabase já tem redundância própria para essa tabela.

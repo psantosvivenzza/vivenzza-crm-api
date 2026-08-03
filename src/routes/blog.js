@@ -3,7 +3,7 @@ import axios from 'axios'
 import FormData from 'form-data'
 import { nuvemshopRequest } from '../lib/nuvemshop.js'
 import { wordpressRequest, wordpressConfigurado } from '../lib/wordpress.js'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 
 const router = Router()
 

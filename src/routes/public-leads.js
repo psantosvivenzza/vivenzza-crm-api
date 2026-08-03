@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { normalizarTelefone } from '../lib/telefone.js'
 import { enviarLeadCAPI } from '../lib/capi.js'
 import { proximoVendedor } from '../lib/distribuicao.js'

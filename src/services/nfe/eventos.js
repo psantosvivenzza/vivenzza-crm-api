@@ -1,4 +1,4 @@
-import { supabase } from '../../lib/supabase.js'
+import { supabase } from '../../lib/supabase-admin.server.js'
 
 // Registra um evento fiscal em nfe_eventos (append-only — ver migration
 // nfe_eventos.sql). Nunca lança: um erro ao registrar auditoria não pode

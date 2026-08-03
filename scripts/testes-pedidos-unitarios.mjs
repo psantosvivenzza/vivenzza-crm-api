@@ -2,7 +2,7 @@
 // Não toca o e01 real — usa mapearStatus/processarPedido exportados do job com
 // um client e01 falso (stub) e um mapa de clientes vazio, isolando a lógica pura.
 import { mapearStatus, processarPedido } from '../src/jobs/sync-pedidos-legado.js'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 let falhas = 0
 function check(nome, condicao, detalhe) {

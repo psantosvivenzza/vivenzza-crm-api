@@ -4,7 +4,7 @@
 // pela chave (consultarNFe, já existente) e aplica os efeitos internos
 // (comissão, status_fiscal do pedido) de forma idempotente, exatamente como
 // POST /:id/emitir faria se tivesse recebido a resposta a tempo.
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { consultarNFe } from '../services/nfe/sefaz.js'
 import { registrarEvento } from '../services/nfe/eventos.js'
 import { gerarComissao } from '../lib/comissoes.js'

@@ -22,7 +22,7 @@
 //   só decide e loga, não envia.
 // Por isso, por enquanto, este job só sincroniza o cursor de NSU e loga o
 // que encontrou/decidiria — não cria nem altera nenhuma nota de entrada.
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { EMITENTE, SEFAZ } from '../services/nfe/emitente.js'
 import { decidirCicloDeSincronizacao } from '../services/nfe-distribuicao/ciclo.js'
 import { avancarCursor } from '../services/nfe-distribuicao/cursor.js'

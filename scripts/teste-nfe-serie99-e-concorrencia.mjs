@@ -15,7 +15,7 @@
 // que não está disponível neste ambiente de teste): emissão real série 1,
 // autorização/rejeição/denegação vindas da SEFAZ, reconciliação pós-timeout.
 import express from 'express'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 import nfeRouter from '../src/routes/nfe.js'
 
 let falhas = 0

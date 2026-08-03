@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 const { data: p1 } = await supabase.from('pedidos').select('id, observacoes, legacy_id').or('observacoes.ilike.%TESTE%,legacy_id.ilike.%TESTE%')
 console.log('pedidos residuais de teste:', JSON.stringify(p1))

@@ -2,7 +2,7 @@
 // pedidos, não sincroniza nem resolve conflito; admin pode tudo. Mesma técnica
 // de Express local + injeção de req.user usada nos outros testes de pedidos.
 import express from 'express'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 import pedidosRouter from '../src/routes/pedidos.js'
 
 let falhas = 0

@@ -11,7 +11,7 @@
  * Idempotente — pode rodar mais de uma vez sem duplicar nada (só faz UPDATE).
  */
 import 'dotenv/config'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 const normalizar = (s) => (s || '')
   .normalize('NFD').replace(/[̀-ͯ]/g, '') // remove acentos (marcas diacríticas combinantes)

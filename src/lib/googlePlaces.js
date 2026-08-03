@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 1x por dia, pra não estourar cota
 

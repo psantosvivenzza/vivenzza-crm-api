@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 import { construirMapaTelefonesClientesErp, encontrarClienteNoMapa } from '../src/lib/clienteErpMatch.js'
 
 // Rodar uma vez: node scripts/backfill-cliente-erp-leads.js

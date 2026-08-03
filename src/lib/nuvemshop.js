@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 
 const API_VERSION = '2025-03'
 const USER_AGENT = 'VivenzzaContentBot (psantos@vivenzzaprofessional.com.br)'

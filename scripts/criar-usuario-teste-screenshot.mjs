@@ -4,7 +4,7 @@
 // scripts/apagar-usuario-teste-screenshot.mjs assim que as capturas terminarem.
 import 'dotenv/config'
 import bcrypt from 'bcryptjs'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 const EMAIL = 'teste.screenshot@vivenzzaprofessional.com.br'
 const SENHA = 'TesteScreenshot2026!'

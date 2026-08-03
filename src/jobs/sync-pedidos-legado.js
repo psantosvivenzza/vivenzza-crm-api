@@ -17,7 +17,7 @@
  * status, é uma árvore de prioridade (ver mapearStatus).
  */
 import pg from 'pg'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 
 const PAGE_E01 = 200
 const PAGE_SUPABASE = 1000

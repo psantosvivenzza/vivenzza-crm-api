@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { runEvolutionHealthCheck } from '../jobs/evolution-health.js'
 
 const router = Router()

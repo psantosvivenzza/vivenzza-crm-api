@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 const EMAIL = 'teste.screenshot@vivenzzaprofessional.com.br'
 const { error } = await supabase.from('usuarios').delete().eq('email', EMAIL)

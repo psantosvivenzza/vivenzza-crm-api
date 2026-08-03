@@ -2,7 +2,7 @@ import { Router } from 'express'
 import axios from 'axios'
 import cron from 'node-cron'
 import Anthropic from '@anthropic-ai/sdk'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { marcarVendedorAssumiu } from '../lib/sdrConversas.js'
 
 const router = Router()

@@ -1,4 +1,4 @@
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 
 for (const [tabela, colunas] of [
   ['pedidos', ['sistema_origem', 'cliente_externo_id', 'precisa_vinculo_cliente', 'atualizado_no_origem_em', 'conflito_sincronizacao']],

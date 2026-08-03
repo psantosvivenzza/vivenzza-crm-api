@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { query as dbQuery } from '../lib/db.js'
 import { normalizarTelefone, candidatosTelefone } from '../lib/telefone.js'
 

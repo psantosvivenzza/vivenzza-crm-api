@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { EMITENTE } from '../services/nfe/emitente.js'
 import { parseNFeXml, sha256 } from '../services/nfe-entrada/xml.js'
 import { validarEstruturaEntrada } from '../services/nfe-entrada/validacao.js'

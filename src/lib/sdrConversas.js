@@ -1,4 +1,4 @@
-import { supabase } from './supabase.js'
+import { supabase } from './supabase-admin.server.js'
 import { candidatosTelefone } from './telefone.js'
 
 // Marca que o vendedor assumiu a conversa manualmente — usado pelo whatsapp.js (quando

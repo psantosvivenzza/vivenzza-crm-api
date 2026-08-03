@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'crypto'
 import { Router } from 'express'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase-admin.server.js'
 import { gerarXmlNFe } from '../services/nfe/xml.js'
 import { assinarNFe } from '../services/nfe/assinar.js'
 import { enviarNFe, consultarNFe, cancelarNFe, statusSefaz } from '../services/nfe/sefaz.js'

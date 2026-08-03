@@ -9,7 +9,7 @@
 // run` conectaria em localhost:5432 e falharia com ECONNREFUSED.
 import 'dotenv/config'
 import pg from 'pg'
-import { supabase } from '../src/lib/supabase.js'
+import { supabase } from '../src/lib/supabase-admin.server.js'
 import { executarSincronizacaoPedidos } from '../src/jobs/sync-pedidos-legado.js'
 
 let falhas = 0
