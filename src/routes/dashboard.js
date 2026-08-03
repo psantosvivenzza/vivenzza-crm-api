@@ -133,8 +133,10 @@ router.get('/', async (req, res) => {
     ),
 
     safe(
+      // Só "faturado" conta como venda de verdade — rascunho e confirmado
+      // ainda não viraram nota fiscal, não são receita realizada.
       supabase.from('pedidos').select('total', { count: 'exact' })
-        .neq('status', 'cancelado').gte('criado_em', inicioMes).lte('criado_em', fimMes)
+        .eq('status', 'faturado').gte('criado_em', inicioMes).lte('criado_em', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
           return {
