@@ -135,8 +135,16 @@ router.get('/', async (req, res) => {
     safe(
       // Só "faturado" conta como venda de verdade — rascunho e confirmado
       // ainda não viraram nota fiscal, não são receita realizada.
+      // classificacao_faturamento (preenchida pelo módulo de NF-e ao
+      // vincular a Série 1 autorizada) exclui bonificação/outra
+      // operação/não-fiscal quando já classificado. Pedido antigo do
+      // legado, ainda não passado por esse fluxo, fica com essa coluna
+      // NULL — tratado como venda (comportamento histórico preservado,
+      // não reclassificado às cegas).
       supabase.from('pedidos').select('total', { count: 'exact' })
-        .eq('status', 'faturado').gte('criado_em', inicioMes).lte('criado_em', fimMes)
+        .eq('status', 'faturado')
+        .or('classificacao_faturamento.eq.venda,classificacao_faturamento.is.null')
+        .gte('criado_em', inicioMes).lte('criado_em', fimMes)
         .then(({ data, count, error }) => {
           if (error) throw error
           return {
