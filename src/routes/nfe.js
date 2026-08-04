@@ -10,6 +10,7 @@ import { registrarEvento } from '../services/nfe/eventos.js'
 import { buscarCodigoMunicipio } from '../lib/ibge.js'
 import { gerarComissao, estornarComissao } from '../lib/comissoes.js'
 import { validarDocumento } from '../lib/cnpj.js'
+import { vincularSerie1Autorizada, vincularSerie99Interna, desvincularSeForAAtual } from '../lib/pedidoFiscal.js'
 
 const router = Router()
 
@@ -221,8 +222,11 @@ router.post('/', async (req, res) => {
 
     // Nota interna gera comissão de imediato — não há autorização da SEFAZ pra
     // esperar. O gatilho da série 1 continua sendo a autorização, em POST /:id/emitir.
+    // Classificação de faturamento: série 99 nunca é venda fiscal (regras 6/11),
+    // fica 'nao_fiscal' pro Dashboard não contar como faturamento real.
     if (notaInterna && pedido_id) {
       await gerarComissao(nfe.id).catch(err => console.error('[nfe] erro ao gerar comissão (nota interna):', err.message))
+      await vincularSerie99Interna(pedido_id, nfe.id).catch(err => console.error('[nfe] erro ao vincular classificação (nota interna):', err.message))
     }
 
     const { data: completo } = await supabase.from('nfe').select('*, nfe_itens(*)').eq('id', nfe.id).single()
@@ -380,9 +384,11 @@ router.post('/:id/emitir', async (req, res) => {
       }).eq('id', nfe.pedido_id)
 
       if (autorizado) {
-        // Não deixa erro ao gerar comissão derrubar a resposta de emissão da NF-e —
-        // a NF-e já está autorizada na SEFAZ nesse ponto, isso não pode ser desfeito.
+        // Não deixa erro ao gerar comissão/vincular classificação derrubar a resposta
+        // de emissão da NF-e — a NF-e já está autorizada na SEFAZ nesse ponto, isso
+        // não pode ser desfeito. nfe.nfe_itens já veio no select do topo da rota.
         await gerarComissao(nfe.id).catch(err => console.error('[nfe] erro ao gerar comissão:', err.message))
+        await vincularSerie1Autorizada(nfe.pedido_id, nfe).catch(err => console.error('[nfe] erro ao vincular classificação de faturamento:', err.message))
       }
     }
 
@@ -425,6 +431,7 @@ router.post('/:id/cancelar', async (req, res) => {
 
       if (nfe.pedido_id) {
         await supabase.from('pedidos').update({ status_fiscal: 'cancelado' }).eq('id', nfe.pedido_id)
+        await desvincularSeForAAtual(nfe.pedido_id, nfe.id).catch(err => console.error('[nfe] erro ao desvincular classificação (nota interna):', err.message))
       }
 
       return res.json({ cancelado: true })
@@ -466,6 +473,7 @@ router.post('/:id/cancelar', async (req, res) => {
 
       if (nfe.pedido_id) {
         await supabase.from('pedidos').update({ status_fiscal: 'cancelado' }).eq('id', nfe.pedido_id)
+        await desvincularSeForAAtual(nfe.pedido_id, nfe.id).catch(err => console.error('[nfe] erro ao desvincular classificação:', err.message))
       }
     }
 

@@ -8,15 +8,18 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { consultarNFe } from '../services/nfe/sefaz.js'
 import { registrarEvento } from '../services/nfe/eventos.js'
 import { gerarComissao } from '../lib/comissoes.js'
+import { vincularSerie1Autorizada } from '../lib/pedidoFiscal.js'
 
 const MINUTOS_ANTES_DE_RECONCILIAR = 10
 
 export async function reconciliarNfePendentes() {
   const limite = new Date(Date.now() - MINUTOS_ANTES_DE_RECONCILIAR * 60 * 1000).toISOString()
 
+  // nfe_itens(*) só é usado se a nota vier autorizada (classificação de
+  // faturamento por CFOP) — pedido junto sem custo extra de round-trip.
   const { data: pendentes, error } = await supabase
     .from('nfe')
-    .select('id, chave, numero, pedido_id, correlation_id')
+    .select('id, chave, numero, pedido_id, correlation_id, nfe_itens(*)')
     .eq('status', 'enviada')
     .eq('reconciliada', false)
     .lte('enviada_em', limite)
@@ -52,6 +55,7 @@ export async function reconciliarNfePendentes() {
         if (nfe.pedido_id) {
           await supabase.from('pedidos').update({ status_fiscal: 'autorizado', numero_nfe: String(nfe.numero) }).eq('id', nfe.pedido_id)
           await gerarComissao(nfe.id).catch(err => console.error('[reconciliar-nfe] erro ao gerar comissão:', err.message))
+          await vincularSerie1Autorizada(nfe.pedido_id, nfe).catch(err => console.error('[reconciliar-nfe] erro ao vincular classificação de faturamento:', err.message))
         }
         resumo.autorizadas++
       } else if (rejeitadoOuNaoEncontrado) {
