@@ -141,17 +141,24 @@ router.get('/', async (req, res) => {
       // legado, ainda não passado por esse fluxo, fica com essa coluna
       // NULL — tratado como venda (comportamento histórico preservado,
       // não reclassificado às cegas).
-      supabase.from('pedidos').select('total', { count: 'exact' })
-        .eq('status', 'faturado')
-        .or('classificacao_faturamento.eq.venda,classificacao_faturamento.is.null')
-        .gte('criado_em', inicioMes).lte('criado_em', fimMes)
-        .then(({ data, count, error }) => {
-          if (error) throw error
-          return {
-            quantidade: count ?? 0,
-            valor: (data ?? []).reduce((sum, p) => sum + (Number(p.total) || 0), 0),
-          }
-        }),
+      (() => {
+        let q = supabase.from('pedidos').select('total', { count: 'exact' })
+          .eq('status', 'faturado')
+          .or('classificacao_faturamento.eq.venda,classificacao_faturamento.is.null')
+          .gte('criado_em', inicioMes).lte('criado_em', fimMes)
+        // 2026-08-04: card "Pedidos do Mês" era o único indicador deste
+        // endpoint sem filtro por vendedor — todo vendedor via o total da
+        // empresa inteira, não só o próprio. Corrigido pra seguir o mesmo
+        // padrão dos demais (leads, tarefas, ligações) acima.
+        if (filtrarPorVendedor) q = q.eq('vendedor_id', filtroVendedorId)
+        return q
+      })().then(({ data, count, error }) => {
+        if (error) throw error
+        return {
+          quantidade: count ?? 0,
+          valor: (data ?? []).reduce((sum, p) => sum + (Number(p.total) || 0), 0),
+        }
+      }),
       { quantidade: 0, valor: 0 }
     ),
 
