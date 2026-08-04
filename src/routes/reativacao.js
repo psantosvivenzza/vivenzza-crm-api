@@ -24,6 +24,27 @@ const MAX_TENTATIVAS = 3
 const DIAS_SEM_RESPOSTA = 15
 const DIAS_ENTRE_FOLLOWUPS = 7
 
+// Travas de segurança de envio — incidente de 2026-08-04: um backlog de 477 leads
+// elegíveis (represado por semanas) foi processado inteiro num único disparo, sem
+// ritmo nenhum entre mensagens. O WhatsApp derrubou a taxa de entrega do número
+// "vivenzza" de ~90% pra ~25% em duas horas, e isso é o MESMO número que os
+// vendedores usam pra falar com cliente de verdade — a reativação em massa
+// contaminou a entrega das conversas reais. As 3 travas abaixo existem pra isso
+// nunca mais acontecer:
+// 1) MAX_ENVIOS_POR_DIA — nunca manda o backlog inteiro de uma vez; drena aos poucos.
+// 2) DELAY_MIN_MS/DELAY_MAX_MS — intervalo real (30-60s, com variação) entre cada
+//    envio, pra nunca parecer disparo em massa pro WhatsApp.
+// 3) circuito de entrega — a cada lote, confere se as mensagens já enviadas há tempo
+//    suficiente pra ter confirmação estão de fato sendo entregues; se a taxa cair
+//    abaixo do mínimo, para o job E desativa a automação (mesma trava manual que o
+//    Peterson usou nesse incidente), em vez de continuar piorando a reputação do número.
+const MAX_ENVIOS_POR_DIA = 30
+const DELAY_MIN_MS = 30_000
+const DELAY_MAX_MS = 60_000
+const TAMANHO_LOTE_VERIFICACAO = 8
+const IDADE_MINIMA_PARA_VERIFICAR_MS = 3 * 60_000
+const TAXA_ENTREGA_MINIMA = 0.5
+
 // Janela de envio — fora dela a automação nunca dispara mensagem, mesmo se o job for
 // forçado manualmente pelo botão "Executar agora".
 function dentroDaJanelaReativacao() {
@@ -59,6 +80,42 @@ function candidatosParaSdrConversas(telefoneLocal) {
   const sem9 = semPrefixo.length === 11 ? semPrefixo.slice(0, 2) + semPrefixo.slice(3) : null
   const locais = [semPrefixo, com9, sem9].filter(Boolean)
   return [...locais, ...locais.map((c) => `55${c}`)]
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function delayAleatorio() {
+  return delay(DELAY_MIN_MS + Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS))
+}
+
+async function contarEnviadosHoje() {
+  const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const { data } = await supabase.from('reativacao_metricas').select('enviados').eq('data', hoje).maybeSingle()
+  return data?.enviados ?? 0
+}
+
+// Desativa a automação (mesma flag que o toggle manual em /automacoes) quando o
+// circuito de entrega detecta degradação — precisa de intervenção humana pra
+// investigar antes de voltar a mandar, não é algo pra tentar de novo sozinho.
+async function pausarAutomacaoPorSeguranca(motivo) {
+  await supabase
+    .from('automacoes_config')
+    .update({ reativacao_ativa: false, atualizado_em: new Date().toISOString() })
+    .eq('id', 1)
+  console.error(`[reativacao] CIRCUITO DE ENTREGA: automação pausada automaticamente — ${motivo}`)
+}
+
+// Taxa de entrega confirmada (entregue/lido/reproduzido) entre as mensagens passadas.
+// Só faz sentido chamar pra mensagens enviadas há tempo suficiente pra webhook de
+// confirmação já ter chegado — ver IDADE_MINIMA_PARA_VERIFICAR_MS.
+async function taxaDeEntregaRecente(evolutionIds) {
+  if (!evolutionIds.length) return null
+  const { data } = await supabase.from('whatsapp_mensagens').select('status').in('evolution_id', evolutionIds)
+  if (!data || !data.length) return null
+  const entregues = data.filter((m) => ['entregue', 'lido', 'reproduzido'].includes(m.status)).length
+  return entregues / data.length
 }
 
 async function statusAtendimentoDoLead(telefoneLocal) {
@@ -163,7 +220,7 @@ async function enviarMensagemReativacao(lead) {
 
     await incrementarMetrica('enviados')
     console.log(`[reativacao] mensagem enviada para ${lead.nome} (tentativa ${tentativa}/${MAX_TENTATIVAS})`)
-    return { lead, tentativa, mensagem }
+    return { lead, tentativa, mensagem, evolutionId: envio?.key?.id ?? null }
   } catch (err) {
     await supabase.from('reativacao_fila').insert({
       lead_id: lead.id,
@@ -231,10 +288,38 @@ export async function verificarElegiveis() {
   await incrementarMetrica('elegiveis', elegiveis.length)
   console.log(`[reativacao] ${elegiveis.length} leads elegíveis hoje`)
 
+  const jaEnviadosHoje = await contarEnviadosHoje()
   let enviados = 0
+  const enviosDesteLote = [] // { evolutionId, enviadoEm } — só desta execução, pro circuito de entrega
+
   for (const lead of elegiveis) {
+    if (jaEnviadosHoje + enviados >= MAX_ENVIOS_POR_DIA) {
+      console.log(`[reativacao] limite diário de ${MAX_ENVIOS_POR_DIA} atingido — restante (${elegiveis.length - enviados} leads) fica pra amanhã`)
+      break
+    }
+
+    // Circuito de entrega: a cada TAMANHO_LOTE_VERIFICACAO envios, confere se as
+    // mensagens já com tempo suficiente pra confirmação estão sendo entregues de
+    // verdade. Taxa baixa = WhatsApp degradando a entrega desse número — para antes
+    // de piorar (ver comentário no topo do arquivo, incidente de 2026-08-04).
+    if (enviados > 0 && enviados % TAMANHO_LOTE_VERIFICACAO === 0) {
+      const agora = Date.now()
+      const verificaveis = enviosDesteLote.filter((e) => agora - e.enviadoEm >= IDADE_MINIMA_PARA_VERIFICAR_MS)
+      const taxa = await taxaDeEntregaRecente(verificaveis.map((e) => e.evolutionId).filter(Boolean))
+      if (taxa !== null && taxa < TAXA_ENTREGA_MINIMA) {
+        await pausarAutomacaoPorSeguranca(
+          `taxa de entrega de ${Math.round(taxa * 100)}% (mínimo ${TAXA_ENTREGA_MINIMA * 100}%) após ${enviados} envios nesta execução`
+        )
+        break
+      }
+    }
+
     const resultado = await enviarMensagemReativacao(lead)
-    if (resultado) enviados++
+    if (resultado) {
+      enviados++
+      enviosDesteLote.push({ evolutionId: resultado.evolutionId, enviadoEm: Date.now() })
+      await delayAleatorio()
+    }
   }
 
   return { elegiveis: elegiveis.length, enviados }
@@ -365,14 +450,13 @@ router.post('/toggle', async (req, res) => {
   }
 })
 
-// POST /api/reativacao/executar-agora — força o job manualmente (admin only)
+// POST /api/reativacao/executar-agora — força o job manualmente (admin only).
+// Com as travas de ritmo (30-60s entre envios), uma execução com o backlog cheio
+// pode levar bem mais que o timeout de uma requisição HTTP — dispara em background
+// e responde na hora; acompanhar o andamento pela tela de Automações (GET /status).
 router.post('/executar-agora', async (req, res) => {
-  try {
-    const resultado = await verificarElegiveis()
-    res.json({ sucesso: true, ...resultado })
-  } catch (err) {
-    res.status(500).json({ erro: err.message })
-  }
+  verificarElegiveis().catch((err) => console.error('[reativacao] erro na execução manual:', err.message))
+  res.json({ sucesso: true, iniciado: true })
 })
 
 // Todo dia útil às 09:00 horário de Brasília
