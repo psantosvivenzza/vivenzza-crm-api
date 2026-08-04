@@ -83,9 +83,48 @@ export async function buscarMapaProdutos() {
   return mapa
 }
 
-export async function processarPedido({ row, legacyId, mapaClientes, mapaProdutos, e01Client, contadores }) {
+// Uppercase + remove acento + colapsa espaço — só pra comparar nome do
+// representante (NetVision) com usuarios.nome (CRM). Casamento estrito: NÃO
+// usa distância de edição nem match parcial — nome que não bate exatamente
+// (mesmo por causa de sobrenome faltando ou erro de digitação num dos dois
+// lados) fica sem vendedor_id, nunca "chuta" o vendedor errado num pedido.
+export function normalizarNomeVendedor(nome) {
+  return (nome || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim()
+}
+
+// Mapa "código do representante (ES_Pedidos.Representante)" -> { vendedor_id,
+// vendedor_nome }. Código -> nome vem da própria NetVision (EN_Representantes,
+// tabela de cadastro real, buscada a cada sincronização pra nunca ficar
+// desatualizada); nome -> vendedor_id vem do casamento estrito contra
+// usuarios.nome. Representante sem usuário correspondente ainda grava
+// vendedor_nome (snapshot de texto, sempre disponível) mas fica com
+// vendedor_id null — comissões e filtros por vendedor já tratam vendedor_id
+// null como "sem vendedor atribuído" (ver lib/comissoes.js).
+export async function buscarMapaVendedores(e01Client) {
+  const { rows: representantes } = await e01Client.query(
+    `SELECT TRIM("Representante") AS codigo, "Nome" AS nome FROM "EN_Representantes" WHERE TRIM("Representante") <> ''`
+  )
+
+  const mapaUsuariosPorNome = new Map()
+  for (let offset = 0; ; offset += PAGE_SUPABASE) {
+    const { data, error } = await supabase.from('usuarios').select('id, nome').range(offset, offset + PAGE_SUPABASE - 1)
+    if (error) throw error
+    for (const u of data) mapaUsuariosPorNome.set(normalizarNomeVendedor(u.nome), u.id)
+    if (data.length < PAGE_SUPABASE) break
+  }
+
+  const mapa = new Map()
+  for (const { codigo, nome } of representantes) {
+    mapa.set(codigo, { vendedor_id: mapaUsuariosPorNome.get(normalizarNomeVendedor(nome)) ?? null, vendedor_nome: nome })
+  }
+  return mapa
+}
+
+export async function processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores }) {
   const codigoCliente = (row.CodigoEmitente || '').trim()
   const clienteErpId = codigoCliente ? mapaClientes.get(codigoCliente) : undefined
+  const codigoRepresentante = (row.Representante || '').trim()
+  const vendedor = codigoRepresentante ? mapaVendedores.get(codigoRepresentante) : undefined
 
   const { data: existente, error: erroExistente } = await supabase
     .from('pedidos')
@@ -104,6 +143,8 @@ export async function processarPedido({ row, legacyId, mapaClientes, mapaProduto
     cliente_erp_id: clienteErpId !== undefined ? (clienteErpId ?? null) : (existente?.cliente_erp_id ?? null),
     cliente_externo_id: codigoCliente || null,
     precisa_vinculo_cliente: !clienteErpId,
+    vendedor_id: vendedor?.vendedor_id ?? null,
+    vendedor_nome: vendedor?.vendedor_nome ?? null,
     status: statusDesconhecido ? 'rascunho' : statusMapeado,
     status_origem: `StatusPedido=${row.StatusPedido}|Cancelado=${row.Cancelado}|PedidoConfirmado=${row.PedidoConfirmado}`,
     status_importacao_pendente: statusDesconhecido,
@@ -204,7 +245,9 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
 
   try {
     e01Client = await conectarE01()
-    const [mapaClientes, mapaProdutos] = await Promise.all([buscarMapaClientes(), buscarMapaProdutos()])
+    const [mapaClientes, mapaProdutos, mapaVendedores] = await Promise.all([
+      buscarMapaClientes(), buscarMapaProdutos(), buscarMapaVendedores(e01Client),
+    ])
 
     for (let offset = 0; ; offset += PAGE_E01) {
       const params = []
@@ -234,7 +277,7 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
           contadores.total_lido++
           const legacyId = `${(row.CodigoFilial || '').trim()}-${row.NumeroPedido}`
           try {
-            await processarPedido({ row, legacyId, mapaClientes, mapaProdutos, e01Client, contadores })
+            await processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores })
             const dataAtualizacao = new Date(row.DataAtualizacao)
             if (dataAtualizacao > cursorFinal) cursorFinal = dataAtualizacao
           } catch (errPedido) {
