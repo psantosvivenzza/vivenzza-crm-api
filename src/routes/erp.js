@@ -101,11 +101,30 @@ router.get('/clientes', async (req, res) => {
 // também na próxima chamada.
 router.get('/clientes/filtros-opcoes', async (req, res) => {
   try {
-    const [{ data: enderecos, error: erroEnd }, { data: vendedores, error: erroVend }] = await Promise.all([
+    const [{ data: enderecos, error: erroEnd }, { data: idsVendedorCliente, error: erroIds }] = await Promise.all([
       supabase.from('clientes_erp').select('endereco'),
-      supabase.from('usuarios').select('id, nome, ativo').eq('disponivel_como_vendedor', true).order('nome'),
+      supabase.from('clientes_erp').select('vendedor_responsavel_usuario_id').not('vendedor_responsavel_usuario_id', 'is', null),
     ])
     if (erroEnd) throw erroEnd
+    if (erroIds) throw erroIds
+
+    // disponivel_como_vendedor=true sozinho esconde vendedor inativo/legado do
+    // filtro (ex-funcionário, distribuidor antigo) mesmo quando ele ainda é o
+    // responsável histórico de clientes reais — sem aparecer aqui, não dá pra
+    // filtrar "clientes da Fulana" pra saber quem reatribuir. Inclui também
+    // quem já é vendedor_responsavel_usuario_id de algum cliente, ativo ou não.
+    // A trava de segurança (não pode REATRIBUIR cliente pra vendedor inelegível)
+    // continua só em disponivel_como_vendedor, na rota PUT /clientes/:id/vendedor —
+    // isso aqui é só visibilidade pra filtro/consulta, nunca vira alvo de troca.
+    const idsComClientes = [...new Set((idsVendedorCliente || []).map((r) => r.vendedor_responsavel_usuario_id))]
+    const filtroVendedores = idsComClientes.length
+      ? `disponivel_como_vendedor.eq.true,id.in.(${idsComClientes.join(',')})`
+      : 'disponivel_como_vendedor.eq.true'
+    const { data: vendedores, error: erroVend } = await supabase
+      .from('usuarios')
+      .select('id, nome, ativo')
+      .or(filtroVendedores)
+      .order('nome')
     if (erroVend) throw erroVend
 
     const estados = new Set()
