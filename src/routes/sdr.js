@@ -556,6 +556,41 @@ const MENSAGEM_FORA_DO_HORARIO =
 // já importa marcarVendedorAssumiu a partir deste arquivo.
 export { marcarVendedorAssumiu } from '../lib/sdrConversas.js'
 
+// Pacing de rajada — incidente de 2026-08-04: um backlog de reativação sem ritmo
+// derrubou a taxa de entrega do número "vivenzza" de ~90% pra ~25% em duas horas.
+// A reativação já ganhou travas (MAX_ENVIOS_POR_DIA + delay de 30-60s, ver
+// reativacao.js); isso aqui cobre o mesmo risco do lado da Lara, que respondia sem
+// NENHUM limite — se uma leva grande de leads escrever ao mesmo tempo (campanha,
+// pico de tráfego, disparo externo), a Lara respondia todo mundo instantaneamente,
+// em rajada, no mesmo número que os vendedores usam pra atender cliente de verdade.
+// Em dia normal isso nunca entra em ação — resposta continua instantânea. Só quando
+// o volume de saída dos últimos 5 minutos (de QUALQUER origem: Lara, reativação,
+// cobrança — todas compartilham o mesmo número) já indica rajada é que a Lara passa
+// a espaçar suas respostas.
+const LARA_JANELA_PACING_MS = 5 * 60_000
+const LARA_LIMITE_JANELA = 15
+const LARA_PACING_DELAY_MIN_MS = 4_000
+const LARA_PACING_DELAY_MAX_MS = 10_000
+
+async function aplicarPacingLara() {
+  try {
+    const desde = new Date(Date.now() - LARA_JANELA_PACING_MS).toISOString()
+    const { count, error } = await supabase
+      .from('whatsapp_mensagens')
+      .select('id', { count: 'exact', head: true })
+      .eq('direcao', 'saida')
+      .gte('created_at', desde)
+    if (error) throw error
+    if ((count ?? 0) >= LARA_LIMITE_JANELA) {
+      const espera = LARA_PACING_DELAY_MIN_MS + Math.random() * (LARA_PACING_DELAY_MAX_MS - LARA_PACING_DELAY_MIN_MS)
+      console.log(`[sdr:pacing] ${count} envios nos últimos 5min (limite ${LARA_LIMITE_JANELA}) — espaçando resposta em ${Math.round(espera / 1000)}s`)
+      await new Promise((resolve) => setTimeout(resolve, espera))
+    }
+  } catch (err) {
+    console.error('[sdr:pacing] erro ao checar volume de envio (seguindo sem pacing):', err.message)
+  }
+}
+
 // Registra cada envio da Lara em whatsapp_mensagens, no mesmo formato usado por
 // /api/whatsapp/enviar* — sem isso, a conversa que a vendedora vê no Pipeline/WhatsApp
 // fica incompleta (só apareceriam as mensagens do cliente, nunca as respostas da Lara).
@@ -944,6 +979,10 @@ async function processarLara(event) {
   // vozAtiva: interruptor da página /automacoes — desativado, a Lara responde só texto.
   const vozAtiva = configAutomacoes?.voz_ativa !== false
   const deveGerarAudio = vozAtiva && (ETAPA_AUDIO[Number(parsed.etapa_cadencia)] ?? false)
+
+  // Checa rajada ANTES de qualquer envio (áudio ou texto) — cobre os dois caminhos
+  // abaixo com uma única checagem por mensagem respondida.
+  await aplicarPacingLara()
 
   if (deveGerarAudio && ELEVENLABS_KEY) {
     try {

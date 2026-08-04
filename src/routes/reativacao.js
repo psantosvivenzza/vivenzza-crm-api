@@ -325,12 +325,78 @@ export async function verificarElegiveis() {
   return { elegiveis: elegiveis.length, enviados }
 }
 
+// Pedido explícito de opt-out ("SAIR", "pare de mandar mensagem", etc.) — checado
+// ANTES de tratar a resposta como reativação. Item 1 da revisão de WhatsApp de
+// 2026-08-04: até aqui, QUALQUER resposta do lead (inclusive um pedido pra parar)
+// virava status_reativacao='reativado' e gerava tarefa pedindo pro vendedor
+// retomar contato — o oposto do que o cliente pediu. Lista de padrões é
+// propositalmente ampla (compliance > uma reativação perdida por falso positivo).
+const PADROES_OPT_OUT = [
+  /\bsair\b/i,
+  /\bstop\b/i,
+  /\bpare\b.{0,20}\b(mandar|enviar|mensage)/i,
+  /n[aã]o\s+(me\s+)?mand[ae]?\s+mais/i,
+  /n[aã]o\s+(quero|desejo)\s+mais\s+(receber|mensage)/i,
+  /descadastr/i,
+  /remov[ae]\s+(meu\s+)?(contato|n[uú]mero|telefone)/i,
+  /cancelar\s+(a\s+)?(inscri[çc][aã]o|cadastro)/i,
+]
+
+function ehPedidoParaParar(mensagem) {
+  const texto = (mensagem || '').trim()
+  if (!texto) return false
+  return PADROES_OPT_OUT.some((re) => re.test(texto))
+}
+
 // Chamado pelo webhook-handler.js quando chega mensagem de um lead com
 // status_reativacao = 'ativo' — é a resposta do cliente a um follow-up automático.
 export async function detectarRespostaReativacao(leadId, mensagem) {
   try {
     const { data: lead } = await supabase.from('leads').select('*').eq('id', leadId).single()
     if (!lead || lead.status_reativacao !== 'ativo') return
+
+    if (ehPedidoParaParar(mensagem)) {
+      // 'encerrado' já é excluído da query de elegibilidade (.not('status_reativacao',
+      // 'in', '(encerrado,inativo_nutricao)')) — reaproveita o status terminal existente,
+      // sem precisar tocar na query de elegibilidade pra isso valer imediatamente.
+      await supabase
+        .from('leads')
+        .update({
+          status_reativacao: 'encerrado',
+          whatsapp_opt_out: true,
+          whatsapp_opt_out_em: new Date().toISOString(),
+          whatsapp_opt_out_motivo: mensagem,
+        })
+        .eq('id', leadId)
+
+      await supabase
+        .from('reativacao_fila')
+        .update({ status: 'opt_out', respondeu_em: new Date().toISOString() })
+        .eq('lead_id', leadId)
+        .eq('status', 'enviado')
+        .order('criado_em', { ascending: false })
+        .limit(1)
+
+      await supabase.from('tarefas').insert({
+        lead_id: leadId,
+        titulo: `🚫 ${lead.nome} pediu para não receber mais mensagens`,
+        descricao: [
+          `Mensagem do cliente: "${mensagem}"`,
+          'Pedido de opt-out detectado automaticamente — NÃO reabrir contato automático com esse lead.',
+          'Se precisar falar com ele, faça manualmente e com cautela: o cliente pediu explicitamente pra parar de receber mensagens.',
+        ].join('\n'),
+        prazo: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        tipo: 'whatsapp',
+        status: 'pendente',
+        responsavel_id: lead.responsavel_id,
+        origem: 'reativacao',
+      })
+
+      await marcarVendedorAssumiu(lead.telefone)
+      await incrementarMetrica('opt_out')
+      console.log(`[reativacao] lead ${lead.nome} pediu opt-out — status_reativacao=encerrado`)
+      return
+    }
 
     await supabase.from('leads').update({ status_reativacao: 'reativado' }).eq('id', leadId)
 
