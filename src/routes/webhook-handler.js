@@ -16,14 +16,6 @@ const evolutionApi = axios.create({
   timeout: 20000,
 })
 
-function detectarCampanha(texto) {
-  const t = (texto || '').toUpperCase()
-  if (t.includes('CIDADESRS')) return 'campanha_cidadesrs'
-  if (t.includes('B2B'))       return 'campanha_b2b'
-  if (t.includes('LISTA'))     return 'campanha_lista'
-  return 'whatsapp'
-}
-
 // Retorna o valor padronizado de campanha_origem para o novo lead:
 // Prioridade: referral Meta Ads > externalAdReply > keyword no texto > whatsapp_organico.
 function detectarCampanhaOrigem(msg, texto) {
@@ -65,29 +57,6 @@ function detectarCampanhaOrigem(msg, texto) {
   if (t.includes('LISTA'))     return 'lista_brasil'
 
   return 'whatsapp_organico'
-}
-
-function detectarAnuncio(msg) {
-  const ref = msg.referral
-  if (ref) {
-    const id = ref.source_id || ref.sourceId || ''
-    const titulo = ref.headline || ref.body || ''
-    const label = (titulo || id || 'ads').slice(0, 60).replace(/\s+/g, '_')
-    console.log('[webhook] Meta Ads referral detectado:', JSON.stringify(ref))
-    return `meta_${label}`
-  }
-  const tipos = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'buttonsMessage']
-  for (const tipo of tipos) {
-    const adReply = msg.message?.[tipo]?.contextInfo?.externalAdReply
-    if (adReply) {
-      const id = adReply.sourceId || ''
-      const titulo = adReply.title || adReply.body || ''
-      const label = (titulo || id || 'ads').slice(0, 60).replace(/\s+/g, '_')
-      console.log('[webhook] Meta Ads externalAdReply detectado:', JSON.stringify(adReply))
-      return `meta_${label}`
-    }
-  }
-  return null
 }
 
 // Click-to-WhatsApp Click ID — identifica o anúncio/criativo específico que gerou
@@ -261,7 +230,11 @@ export async function processWhatsappEvent(payload) {
     if (payload.event !== 'messages.upsert') return
 
     const msg = Array.isArray(payload.data) ? payload.data[0] : payload.data
-    if (!msg) return
+    // !msg sozinho não pega payload malformado tipo `data: {}` (objeto vazio
+    // é truthy) — sem key.remoteJid não há telefone real, e o fluxo abaixo
+    // criaria um lead-lixo com telefone/nome vazios. Achado ao testar a Fase
+    // 3 do fix de ctwa_clid (2026-08-10).
+    if (!msg || !msg.key?.remoteJid) return
 
     const fromMe = msg.key?.fromMe === true
     const remoteJid = msg.key?.remoteJid ?? ''
@@ -299,7 +272,7 @@ export async function processWhatsappEvent(payload) {
 
     const { data: leads } = await supabase
       .from('leads')
-      .select('id, telefone')
+      .select('id, telefone, ctwa_clid, campanha_origem')
       .in('telefone', candidatos)
       .limit(1)
 
@@ -307,7 +280,17 @@ export async function processWhatsappEvent(payload) {
 
     if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
-      const origem = detectarAnuncio(msg) ?? detectarCampanha(texto)
+      // BUG CRÍTICO corrigido na Fase 3 (2026-08-10): leads.origem tem CHECK
+      // constraint que só aceita 'whatsapp'|'instagram'|'site'|'manual'.
+      // detectarAnuncio()/detectarCampanha() (removidas) retornavam valores
+      // como 'meta_B2B_Regiões' ou 'campanha_b2b' — todo lead novo cujo
+      // primeiro contato viesse de um clique real em anúncio (ou cujo texto
+      // contivesse "B2B"/"LISTA"/"CIDADESRS") tinha o INSERT inteiro rejeitado
+      // pelo banco (leads_origem_check), não só perdia atribuição — o lead
+      // nem chegava a ser criado. Esta rota é sempre WhatsApp; a granularidade
+      // de campanha já é responsabilidade de campanha_origem (texto livre,
+      // sem constraint), não de origem.
+      const origem = 'whatsapp'
       const campanha_origem = detectarCampanhaOrigem(msg, texto)
       const ctwa_clid = detectarCtwaClid(msg)
       const { data: novoLead, error } = await supabase
@@ -340,6 +323,35 @@ export async function processWhatsappEvent(payload) {
         }
       } else {
         console.error('[webhook] erro ao criar lead:', error?.message)
+      }
+    } else if (lead && !fromMe && !lead.ctwa_clid) {
+      // Lead já existia (contato anterior — a maioria dos telefones, dado o
+      // histórico de WhatsApp desde 2019) — se ESTA mensagem veio de um clique
+      // em anúncio (referral/ctwa_clid) e o lead nunca teve isso registrado,
+      // preenche agora. Sem isso, clique em anúncio de alguém que já falou com
+      // a Vivenzza antes nunca era atribuído a nenhuma campanha (achado da
+      // auditoria de tráfego de 2026-08-04: ctwa_clid 0/2135 preenchido nos
+      // últimos 30 dias). Só preenche se ainda vazio — nunca sobrescreve um
+      // ctwa_clid já registrado (mantém o primeiro clique atribuído).
+      const ctwaClid = detectarCtwaClid(msg)
+      if (ctwaClid) {
+        // A informação mais específica sempre prevalece (Fase 3, 2026-08-10):
+        // só sobrescreve campanha_origem se o valor atual do lead for o
+        // default genérico ('whatsapp_organico') ou estiver vazio — nunca
+        // troca uma atribuição já específica (ex: vinda da landing page, ou
+        // de um clique em anúncio anterior) por uma nova que possa ser mais
+        // genérica. ctwa_clid sempre é gravado aqui dentro (a guarda
+        // !lead.ctwa_clid do bloco já impede sobrescrever um clid existente).
+        const update = { ctwa_clid: ctwaClid }
+        if (!lead.campanha_origem || lead.campanha_origem === 'whatsapp_organico') {
+          update.campanha_origem = detectarCampanhaOrigem(msg, texto)
+        }
+        const { error: erroUpdate } = await supabase.from('leads').update(update).eq('id', lead.id)
+        if (erroUpdate) {
+          console.error('[webhook] erro ao preencher ctwa_clid retroativo:', lead.id, '|', erroUpdate.message)
+        } else {
+          console.log('[webhook] ctwa_clid preenchido retroativamente em lead existente:', lead.id, '| campanha_origem:', update.campanha_origem ?? `(mantida: ${lead.campanha_origem})`)
+        }
       }
     }
 
