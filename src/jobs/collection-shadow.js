@@ -17,8 +17,8 @@
 // implementação usada pelo motor v2 real quando essa fase existir).
 import { calcularEtapa } from '../lib/reguaCobranca.js'
 import { diasAtrasoDe } from '../lib/collection/collectionContactPolicy.js'
-import { calcularEPersistirRecoveryScore } from '../lib/collection/recoveryScore.js'
-import { calcularEPersistirPriorityScore } from '../lib/collection/priorityScore.js'
+import { calcularEPersistirRecoveryScore, ultimoRecoveryScore } from '../lib/collection/recoveryScore.js'
+import { calcularEPersistirPriorityScore, ultimoPriorityScore } from '../lib/collection/priorityScore.js'
 import { decidirProximaAcao } from '../lib/collection/nextBestAction.js'
 import { obterConfigCobranca } from '../lib/collection/featureFlags.js'
 import { getEligibleAccounts } from '../lib/collection/shadow/shadowReadRepository.js'
@@ -55,24 +55,46 @@ export async function runCollectionShadow() {
     const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
     if (saldo <= 0) continue
 
+    // FASE B.1.2 (homologação, 2026-08-11) — achado real: antes desta correção,
+    // o bloco de NBA estava aninhado DENTRO de `if (config.score_shadow_mode)`,
+    // então nba_shadow_mode=true com score_shadow_mode=false não fazia
+    // ABSOLUTAMENTE NADA (nem lia score persistido, nem calculava NBA) —
+    // silenciosamente, sem erro. Corrigido para os dois flags serem
+    // independentes: NBA nunca recalcula score, só lê o último já persistido
+    // (via ultimoRecoveryScore/ultimoPriorityScore, mesma função que
+    // decidirProximaAcao() já usa internamente para a própria decisão — aqui é
+    // só para preencher as colunas informativas do log).
     let recoveryScoreValor = null
+    let priorityScoreValor = null
+
     if (config.score_shadow_mode) {
       const recovery = await calcularEPersistirRecoveryScore(conta.id)
       const priority = await calcularEPersistirPriorityScore(conta.id, { recoveryScore: recovery.score })
       recoveryScoreValor = recovery.score
+      priorityScoreValor = priority.score
       resumo.comScore++
+    }
 
-      if (config.nba_shadow_mode) {
-        const nba = await decidirProximaAcao(conta.id)
-        // "legacy_action": o que a régua ANTIGA realmente faria hoje — puramente
-        // baseada em etapa por dias de atraso, sem score/prioridade.
-        const legacyAction = etapaLegado === null ? 'NO_ACTION' : 'WHATSAPP'
-        await persistNbaShadowDecision({
-          contasFinanceirasId: conta.id, nbaSuggestedAction: nba.acao, nbaReasonCodes: nba.reason_codes,
-          legacyAction, recoveryScore: recoveryScoreValor, priorityScore: priority.score,
-        })
-        resumo.comNba++
+    if (config.nba_shadow_mode) {
+      const nba = await decidirProximaAcao(conta.id)
+      // "legacy_action": o que a régua ANTIGA realmente faria hoje — puramente
+      // baseada em etapa por dias de atraso, sem score/prioridade.
+      const legacyAction = etapaLegado === null ? 'NO_ACTION' : 'WHATSAPP'
+
+      if (recoveryScoreValor === null) {
+        const ultimoRecovery = await ultimoRecoveryScore(conta.id)
+        recoveryScoreValor = ultimoRecovery?.score ?? null
       }
+      if (priorityScoreValor === null) {
+        const ultimoPriority = await ultimoPriorityScore(conta.id)
+        priorityScoreValor = ultimoPriority?.score ?? null
+      }
+
+      await persistNbaShadowDecision({
+        contasFinanceirasId: conta.id, nbaSuggestedAction: nba.acao, nbaReasonCodes: nba.reason_codes,
+        legacyAction, recoveryScore: recoveryScoreValor, priorityScore: priorityScoreValor,
+      })
+      resumo.comNba++
     }
     resumo.processados++
     resumo.idsProcessados.push(conta.id)
