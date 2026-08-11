@@ -22,6 +22,14 @@ const DEFAULTS = {
   next_best_action: false,
   ai_voice_calls: false,
   human_call_alerts: false,
+  // FASE B.5 (homologação, 2026-08-11) — threshold de priority_score pra
+  // nextBestAction.js recomendar HUMAN_CALL. Calibrado com a carteira
+  // elegível completa real (1.108 contas, priority máximo real = 69) — o
+  // valor antigo (80, hardcoded) nunca era atingido. Default aqui cobre o
+  // caso da coluna ainda não existir em automacoes_config (select('*') não
+  // retorna a chave e o merge com DEFAULTS preserva 65) — funciona igual
+  // com ou sem a migration aditiva aplicada.
+  human_call_priority_threshold: 65,
   ml_recovery_score: false,
   min_send_delay_seconds: 45,
   max_send_delay_seconds: 90,

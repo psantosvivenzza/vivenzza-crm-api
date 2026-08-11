@@ -19,7 +19,16 @@ const PESO = {
   interacao_recente: 10,
 }
 
-async function percentilNaCarteira(saldoAlvo) {
+// FASE B.5 (homologação, 2026-08-11) — achado de performance da B.1.1 (rodada
+// real levou ~2,6s/conta, ~131s para 50 contas): esta função varria a carteira
+// inteira do zero A CADA conta. `carregarDistribuicaoSaldos()` faz essa
+// varredura só 1x por batch; `percentilEmDistribuicao()` reusa o array já
+// ordenado via busca binária (O(log n) por conta, em vez de outra varredura
+// completa). `percentilNaCarteira()` continua existindo — comportamento
+// idêntico a antes — para não quebrar nenhum chamador que rode 1 conta isolada
+// (ex: recalcular score de 1 título específico não justifica pré-carregar a
+// carteira toda).
+export async function carregarDistribuicaoSaldos() {
   const saldos = []
   const PAGE = 1000
   for (let offset = 0; ; offset += PAGE) {
@@ -36,10 +45,28 @@ async function percentilNaCarteira(saldoAlvo) {
     }
     if ((data?.length ?? 0) < PAGE) break
   }
-  if (!saldos.length) return 0.5
   saldos.sort((a, b) => a - b)
-  const abaixo = saldos.filter((s) => s <= saldoAlvo).length
-  return abaixo / saldos.length // 0..1
+  return saldos
+}
+
+// Busca binária pela última posição com saldo <= saldoAlvo — equivalente a
+// `saldos.filter(s => s <= saldoAlvo).length` no array JÁ ORDENADO, sem
+// percorrer tudo de novo.
+export function percentilEmDistribuicao(saldoAlvo, saldosOrdenados) {
+  if (!saldosOrdenados.length) return 0.5
+  let lo = 0
+  let hi = saldosOrdenados.length
+  while (lo < hi) {
+    const meio = (lo + hi) >> 1
+    if (saldosOrdenados[meio] <= saldoAlvo) lo = meio + 1
+    else hi = meio
+  }
+  return lo / saldosOrdenados.length // 0..1
+}
+
+async function percentilNaCarteira(saldoAlvo) {
+  const saldos = await carregarDistribuicaoSaldos()
+  return percentilEmDistribuicao(saldoAlvo, saldos)
 }
 
 function componenteDiasAtraso(diasAtraso) {
@@ -79,7 +106,7 @@ async function componenteInteracaoRecente(contasFinanceirasId) {
   }
 }
 
-export async function calcularPriorityScore(contasFinanceirasId, { recoveryScore = null } = {}) {
+export async function calcularPriorityScore(contasFinanceirasId, { recoveryScore = null, distribuicaoSaldos = null } = {}) {
   const { data: titulo, error } = await supabase
     .from('contas_financeiras')
     .select('valor, valor_pago, vencimento')
@@ -89,7 +116,10 @@ export async function calcularPriorityScore(contasFinanceirasId, { recoveryScore
 
   const saldo = Number(titulo.valor || 0) - Number(titulo.valor_pago || 0)
   const diasAtraso = diasAtrasoDe(titulo.vencimento)
-  const percentil = await percentilNaCarteira(saldo)
+  // Batch (carteira inteira, ex: simulação B.5) passa distribuicaoSaldos
+  // pré-carregada 1x; chamada isolada (1 conta) continua escaneando sob
+  // demanda, comportamento idêntico a antes desta otimização.
+  const percentil = distribuicaoSaldos ? percentilEmDistribuicao(saldo, distribuicaoSaldos) : await percentilNaCarteira(saldo)
 
   const componenteValor = {
     valor: Math.round(PESO.valor_divida * percentil),
