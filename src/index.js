@@ -62,6 +62,10 @@ import evolutionHealthRouter from './routes/evolution-health.js'
 // ação humana separada e posterior. Ver docs/cobranca-ai/DEPLOY_PLAN_MINIMAL.md.
 import { runCollectionShadow } from './jobs/collection-shadow.js'
 import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
+// FASE B.2 (homologação) — API de leitura para a visualização do ERP (Aging
+// Report + Cobranças → Inteligência/Próximas Ações). Só GET, nunca recalcula
+// score/executa NBA.
+import collectionShadowReportsRouter from './routes/collection-shadow-reports.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -174,6 +178,7 @@ app.use('/api/notifications', auth, notificationsRouter)
 // próprias (nba_shadow_mode/score_shadow_mode/shadow_max_customers). Nenhuma
 // outra rota do motor v2 é montada nesta fase.
 app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
+app.use('/api/collection-shadow', auth, adminOnly, collectionShadowReportsRouter)
 
 // Health check
 app.get('/health', (req, res) => {
