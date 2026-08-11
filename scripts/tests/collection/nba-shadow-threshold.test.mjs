@@ -27,9 +27,26 @@ test('NBA shadow: threshold de HUMAN_CALL configurável (calibrado em 65)', asyn
   const { invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
 
   async function setFlags(flags) {
-    await supabase.from('automacoes_config').update(flags).eq('id', 1)
+    // O compat client local NUNCA lança — retorna {error} mesmo pra erro real
+    // de banco (ex: coluna inexistente). Não checar isso aqui mascararia
+    // silenciosamente um UPDATE que não fez nada, e o teste seguinte
+    // continuaria com o estado ANTIGO da flag sem avisar — exatamente a
+    // classe de bug que essa suíte existe pra pegar (ver achado real da
+    // homologação B.5: coluna nova ausente numa migration não aplicada
+    // quebrando um update combinado sem erro visível).
+    const { error } = await supabase.from('automacoes_config').update(flags).eq('id', 1)
+    if (error) throw new Error(`setFlags(${JSON.stringify(flags)}) falhou: ${error.message}`)
     invalidarCacheFlags()
   }
+
+  // Testes 1/2/4 não dependem da coluna human_call_priority_threshold existir
+  // (usam o default 65 já embutido em featureFlags.js) — só o teste 3
+  // (que prova que o valor É configurável, não hardcoded) precisa
+  // genuinamente da migration aplicada. Sem checar isso, rodar a suíte contra
+  // um schema sem a migration derrubaria o arquivo inteiro por causa de 1
+  // teste que é sobre a própria migration.
+  const { error: erroCheckColuna } = await supabase.from('automacoes_config').select('human_call_priority_threshold').eq('id', 1).maybeSingle()
+  const colunaExiste = !erroCheckColuna
 
   await t.test('1. priority=65 (== default calibrado) + etapa>=7 → SHADOW recomenda HUMAN_CALL', async () => {
     const conta = await criarContaDeTeste(supabase, { vencimento: diasAtras(35) })
@@ -54,7 +71,7 @@ test('NBA shadow: threshold de HUMAN_CALL configurável (calibrado em 65)', asyn
     assert.equal(shadow.recommended_action, 'AI_WHATSAPP')
   })
 
-  await t.test('3. threshold é configurável via automacoes_config, não constante fixa no código', async () => {
+  await t.test('3. threshold é configurável via automacoes_config, não constante fixa no código', { skip: !colunaExiste && 'coluna human_call_priority_threshold ainda não existe neste banco (migration 20260101000028 não aplicada) — teste genuinamente depende dela, ver testes 1/2/4 para o comportamento com o default' }, async () => {
     const conta = await criarContaDeTeste(supabase, { vencimento: diasAtras(35) })
     await inserirScore(supabase, 'collection_priority_scores', conta.id, 55)
     await inserirScore(supabase, 'collection_recovery_scores', conta.id, 50)
@@ -72,16 +89,17 @@ test('NBA shadow: threshold de HUMAN_CALL configurável (calibrado em 65)', asyn
     await setFlags({ human_call_priority_threshold: 65 })
   })
 
-  await t.test('4. mesmo com priority>=threshold, human_call_alerts=false impede execução real — só muda a recomendação, nunca a execução', async () => {
+  await t.test('4. mesmo com priority>=threshold (usando o DEFAULT, sem depender da coluna existir), human_call_alerts=false impede execução real — só muda a recomendação, nunca a execução', async () => {
     const conta = await criarContaDeTeste(supabase, { vencimento: diasAtras(35) })
-    await inserirScore(supabase, 'collection_priority_scores', conta.id, 90)
+    await inserirScore(supabase, 'collection_priority_scores', conta.id, 90) // bem acima do default (65), não precisa configurar nada
     await inserirScore(supabase, 'collection_recovery_scores', conta.id, 50)
-    await setFlags({ human_call_alerts: false, human_call_priority_threshold: 65 })
+    await setFlags({ human_call_alerts: false })
 
     const real = await decidirProximaAcao(conta.id)
     assert.notEqual(real.acao, 'HUMAN_CALL', 'threshold calibrado não é autorização de execução — a flag continua sendo a barreira')
   })
 
-  await setFlags({ human_call_alerts: false, ai_voice_calls: false, ai_whatsapp: false, human_call_priority_threshold: 65 })
+  await setFlags({ human_call_alerts: false, ai_voice_calls: false, ai_whatsapp: false })
+  if (colunaExiste) await setFlags({ human_call_priority_threshold: 65 })
   await pararAmbienteDeTeste()
 })
