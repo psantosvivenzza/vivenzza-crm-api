@@ -48,6 +48,7 @@ import notificationsRouter from './routes/notifications.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
+import { runMetaBudgetGuard } from './jobs/meta-budget-guard.js'
 import { runHandoffAlerta } from './jobs/handoff-alerta.js'
 import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
 import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
@@ -216,6 +217,17 @@ cron.schedule('0 10 * * *', async () => {
     await runMetaReport()
   } catch (err) {
     console.error('[cron meta-report] Erro:', err.message)
+  }
+})
+
+// Hard cap de spend do Meta Ads — a cada 5 min, sempre pulado enquanto
+// automacoes_config.meta_budget_guard_enabled=false (default). Ver
+// PLANO_HARD_CAP_META_ADS.md e src/jobs/meta-budget-guard.js.
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await runMetaBudgetGuard()
+  } catch (err) {
+    console.error('[cron meta-budget-guard] Erro:', err.message)
   }
 })
 

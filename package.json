@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
