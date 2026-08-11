@@ -56,6 +56,12 @@ import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
 import { reconciliarNfePendentes } from './jobs/reconciliar-nfe.js'
 import { runSincronizacaoDistribuicaoDFe } from './jobs/nfe-distribuicao-sync.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
+// FASE B.1 (homologação, shadow mínimo) — SOMENTE observação read-only de
+// Recovery Score/Priority Score/Next Best Action, nunca despacha nada.
+// nba_shadow_mode/score_shadow_mode nascem OFF nesta migration; ligar é uma
+// ação humana separada e posterior. Ver docs/cobranca-ai/DEPLOY_PLAN_MINIMAL.md.
+import { runCollectionShadow } from './jobs/collection-shadow.js'
+import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -164,6 +170,10 @@ app.use('/api/blog', auth, blogRouter)
 app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOnly, cobrancasRouter)
 app.use('/api/notifications', auth, notificationsRouter)
+// FASE B.1 (homologação) — shadow mínimo, só leitura + PATCH de 3 flags
+// próprias (nba_shadow_mode/score_shadow_mode/shadow_max_customers). Nenhuma
+// outra rota do motor v2 é montada nesta fase.
+app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
 
 // Health check
 app.get('/health', (req, res) => {
@@ -264,6 +274,20 @@ cron.schedule('*/15 11-20 * * 1-5', async () => {
     await executarReguaCobranca()
   } catch (err) {
     console.error('[cron cobranca-whatsapp] Erro:', err.message)
+  }
+})
+
+// FASE B.1 (homologação) — CollectionShadowObserver. No-op enquanto
+// nba_shadow_mode/score_shadow_mode (automacoes_config) estiverem false
+// (padrão da migration). 100% read-only para o cliente — nunca envia
+// WhatsApp, nunca liga, nunca altera título/pagamento/promessa real; só
+// calcula e registra Recovery Score/Priority Score/Next Best Action em
+// tabelas shadow dedicadas. Ver docs/cobranca-ai/DEPLOY_PLAN_MINIMAL.md.
+cron.schedule('*/20 * * * *', async () => {
+  try {
+    await runCollectionShadow()
+  } catch (err) {
+    console.error('[cron collection-shadow] Erro:', err.message)
   }
 })
 
