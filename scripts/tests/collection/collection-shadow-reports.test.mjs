@@ -40,6 +40,16 @@ test('API de relatórios do shadow (collection-shadow-reports)', async (t) => {
   }
 
   await t.test('sem nenhum score persistido: /summary retorna zerado, /customers e /next-actions retornam vazio (estado inicial elegante)', async () => {
+    // Achado real (homologação 2026-08-12): /summary conta GLOBALMENTE essas 3
+    // tabelas, sem escopo por teste — rodar depois de qualquer outro teste que
+    // já tenha persistido score/NBA (mesmo em outro arquivo, contra o mesmo
+    // Postgres local) quebra a asserção de "estado vazio". Limpa antes de
+    // afirmar zero, em vez de depender de a suíte inteira nunca ter tocado
+    // essas tabelas antes.
+    await supabase.from('collection_recovery_scores').delete().neq('contas_financeiras_id', '00000000-0000-0000-0000-000000000000')
+    await supabase.from('collection_priority_scores').delete().neq('contas_financeiras_id', '00000000-0000-0000-0000-000000000000')
+    await supabase.from('nba_shadow_log').delete().neq('contas_financeiras_id', '00000000-0000-0000-0000-000000000000')
+
     const rSummary = await fetch(`${base}/api/collection-shadow/summary`, { headers })
     const summary = await rSummary.json()
     assert.equal(summary.clientes_analisados, 0)
