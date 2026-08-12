@@ -66,6 +66,7 @@ import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
 // Report + Cobranças → Inteligência/Próximas Ações). Só GET, nunca recalcula
 // score/executa NBA.
 import collectionShadowReportsRouter from './routes/collection-shadow-reports.js'
+import collectionWhatsappMonitorRouter from './routes/collection-whatsapp-monitor.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -179,6 +180,14 @@ app.use('/api/notifications', auth, notificationsRouter)
 // outra rota do motor v2 é montada nesta fase.
 app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
 app.use('/api/collection-shadow', auth, adminOnly, collectionShadowReportsRouter)
+
+// FASE C.1 (homologação) — painel Financeiro → Cobranças → WhatsApps. Só GET,
+// nenhuma escrita — CRUD de instâncias (criar/desabilitar/reabilitar,
+// src/routes/whatsapp-instances.js) fica FORA desta fase por pedido explícito
+// de reduzir risco (fica pra C.2, com flag+test mode). Cron/orquestrador novo
+// (dispatchEngine.js) não é registrado em nenhum job aqui nesta fase — o
+// sender legado (executarReguaCobranca) continua sendo o único caminho real.
+app.use('/api/collection-whatsapp', auth, adminOnly, collectionWhatsappMonitorRouter)
 
 // Health check
 app.get('/health', (req, res) => {
