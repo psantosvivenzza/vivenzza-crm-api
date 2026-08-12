@@ -183,5 +183,190 @@ test('INTERNAL_TEST: dispatch técnico sem título financeiro, one-shot, isolado
     assert.equal(dispatch.purpose, 'collection', 'default correto sem precisar passar purpose explicitamente')
   })
 
+  // FASE C.3D (homologação, 2026-08-12) — segunda tentativa (failover)
+  // controlado do INTERNAL_TEST, armado SOMENTE por
+  // COLLECTION_INTERNAL_TEST_FAILOVER_KEY + testKey exata. Nunca no
+  // INTERNAL_TEST comum, nunca via multi_whatsapp/whatsapp_failover globais.
+  async function limparGateFailover() {
+    delete process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY
+  }
+
+  await t.test('C3D-A. COLLECTION_TEST_MODE=false → nem chega a tentar (guarda existente, sem retry)', async () => {
+    await limparGateFailover()
+    delete process.env.COLLECTION_TEST_MODE
+    await assert.rejects(() => enviarTesteInterno({ testKey: `c3d-a-${Date.now()}`, telefone: '5551900000010', mensagem: 'x' }))
+  })
+
+  await t.test('C3D-B. Test mode true, mas COLLECTION_INTERNAL_TEST_FAILOVER_KEY ausente → falha técnica NÃO gera 2ª tentativa', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-b-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-b-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-b-principal', { comportamento: 'unavailable' }) // 5xx → TECHNICAL_RETRYABLE
+    fakeEvolution.controlarInstancia('wa-c3d-b-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000011'
+    await limparGateFailover() // chave ausente de propósito
+
+    const resultado = await enviarTesteInterno({ testKey: `c3d-b-${Date.now()}`, telefone: '5551900000011', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1, 'sem a chave de homologação, nunca deveria tentar uma 2ª instância')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0, 'reserva nunca deveria ter recebido chamada real')
+  })
+
+  await t.test('C3D-C. Chave de homologação configurada, mas testKey DIFERENTE → sem retry', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-c-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-c-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-c-principal', { comportamento: 'unavailable' })
+    fakeEvolution.controlarInstancia('wa-c3d-c-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000012'
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = 'CHAVE_ARMADA_XYZ'
+
+    const resultado = await enviarTesteInterno({ testKey: `testKey-diferente-${Date.now()}`, telefone: '5551900000012', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1, 'testKey não bate com a chave armada — comparação exata, nunca prefix/includes')
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-D. testKey correta + falha TECHNICAL_RETRYABLE → principal falha, reserva assume, exatamente 2 attempts, 1 dispatch', async () => {
+    await limparInstanciasDeTeste(supabase)
+    const principal = await criarInstancia(supabase, 'wa-c3d-d-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-d-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-d-principal', { comportamento: 'unavailable' })
+    fakeEvolution.controlarInstancia('wa-c3d-d-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000013'
+    const chave = `c3d-d-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const resultado = await enviarTesteInterno({ testKey: chave, telefone: '5551900000013', mensagem: 'x' })
+    assert.equal(resultado.status, 'sent')
+    assert.equal(resultado.tentativas, 2)
+    assert.equal(resultado.instancia, 'wa-c3d-d-reserva')
+    assert.equal(resultado.homologacaoFailover, true)
+
+    const { data: dispatches } = await supabase.from('collection_dispatches').select('id').eq('idempotency_key', `internal_test:${chave}`)
+    assert.equal(dispatches.length, 1, '1 único logical dispatch mesmo com 2 tentativas')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('attempt_number, status').eq('dispatch_id', resultado.dispatchId).order('attempt_number')
+    assert.equal(tentativas.length, 2)
+    assert.equal(tentativas[0].status, 'failed')
+    assert.equal(tentativas[1].status, 'sent')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1, 'só a reserva deveria ter recebido chamada HTTP real')
+    assert.equal(fakeEvolution.mensagensEnviadas[0].instancia, 'wa-c3d-d-reserva')
+
+    // J) falha sintética do principal não pode contaminar o circuit breaker real dele.
+    const { data: principalDepois } = await supabase.from('whatsapp_instances').select('consecutive_failures, cooldown_until, health_status').eq('id', principal.id).single()
+    assert.equal(principalDepois.consecutive_failures, 0, 'falha sintética da homologação não pode incrementar consecutive_failures real do principal')
+    assert.equal(principalDepois.cooldown_until, null, 'falha sintética não pode abrir cooldown real do principal')
+
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-E. testKey correta + 429 (rate limit) → NUNCA gera 2ª tentativa (failoverEligible=false)', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-e-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-e-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-e-principal', { comportamento: 'rate_limited' })
+    fakeEvolution.controlarInstancia('wa-c3d-e-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000014'
+    const chave = `c3d-e-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const resultado = await enviarTesteInterno({ testKey: chave, telefone: '5551900000014', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1)
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-F. testKey correta + 401/403 → NUNCA gera 2ª tentativa', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-f-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-f-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-f-principal', { comportamento: 'unauthorized' })
+    fakeEvolution.controlarInstancia('wa-c3d-f-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000015'
+    const chave = `c3d-f-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const resultado = await enviarTesteInterno({ testKey: chave, telefone: '5551900000015', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1)
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-G. testKey correta + PLATFORM_RESTRICTION → NUNCA gera 2ª tentativa', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-g-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-g-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-g-principal', { comportamento: 'disconnected' }) // 400 → PLATFORM_RESTRICTION
+    fakeEvolution.controlarInstancia('wa-c3d-g-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000016'
+    const chave = `c3d-g-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const resultado = await enviarTesteInterno({ testKey: chave, telefone: '5551900000016', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1)
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-H. Gate armado + falha técnica, mas SEM reserva elegível → finaliza failed com 1 attempt, nunca usa comercial', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-h-principal', 1, 'principal') // única instância cadastrada — sem reserva
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-h-principal', { comportamento: 'unavailable' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000017'
+    const chave = `c3d-h-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const resultado = await enviarTesteInterno({ testKey: chave, telefone: '5551900000017', mensagem: 'x' })
+    assert.equal(resultado.status, 'failed')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('*').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1, 'sem próxima instância elegível, não deveria criar 2ª tentativa')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+    await limparGateFailover()
+  })
+
+  await t.test('C3D-I. Mesma testKey armada, chamadas concorrentes → continua só 1 logical dispatch', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa-c3d-i-principal', 1, 'principal')
+    await criarInstancia(supabase, 'wa-c3d-i-reserva', 2, 'reserva')
+    fakeEvolution.resetar()
+    fakeEvolution.controlarInstancia('wa-c3d-i-principal', { comportamento: 'unavailable' })
+    fakeEvolution.controlarInstancia('wa-c3d-i-reserva', { comportamento: 'ok' })
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = '5551900000018'
+    const chave = `c3d-i-${Date.now()}`
+    process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY = chave
+
+    const [r1, r2] = await Promise.all([
+      enviarTesteInterno({ testKey: chave, telefone: '5551900000018', mensagem: 'x' }),
+      enviarTesteInterno({ testKey: chave, telefone: '5551900000018', mensagem: 'x' }),
+    ])
+    const { data: dispatches } = await supabase.from('collection_dispatches').select('id').eq('idempotency_key', `internal_test:${chave}`)
+    assert.equal(dispatches.length, 1, 'idempotência preservada mesmo no caminho com failover')
+    assert.equal(r1.dispatchId, r2.dispatchId)
+    await limparGateFailover()
+  })
+
   await pararAmbienteDeTeste()
 })
