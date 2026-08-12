@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
-import { enviarTextoFinanceiro } from '../lib/evolutionFinanceiro.js'
+import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { executarReguaCobranca } from '../jobs/cobranca-whatsapp.js'
 
 const router = Router()
@@ -63,7 +63,13 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
     const mensagem = montarMensagem(etapa, { nome: pessoaNome, valor: valorTotal, vencimento: pior.vencimento, diasAtraso })
 
     try {
-      await enviarTextoFinanceiro(telefone, mensagem)
+      const resultadoEnvio = await enviarCobrancaComRoteamento({
+        contasFinanceirasId: pior.id, etapa, clienteNome: pessoaNome,
+        clienteTelefone: telefone, valor: valorTotal, mensagem, origem: 'manual',
+      })
+      if (resultadoEnvio.status !== 'sent') {
+        return res.status(400).json({ erro: resultadoEnvio.erro || resultadoEnvio.motivo || 'Falha ao enviar cobrança' })
+      }
     } catch (erroEnvio) {
       // Número inválido/sem WhatsApp é problema do dado, não do servidor — 400 com
       // mensagem clara em vez do 500 genérico que a Evolution API devolveria.

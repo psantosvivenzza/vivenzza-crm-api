@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
-import { enviarTextoFinanceiro } from '../lib/evolutionFinanceiro.js'
+import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 
 // CORREÇÃO URGENTE 2026-07-30: o número 5551983270024 foi suspenso temporariamente
 // por enviar ~50 mensagens em rajada (sem intervalo). Limites abaixo existem
@@ -208,7 +208,13 @@ export async function executarReguaCobranca() {
 
       const timestamp = new Date().toISOString()
       try {
-        await enviarTextoFinanceiro(conta.telefone_cobranca, mensagem)
+        const resultadoEnvio = await enviarCobrancaComRoteamento({
+          contasFinanceirasId: conta.id, etapa, clienteNome: conta.pessoa_nome,
+          clienteTelefone: conta.telefone_cobranca, valor: saldo, mensagem, origem: 'cron',
+        })
+        if (resultadoEnvio.status !== 'sent') {
+          throw new Error(`motor de envio não concluiu: ${resultadoEnvio.motivo || resultadoEnvio.status}`)
+        }
         const { error: erroInsert } = await supabase.from('cobrancas_whatsapp').insert({
           contas_financeiras_id: conta.id,
           cliente_nome: conta.pessoa_nome,

@@ -15,6 +15,14 @@ const DEGRADED_AFTER_FAILURES = 3
 const COOLDOWN_AFTER_FAILURES = 6
 const COOLDOWN_MINUTES = 30
 
+// REGRA ABSOLUTA (C.3C) — vivenzza (comercial) e vivenzza-teste-cloud
+// (contingência comercial) nunca podem ser usadas pelo pool financeiro. Hoje
+// isso já é verdade na prática porque ninguém cadastrou essas instâncias em
+// whatsapp_instances — mas nada no código impedia um cadastro futuro por
+// engano de entrar no pool automaticamente. Guarda explícita, defesa em
+// profundidade, sem depender só da disciplina operacional.
+const INSTANCIAS_COMERCIAIS_PROIBIDAS = ['vivenzza', 'vivenzza-teste-cloud']
+
 async function garantirContadoresDoDia(instancia) {
   const hojeISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
   if (instancia.counters_reset_at === hojeISO) return instancia
@@ -53,6 +61,7 @@ function estaEmCooldown(instancia) {
 }
 
 function instanciaApta(instancia) {
+  if (INSTANCIAS_COMERCIAIS_PROIBIDAS.includes(instancia.instance_name)) return false
   if (!instancia.enabled) return false
   if (instancia.health_status === 'disabled') return false
   if (estaEmCooldown(instancia)) return false
