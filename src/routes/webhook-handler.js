@@ -5,6 +5,10 @@ import { proximoVendedor } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
+// FASE C.3A.1 (homologação) — só a propagação de ACK pro motor novo. NÃO traz
+// o roteamento de IA financeira (inboundMessageHandler.js) — fora de escopo
+// desta PR, que é só infraestrutura/homologação, não IA.
+import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -222,6 +226,16 @@ export async function processWhatsappEvent(payload) {
             .update({ status: novoStatus })
             .eq('evolution_id', msgId)
           console.log('[webhook] status atualizado:', msgId.slice(0, 12), '→', novoStatus)
+
+          // Motor de cobrança v2: propaga o mesmo ACK para collection_dispatch_attempts
+          // (se essa mensagem veio de lá — a função é um no-op silencioso caso não seja,
+          // já que busca por provider_message_id e retorna cedo se não achar).
+          // Nunca deve derrubar o processamento do webhook de venda/SDR se falhar.
+          try {
+            await aplicarAckDeEntrega(msgId, upd.status ?? upd.update?.status)
+          } catch (errCobranca) {
+            console.error('[webhook] erro ao propagar ACK para collection v2:', errCobranca.message)
+          }
         }
       }
       return

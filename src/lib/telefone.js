@@ -49,3 +49,30 @@ export function normalizarTelefone(telefone) {
   const digitos = telefone.replace(/\D/g, '')
   return digitos || null
 }
+
+// FASE C.3A (homologação, 2026-08-12) — comparação de IDENTIDADE de telefone
+// (ex: allowlist de homologação), nunca pra montar JID de envio (isso
+// continua sendo paraJidWhatsapp). Achado real da revisão: um `.endsWith()`
+// ingênuo entre dígitos brutos tem falso-positivo real — um allowlist
+// cadastrado sem DDD (ex: "900000001") "bate" por sufixo com QUALQUER número
+// de qualquer DDD terminado nesses mesmos 9 dígitos, permitindo um envio pra
+// alguém que nunca deveria estar na allowlist. candidatosTelefone() já
+// resolve corretamente variações de código de país/9º dígito para o mesmo
+// número real — a comparação correta é interseção dos conjuntos de
+// candidatos dos dois lados, nunca substring/endsWith bruto.
+export function telefonesEquivalentes(a, b) {
+  const digitosA = normalizarTelefone(a)
+  const digitosB = normalizarTelefone(b)
+  if (!digitosA || !digitosB) return false
+  const candidatosA = new Set(candidatosTelefone(digitosA))
+  return candidatosTelefone(digitosB).some((c) => candidatosA.has(c))
+}
+
+// Mascara um telefone pra log/relatório — nunca imprimir número completo
+// desnecessariamente (achado da revisão C.3A). Mostra só os últimos 4
+// dígitos, ex: "*********0001".
+export function mascararTelefone(telefone) {
+  const digitos = normalizarTelefone(telefone)
+  if (!digitos || digitos.length < 4) return '****'
+  return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`
+}

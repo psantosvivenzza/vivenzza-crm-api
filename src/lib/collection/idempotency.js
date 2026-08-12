@@ -50,3 +50,13 @@ export async function marcarEventoProcessado(id, { status = 'processed', error =
 export function idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt }) {
   return `cobranca:${contasFinanceirasId}:etapa${etapa}:${diaBrt}`
 }
+
+// FASE C.3A.1 (homologação) — idempotência de dispatch TÉCNICO (INTERNAL_TEST,
+// nunca ligado a título real). Deliberadamente SEM componente de dia — ao
+// contrário de idempotencyKeyDispatch(), o mesmo testKey nunca pode gerar um
+// 2º envio real, nem em outro dia, nem depois de reiniciar o processo. Isso é
+// "one-shot pra sempre" por construção (mesma UNIQUE INDEX de idempotency_key
+// que já protege collection_dispatches, sem precisar de mecanismo novo).
+export function idempotencyKeyInternalTest(testKey) {
+  return `internal_test:${testKey}`
+}
