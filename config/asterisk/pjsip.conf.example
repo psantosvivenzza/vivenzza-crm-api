@@ -1,0 +1,28 @@
+; Voice AI MVP — 1 endpoint SIP interno de teste (ramal 7001), só rede local.
+; NUNCA expor esse Asterisk publicamente na internet. Sem trunk PSTN aqui.
+; Copie para pjsip.conf real e gere sua própria senha forte — NUNCA reuse a
+; senha de exemplo abaixo, e nunca commite o arquivo real (só o .example).
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=127.0.0.1:5060  ; loopback — nunca 0.0.0.0 nesta fase interna
+
+[7001]
+type=endpoint
+context=voice-ai-internal
+disallow=all
+allow=ulaw
+allow=alaw
+auth=auth7001
+aors=7001
+
+[auth7001]
+type=auth
+auth_type=userpass
+username=voice-test-7001
+password=SUBSTITUA_POR_SENHA_FORTE_GERADA_LOCALMENTE
+
+[7001]
+type=aor
+max_contacts=1

@@ -1,0 +1,12 @@
+; Voice AI MVP — ARI habilitado só em loopback. Gere seu próprio usuário/
+; senha localmente — nunca reuse os valores de exemplo, nunca commite o
+; arquivo real.
+
+[general]
+enabled = yes
+pretty = yes
+
+[voice-ai-user]
+type = user
+read_only = no
+password = SUBSTITUA_POR_SENHA_FORTE_GERADA_LOCALMENTE

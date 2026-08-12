@@ -12,12 +12,14 @@
     "db:local:reset": "node scripts/localdb-reset.mjs",
     "test:collection": "node scripts/run-collection-tests.mjs",
     "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs",
-    "ai:worker": "node scripts/ai-worker.mjs"
+    "ai:worker": "node scripts/ai-worker.mjs",
+    "voice:service": "node scripts/voice/run-voice-service.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
     "@supabase/supabase-js": "^2.45.0",
     "@xmldom/xmldom": "^0.9.10",
+    "ari-client": "^2.2.0",
     "axios": "^1.7.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
