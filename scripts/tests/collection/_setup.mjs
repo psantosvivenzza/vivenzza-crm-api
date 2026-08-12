@@ -6,7 +6,8 @@
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 import { criarFakeEvolution } from '../fakes/fakeEvolution.js'
 
-process.env.LOCAL_PG_URL = `postgres://${PG_USER}:${PG_PASSWORD}@localhost:${PG_PORT}/${PG_DATABASE}`
+process.env.NODE_ENV = 'test'
+process.env.LOCAL_PG_URL = `postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DATABASE}`
 process.env.EVOLUTION_API_KEY = 'fake-key-teste'
 process.env.FINANCEIRO_WHATSAPP_INSTANCE = 'teste-financeiro-01'
 process.env.AI_PROVIDER = 'mock'
@@ -52,6 +53,7 @@ export async function criarContaDeTeste(supabase, overrides = {}) {
     codigoCliente = `TESTE-${Date.now()}-${contador}`
     const { error: erroCliente } = await supabase.from('clientes_erp').insert({
       legacy_id: codigoCliente,
+      tipo: overrides.tipo || 'PJ',
       razao_social: overrides.pessoa_nome || `Cliente Teste ${codigoCliente}`,
       ativo: overrides.clienteErpAtivo ?? true,
     })
