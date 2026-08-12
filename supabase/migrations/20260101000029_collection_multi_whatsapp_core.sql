@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS public.whatsapp_instances (
 );
 CREATE INDEX IF NOT EXISTS idx_whatsapp_instances_priority ON public.whatsapp_instances (enabled, priority);
 
+-- FASE C.2 (homologação) — achado real da revisão: nada impedia 2 instâncias
+-- 'principal' habilitadas ao mesmo tempo (ex: cadastro manual futuro por
+-- engano). Índice único parcial garante isso NO BANCO, não só por convenção
+-- de aplicação — a 2ª tentativa de habilitar um 2º principal falha na
+-- constraint, nunca fica em estado ambíguo silenciosamente.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_instances_unica_principal_ativa
+  ON public.whatsapp_instances (role)
+  WHERE role = 'principal' AND enabled = true;
+
 INSERT INTO public.whatsapp_instances (name, instance_name, priority, role, enabled)
 VALUES ('WhatsApp Financeiro 01', 'vivenzza-financeiro', 1, 'principal', true)
 ON CONFLICT (instance_name) DO NOTHING;

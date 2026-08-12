@@ -32,8 +32,16 @@ async function garantirContadoresDoDia(instancia) {
   return data
 }
 
+// FASE C.2 (homologação, 2026-08-12) — achado real da revisão: ordenar só por
+// priority não é deterministico entre réplicas/execuções quando duas
+// instâncias empatam nesse valor (ex: backfill + cadastro manual futuro com o
+// mesmo priority por engano) — quem "vence" dependia da ordem física das
+// linhas no Postgres, não de uma regra. `id` como desempate secundário torna
+// a seleção 100% determinística sempre. A garantia de que só existe 1
+// principal HABILITADA por vez é a constraint idx_whatsapp_instances_unica_principal_ativa
+// (banco, não JS) — ver migration 20260101000029.
 export async function listarInstancias() {
-  const { data, error } = await supabase.from('whatsapp_instances').select('*').order('priority', { ascending: true })
+  const { data, error } = await supabase.from('whatsapp_instances').select('*').order('priority', { ascending: true }).order('id', { ascending: true })
   if (error) throw error
   const comContadoresAtuais = []
   for (const instancia of data ?? []) comContadoresAtuais.push(await garantirContadoresDoDia(instancia))

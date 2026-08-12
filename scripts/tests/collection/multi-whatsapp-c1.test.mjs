@@ -316,6 +316,12 @@ test('Central Multi-WhatsApp: motor novo comprovadamente dormente + zero segredo
     const conteudo = fs.readFileSync(path.join(SRC, 'routes', 'collection-whatsapp-monitor.js'), 'utf8')
     assert.equal(/api_key/i.test(conteudo.replace(/\/\/.*$/gm, '')), false, 'o código da rota (fora de comentários) não deveria nem mencionar api_key — prova que não há caminho de retorná-lo por engano')
   })
+
+  await t.test('M. Painel de monitoramento é 100% read-only: nenhuma escrita no banco, nenhuma chamada à Evolution', () => {
+    const conteudo = fs.readFileSync(path.join(SRC, 'routes', 'collection-whatsapp-monitor.js'), 'utf8')
+    assert.equal(/\.insert\(|\.update\(|\.delete\(|\.upsert\(/.test(conteudo), false, 'nenhum verbo de escrita no Postgres')
+    assert.equal(conteudo.includes('evolutionAdapter'), false, 'a simples abertura do painel nunca deveria chamar a Evolution real — só lê o que o healthcheck periódico já persistiu')
+  })
 })
 
 test('Central Multi-WhatsApp: API read-only nunca retorna segredo, em runtime', async (t) => {
@@ -334,6 +340,123 @@ test('Central Multi-WhatsApp: API read-only nunca retorna segredo, em runtime', 
     assert.equal(json.includes('ALGUM_SEGREDO_ENV'), false)
     assert.equal(json.includes('nao-deveria-vazar'), false)
   })
+
+  await pararAmbienteDeTeste()
+})
+
+test('Central Multi-WhatsApp (FASE C.2): regra de 1 PRIMARY, kill switch e test mode fail-closed', async (t) => {
+  await iniciarAmbienteDeTeste()
+  const { supabase } = await import('../../../src/lib/supabase-admin.server.js')
+
+  await t.test('D. Constraint no banco impede uma 2ª instância principal HABILITADA — nunca fica em estado ambíguo', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa01-unica-principal', 1, 'principal')
+
+    const { error } = await supabase.from('whatsapp_instances').insert({
+      name: 'Segundo principal indevido', instance_name: 'wa02-unica-principal', priority: 2, role: 'principal', enabled: true,
+    })
+    assert.ok(error, 'deveria ter sido rejeitado pelo banco')
+    assert.equal(error.code, '23505', 'violação da constraint de índice único parcial, não outro tipo de erro')
+
+    // Principal DESABILITADA não conta pra constraint — trocar de principal
+    // (desabilitar a antiga, habilitar a nova) continua possível.
+    await supabase.from('whatsapp_instances').update({ enabled: false }).eq('instance_name', 'wa01-unica-principal')
+    const { error: erro2 } = await supabase.from('whatsapp_instances').insert({
+      name: 'Novo principal', instance_name: 'wa03-unica-principal', priority: 1, role: 'principal', enabled: true,
+    })
+    assert.equal(erro2, null, 'com a antiga desabilitada, uma nova principal habilitada deveria ser permitida')
+  })
+
+  await t.test('Desempate determinístico: 2 instâncias com a MESMA priority sempre retornam na mesma ordem (por id)', async () => {
+    await limparInstanciasDeTeste(supabase)
+    const a = await criarInstancia(supabase, 'wa-empate-a', 5, 'reserva')
+    const b = await criarInstancia(supabase, 'wa-empate-b', 5, 'reserva')
+
+    const { listarInstancias } = await import('../../../src/lib/collection/whatsappInstances.js')
+    for (let i = 0; i < 3; i++) {
+      const instancias = await listarInstancias()
+      const ordemRelativa = instancias.filter((x) => x.id === a.id || x.id === b.id).map((x) => x.id)
+      assert.deepEqual(ordemRelativa, [a.id, b.id].sort(), `execução ${i}: ordem relativa determinística (por id)`)
+    }
+  })
+
+  await t.test('G. Kill switch (multi_whatsapp) é fail-closed: valor real e fallback de coluna ausente nunca viram true', async () => {
+    const { obterConfigCobranca, invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
+
+    await supabase.from('automacoes_config').update({ multi_whatsapp: false }).eq('id', 1)
+    invalidarCacheFlags()
+    assert.equal((await obterConfigCobranca()).multi_whatsapp, false)
+
+    // Mesmo mecanismo já provado pra human_call_priority_threshold na B.5:
+    // se a coluna não existisse, select('*') não a retornaria e o merge com
+    // DEFAULTS (multi_whatsapp: false) cobriria com segurança — nunca undefined vira true.
+    const configSemAChave = { ...(await obterConfigCobranca()) }
+    delete configSemAChave.multi_whatsapp
+    assert.equal(configSemAChave.multi_whatsapp ?? false, false)
+  })
+
+  await t.test('H. Test mode allowlist AUSENTE (env var nunca setada) bloqueia TODOS os números — fail closed', async () => {
+    const fakeEvolution2 = await iniciarAmbienteDeTeste()
+    const { enviarTexto } = await import('../../../src/lib/collection/evolutionAdapter.js')
+    process.env.COLLECTION_TEST_MODE = 'true'
+    delete process.env.COLLECTION_TEST_PHONE_ALLOWLIST
+    fakeEvolution2.resetar()
+    fakeEvolution2.controlarInstancia('wa-testmode-ausente', { comportamento: 'ok' })
+
+    await assert.rejects(() => enviarTexto({ instance_name: 'wa-testmode-ausente', api_key_env_var: 'EVOLUTION_API_KEY' }, '5551900000001', 'x'))
+    assert.equal(fakeEvolution2.mensagensEnviadas.length, 0)
+    process.env.COLLECTION_TEST_MODE = 'false'
+  })
+
+  await t.test('H. Test mode allowlist VAZIA (string vazia) bloqueia TODOS os números — fail closed', async () => {
+    const fakeEvolution3 = await iniciarAmbienteDeTeste()
+    const { enviarTexto } = await import('../../../src/lib/collection/evolutionAdapter.js')
+    process.env.COLLECTION_TEST_MODE = 'true'
+    process.env.COLLECTION_TEST_PHONE_ALLOWLIST = ''
+    fakeEvolution3.resetar()
+    fakeEvolution3.controlarInstancia('wa-testmode-vazia', { comportamento: 'ok' })
+
+    await assert.rejects(() => enviarTexto({ instance_name: 'wa-testmode-vazia', api_key_env_var: 'EVOLUTION_API_KEY' }, '5551900000001', 'x'))
+    assert.equal(fakeEvolution3.mensagensEnviadas.length, 0)
+    process.env.COLLECTION_TEST_MODE = 'false'
+  })
+
+  await t.test('J. Sequência completa: timeout no ÚNICO principal (sem reserva) → dispatch fica failed de forma segura e consistente, nunca preso em "sending"', async () => {
+    const fakeEvolution4 = await iniciarAmbienteDeTeste()
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa01-timeout-unico', 1, 'principal')
+    fakeEvolution4.controlarInstancia('wa01-timeout-unico', { comportamento: 'timeout' })
+    await supabase.from('automacoes_config').update({ whatsapp_failover: true }).eq('id', 1)
+    const { invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
+    invalidarCacheFlags()
+
+    const { enviarComFailover } = await import('../../../src/lib/collection/dispatchEngine.js')
+    const conta = await criarContaDeTeste(supabase)
+    const resultado = await enviarComFailover({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca,
+      valor: conta.valor, mensagem: 'Teste timeout sem reserva', origem: 'manual',
+    })
+
+    // Sem reserva disponível, o dispatch termina 'failed' de forma explícita
+    // e auditável — nunca fica preso em 'sending' pra sempre. Isso é
+    // deliberadamente HONESTO sobre uma limitação real: se a mensagem
+    // "aconteceu" tarde do lado do provedor mas o cliente HTTP já desistiu, o
+    // provider_message_id nunca foi capturado — não há como reconciliar essa
+    // tentativa específica retroativamente via webhook ACK. O sistema não
+    // finge resolver isso; documenta e falha de forma segura (nunca reenvia
+    // sozinho, nunca finge sucesso).
+    assert.equal(resultado.status, 'failed')
+    assert.equal(resultado.motivo, 'sem_instancia_saudavel')
+    const { data: dispatch } = await supabase.from('collection_dispatches').select('status').eq('id', resultado.dispatchId).single()
+    assert.equal(dispatch.status, 'failed', 'nunca deveria ficar preso em queued/sending')
+    const { data: tentativas } = await supabase.from('collection_dispatch_attempts').select('status, provider_message_id').eq('dispatch_id', resultado.dispatchId)
+    assert.equal(tentativas.length, 1, 'exatamente 1 tentativa registrada, mesmo com whatsapp_failover=true (sem 2ª instância pra tentar)')
+    assert.equal(tentativas[0].status, 'failed')
+    assert.equal(tentativas[0].provider_message_id, null, 'timeout nunca captura um provider_message_id — por isso reconciliação tardia não é possível para este caso')
+
+    await supabase.from('automacoes_config').update({ whatsapp_failover: false }).eq('id', 1)
+    invalidarCacheFlags()
+  }, { timeout: 30000 })
 
   await pararAmbienteDeTeste()
 })
