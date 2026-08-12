@@ -35,3 +35,36 @@ export async function listarSugestoes({ contasFinanceirasId, limit = 50 } = {}) 
   if (error) throw error
   return data ?? []
 }
+
+export async function buscarSugestao(id) {
+  const { data, error } = await supabase.from('ai_shadow_suggestions').select('*').eq('id', id).maybeSingle()
+  if (error) throw error
+  return data
+}
+
+const ACOES_FEEDBACK_VALIDAS = ['approved', 'edited', 'discarded']
+
+// Feedback supervisionado — NUNCA envia WhatsApp, nunca cria cobrança, nunca
+// altera o financeiro. suggested_reply (original da IA) é sempre preservado;
+// em 'edited', o texto final do operador vai num campo separado
+// (final_reply_operator) — o par (original, final) é a matéria-prima pra um
+// aprendizado supervisionado futuro, não usado automaticamente por nada
+// ainda. Em 'approved'/'discarded', final_reply_operator fica null — nada
+// foi reescrito pelo operador.
+export async function registrarFeedback(suggestionId, { action, finalReply, feedbackBy }) {
+  if (!ACOES_FEEDBACK_VALIDAS.includes(action)) {
+    throw new Error(`Ação de feedback inválida: ${action}`)
+  }
+  if (action === 'edited' && !(typeof finalReply === 'string' && finalReply.trim().length > 0)) {
+    throw new Error('Feedback "edited" exige final_reply não vazio')
+  }
+
+  const { data, error } = await supabase.from('ai_shadow_suggestions').update({
+    feedback_status: action,
+    final_reply_operator: action === 'edited' ? finalReply : null,
+    feedback_by: feedbackBy ?? null,
+    feedback_at: new Date().toISOString(),
+  }).eq('id', suggestionId).select().single()
+  if (error) throw error
+  return data
+}
