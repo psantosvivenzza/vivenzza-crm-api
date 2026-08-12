@@ -272,8 +272,18 @@ export async function reavaliarTimeoutsDeEntrega() {
 // One-shot: idempotencyKeyInternalTest(testKey) nunca tem componente de dia —
 // a MESMA testKey nunca gera um 2º dispatch real, protegido pela mesma
 // UNIQUE INDEX de idempotency_key que já existe (nenhum mecanismo novo).
-// Sem failover — só 1 instância real existe hoje; loop de múltiplas
-// tentativas fica pra quando houver reserva de verdade.
+//
+// FASE C.3D (homologação, 2026-08-12) — segunda tentativa (failover) só é
+// permitida numa homologação EXPLICITAMENTE armada, nunca no INTERNAL_TEST
+// comum. Gate exige TODAS as condições: COLLECTION_TEST_MODE=true (já
+// verificado acima) + COLLECTION_INTERNAL_TEST_FAILOVER_KEY definida
+// server-side + testKey recebida IGUAL (===, nunca prefix/includes) a essa
+// chave + a 1ª tentativa falhar com failoverEligible=true. Fora dessas
+// condições, comportamento idêntico a antes: single-attempt. Máximo 2
+// tentativas (nunca um loop) — attempt 1 sempre a instância selecionada
+// normalmente, attempt 2 a única próxima elegível via selecionarProximaInstancia
+// (nunca a instância comercial — ela nunca está nesse pool). Sem reserva
+// elegível, finaliza failed, nunca cai pra comercial.
 export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
   if (!testKey) throw new Error('INTERNAL_TEST recusado: testKey é obrigatório.')
   if (!telefone) throw new Error('INTERNAL_TEST recusado: telefone é obrigatório.')
@@ -317,6 +327,12 @@ export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
     return { status: 'failed', motivo: 'sem_instancia_saudavel', dispatchId: criado.id }
   }
 
+  // Gate explícito da homologação de failover controlado — TODAS as condições,
+  // comparação exata de testKey (nunca prefix/includes). Fora disso, o
+  // comportamento abaixo é idêntico ao single-attempt original.
+  const chaveFailoverHomologacao = process.env.COLLECTION_INTERNAL_TEST_FAILOVER_KEY
+  const failoverHomologacaoArmado = Boolean(chaveFailoverHomologacao) && testKey === chaveFailoverHomologacao
+
   const tentativa = await registrarTentativa(criado.id, 1, instancia.id)
   try {
     const resultado = await enviarTexto(instancia, telefone, mensagem)
@@ -327,7 +343,39 @@ export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
   } catch (err) {
     const classificado = classifyEvolutionFailure(err)
     await atualizarTentativa(tentativa.id, { status: 'failed', failure_kind: classificado.failureKind, erro: classificado.mensagem, falhou_em: new Date().toISOString() })
-    await registrarFalhaEnvio(instancia.id)
+
+    // Homologação controlada: a falha da 1ª tentativa é sintética (armada de
+    // propósito via FORCE_EVOLUTION_FAILURE_FOR_TEST) — não pode contaminar o
+    // circuit breaker REAL da instância (consecutive_failures/cooldown em
+    // whatsapp_instances), senão homologar o failover empurraria o principal
+    // de verdade pra cooldown por causa de uma falha que nunca aconteceu.
+    // Fora do gate, comportamento inalterado: toda falha atualiza o circuit.
+    if (!failoverHomologacaoArmado) {
+      await registrarFalhaEnvio(instancia.id)
+    }
+
+    if (failoverHomologacaoArmado && classificado.failoverEligible) {
+      const proximaInstancia = await selecionarProximaInstancia({ excluirIds: [instancia.id] })
+      if (proximaInstancia) {
+        const tentativa2 = await registrarTentativa(criado.id, 2, proximaInstancia.id)
+        try {
+          const resultado2 = await enviarTexto(proximaInstancia, telefone, mensagem)
+          await atualizarTentativa(tentativa2.id, { status: 'sent', provider_message_id: resultado2.providerMessageId, enviado_em: new Date().toISOString() })
+          await registrarSucessoEnvio(proximaInstancia.id)
+          await atualizarDispatch(criado.id, { status: 'sent' })
+          return { status: 'sent', dispatchId: criado.id, tentativas: 2, instancia: proximaInstancia.name, providerMessageId: resultado2.providerMessageId, homologacaoFailover: true }
+        } catch (err2) {
+          const classificado2 = classifyEvolutionFailure(err2)
+          await atualizarTentativa(tentativa2.id, { status: 'failed', failure_kind: classificado2.failureKind, erro: classificado2.mensagem, falhou_em: new Date().toISOString() })
+          await registrarFalhaEnvio(proximaInstancia.id)
+          await atualizarDispatch(criado.id, { status: 'failed' })
+          return { status: 'failed', motivo: classificado2.failureKind, categoria: classificado2.category, dispatchId: criado.id, erro: classificado2.mensagem, tentativas: 2 }
+        }
+      }
+      // Nenhuma próxima instância elegível — nunca cai pra comercial (ela
+      // nunca está nesse pool). Finaliza failed abaixo, igual ao caso sem gate.
+    }
+
     await atualizarDispatch(criado.id, { status: 'failed' })
     return { status: 'failed', motivo: classificado.failureKind, categoria: classificado.category, dispatchId: criado.id, erro: classificado.mensagem }
   }
