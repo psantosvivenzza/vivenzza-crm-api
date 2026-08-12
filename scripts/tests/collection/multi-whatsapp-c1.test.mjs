@@ -320,20 +320,32 @@ test('Central Multi-WhatsApp: failover só em falha TÉCNICA inequívoca', async
   await pararAmbienteDeTeste()
 })
 
-test('Central Multi-WhatsApp: motor novo comprovadamente dormente + zero segredo exposto', async (t) => {
-  await t.test('21. Sender legado (cobranca-whatsapp.js) não tem NENHUMA referência ao motor novo — prova estática, não só intenção', () => {
+test('Central Multi-WhatsApp: roteamento operacional (integração, 2026-08-12) + zero segredo exposto', async (t) => {
+  // FASE de integração operacional (2026-08-12) — substitui a prova estática
+  // anterior ("motor novo comprovadamente dormente"), que ficou obsoleta no
+  // momento em que a integração foi autorizada: o job da régua e a rota de
+  // disparo manual individual agora DELEGAM (via collectionRouting.js) para o
+  // motor novo quando multi_whatsapp=true. O invariante que ainda importa não
+  // é mais "nunca referencia o motor novo" — é "delega através de um ÚNICO
+  // ponto de roteamento, nunca fala com dispatchEngine/whatsappInstances/
+  // evolutionAdapter diretamente". Comportamento com a flag desligada
+  // (preservação byte a byte) é provado por teste de comportamento em
+  // multi-whatsapp-operational-routing.test.mjs (cenário A), não mais por
+  // grep de texto — grep nunca provou runtime, só intenção do autor.
+  await t.test('21. Sender legado (cobranca-whatsapp.js) só fala com o motor novo através do ponto único de roteamento (collectionRouting.js)', () => {
     const conteudo = fs.readFileSync(path.join(SRC, 'jobs', 'cobranca-whatsapp.js'), 'utf8')
-    for (const proibido of ['dispatchEngine', 'whatsappInstances', 'evolutionAdapter', 'collection_dispatches', 'whatsapp_instances']) {
-      assert.equal(conteudo.includes(proibido), false, `cobranca-whatsapp.js não deveria referenciar "${proibido}" — o sender legado continua 100% isolado do motor novo`)
+    for (const proibido of ['dispatchEngine', 'whatsappInstances', 'evolutionAdapter', 'collection_dispatches', 'whatsapp_instances', 'evolutionFinanceiro']) {
+      assert.equal(conteudo.includes(proibido), false, `cobranca-whatsapp.js não deveria referenciar "${proibido}" diretamente — só via collectionRouting.js`)
     }
-    assert.ok(conteudo.includes('evolutionFinanceiro'), 'o sender legado deveria continuar usando o cliente HTTP de sempre, não o adapter novo')
+    assert.ok(conteudo.includes('enviarCobrancaComRoteamento'), 'o sender legado deveria delegar via o ponto único de roteamento, não chamar o transporte diretamente')
   })
 
-  await t.test('rota de disparo manual legado (src/routes/cobrancas.js) também não referencia o motor novo', () => {
+  await t.test('rota de disparo manual individual (src/routes/cobrancas.js) também delega via o mesmo ponto único de roteamento', () => {
     const conteudo = fs.readFileSync(path.join(SRC, 'routes', 'cobrancas.js'), 'utf8')
-    for (const proibido of ['dispatchEngine', 'whatsappInstances', 'evolutionAdapter']) {
+    for (const proibido of ['dispatchEngine', 'whatsappInstances', 'evolutionAdapter', 'evolutionFinanceiro']) {
       assert.equal(conteudo.includes(proibido), false, proibido)
     }
+    assert.ok(conteudo.includes('enviarCobrancaComRoteamento'))
   })
 
   await t.test('23. API read-only de monitoramento (collection-whatsapp-monitor.js) nunca inclui api_key/api_key_env_var na resposta', () => {
