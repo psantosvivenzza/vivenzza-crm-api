@@ -67,6 +67,9 @@ import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
 // score/executa NBA.
 import collectionShadowReportsRouter from './routes/collection-shadow-reports.js'
 import collectionWhatsappMonitorRouter from './routes/collection-whatsapp-monitor.js'
+// IA WhatsApp MVP (2026-08-12) — só GET, mostra sugestões de IA (shadow,
+// nenhuma enviada de verdade) pro operador revisar. Ver src/lib/collection/ai/.
+import aiSuggestionsRouter from './routes/ai-suggestions.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -180,6 +183,7 @@ app.use('/api/notifications', auth, notificationsRouter)
 // outra rota do motor v2 é montada nesta fase.
 app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
 app.use('/api/collection-shadow', auth, adminOnly, collectionShadowReportsRouter)
+app.use('/api/ai-suggestions', auth, adminOnly, aiSuggestionsRouter)
 
 // FASE C.1 (homologação) — painel Financeiro → Cobranças → WhatsApps. Só GET,
 // nenhuma escrita — CRUD de instâncias (criar/desabilitar/reabilitar,
