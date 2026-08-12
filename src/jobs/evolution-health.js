@@ -18,14 +18,22 @@ const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 // dia. Agora as duas instâncias entram na mesma checagem de 15 em 15 min.
 // Nome da env reaproveitado de evolutionFinanceiro.js para não duplicar
 // configuração.
+//
+// FASE C.3C (homologação, 2026-08-12) — inclui a reserva financeira exclusiva
+// (vivenzza-financeiro-reserva-01) no mesmo ciclo de 15min, sem cron novo e
+// sem mudar a lógica de alerta/circuit breaker. Ainda dormente: cadastrada em
+// whatsapp_instances como role=reserve, só passa a ser usada de verdade
+// quando whatsapp_failover=true (continua false nesta fase).
 const INSTANCIAS_MONITORADAS = [
   INSTANCE,
   process.env.FINANCEIRO_WHATSAPP_INSTANCE || 'vivenzza-financeiro',
+  process.env.FINANCEIRO_RESERVA_WHATSAPP_INSTANCE || 'vivenzza-financeiro-reserva-01',
 ]
 
 const NOME_AMIGAVEL = {
   vivenzza: 'WhatsApp Comercial',
   'vivenzza-financeiro': 'WhatsApp Financeiro (Cobrança)',
+  'vivenzza-financeiro-reserva-01': 'WhatsApp Financeiro Reserva 01',
 }
 
 const PETERSON_NUMERO = '555131372313'
