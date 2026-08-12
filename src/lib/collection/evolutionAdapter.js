@@ -9,7 +9,7 @@
 // validada em produção por src/lib/evolutionFinanceiro.js — não reimplementa do
 // zero, só generaliza para múltiplas instâncias.
 import axios from 'axios'
-import { paraJidWhatsapp } from '../telefone.js'
+import { paraJidWhatsapp, telefonesEquivalentes, mascararTelefone } from '../telefone.js'
 
 const EVOLUTION_URL_PADRAO = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 
@@ -98,14 +98,20 @@ export const classificarErro = classifyEvolutionFailure
 // resto do código decida — validação server-side, não confia em nenhuma
 // checagem de UI/frontend. `COLLECTION_TEST_PHONE_ALLOWLIST` é uma lista
 // separada por vírgula de números de teste explicitamente autorizados.
+// FASE C.3A (homologação) — allowlist ausente/vazia sempre bloqueia TUDO
+// (fail-closed): allowlist=[] faz .some() retornar false pra qualquer
+// número, sem exceção nem caminho de erro possível (leitura síncrona de
+// env var não lança).
 function verificarAllowlistDeTeste(numero) {
   if (process.env.COLLECTION_TEST_MODE !== 'true') return
   const allowlist = (process.env.COLLECTION_TEST_PHONE_ALLOWLIST || '').split(',').map((n) => n.trim()).filter(Boolean)
-  const digitos = String(numero).replace(/\D/g, '')
-  const permitido = allowlist.some((permitidoNum) => digitos.endsWith(permitidoNum.replace(/\D/g, '')))
+  // Comparação por IDENTIDADE real do número (candidatosTelefone), não por
+  // substring/endsWith — evita falso-positivo de um allowlist sem DDD
+  // batendo com qualquer número de qualquer DDD terminado nos mesmos dígitos.
+  const permitido = allowlist.some((permitidoNum) => telefonesEquivalentes(numero, permitidoNum))
   if (!permitido) {
     const erro = new Error(
-      `COLLECTION_TEST_MODE=true: número ${numero} não está em COLLECTION_TEST_PHONE_ALLOWLIST — envio bloqueado. ` +
+      `COLLECTION_TEST_MODE=true: número ${mascararTelefone(numero)} não está em COLLECTION_TEST_PHONE_ALLOWLIST — envio bloqueado. ` +
       `Isso é intencional: em homologação, nenhuma mensagem pode sair para um número fora da allowlist, mesmo que haja bug no código chamador.`
     )
     erro.bloqueadoPorTestMode = true

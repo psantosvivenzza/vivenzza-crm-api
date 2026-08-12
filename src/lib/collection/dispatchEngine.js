@@ -15,13 +15,14 @@
 // - Antes de qualquer tentativa, sempre reconsulta se o título já foi pago.
 import { supabase } from '../supabase-admin.server.js'
 import { obterConfigCobranca } from './featureFlags.js'
-import { idempotencyKeyDispatch, registrarEventoExterno } from './idempotency.js'
+import { idempotencyKeyDispatch, idempotencyKeyInternalTest, registrarEventoExterno } from './idempotency.js'
 import { selecionarProximaInstancia, registrarSucessoEnvio, registrarFalhaEnvio } from './whatsappInstances.js'
 import { enviarTexto, classifyEvolutionFailure, normalizarStatusAck } from './evolutionAdapter.js'
 import { tituloEstaQuitado } from './paymentGuard.js'
 import { promessaAtivaPara } from './promises.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
+import { telefonesEquivalentes, mascararTelefone } from '../telefone.js'
 
 const MAX_TENTATIVAS = 3
 
@@ -249,4 +250,85 @@ export async function reavaliarTimeoutsDeEntrega() {
     }
   }
   return { reavaliados }
+}
+
+// FASE C.3A.1 (homologação, 2026-08-12) — dispatch TÉCNICO de homologação
+// (INTERNAL_TEST), NUNCA ligado a um título financeiro real. Decisão
+// explícita: não criar contas_financeiras sintética — o schema permite
+// contas_financeiras_id NULL só quando purpose='internal_test' (CHECK no
+// banco, ver migration 20260101000030).
+//
+// Só alcançável por harness/script administrativo explícito — não existe
+// nenhuma referência a esta função em cobranca-whatsapp.js, collection-
+// engine.js, nextBestAction.js ou qualquer rota pública. A régua, o disparo
+// manual de cobrança, o NBA e o score nunca podem gerar um INTERNAL_TEST.
+//
+// Guarda ANTES de qualquer escrita: exige COLLECTION_TEST_MODE=true e o
+// telefone na allowlist — mesmo que o chamador tenha bug, aborta cedo com
+// mensagem clara (defesa em profundidade; o gate "de verdade" já existe em
+// evolutionAdapter.js/verificarAllowlistDeTeste, chamado de qualquer forma
+// dentro de enviarTexto()).
+//
+// One-shot: idempotencyKeyInternalTest(testKey) nunca tem componente de dia —
+// a MESMA testKey nunca gera um 2º dispatch real, protegido pela mesma
+// UNIQUE INDEX de idempotency_key que já existe (nenhum mecanismo novo).
+// Sem failover — só 1 instância real existe hoje; loop de múltiplas
+// tentativas fica pra quando houver reserva de verdade.
+export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
+  if (!testKey) throw new Error('INTERNAL_TEST recusado: testKey é obrigatório.')
+  if (!telefone) throw new Error('INTERNAL_TEST recusado: telefone é obrigatório.')
+  if (process.env.COLLECTION_TEST_MODE !== 'true') {
+    throw new Error('INTERNAL_TEST recusado: COLLECTION_TEST_MODE não está ligado — homologação real exige o modo de teste explicitamente ativo.')
+  }
+  const allowlist = (process.env.COLLECTION_TEST_PHONE_ALLOWLIST || '').split(',').map((n) => n.trim()).filter(Boolean)
+  const permitido = allowlist.some((permitidoNum) => telefonesEquivalentes(telefone, permitidoNum))
+  if (!permitido) {
+    throw new Error(`INTERNAL_TEST recusado: ${mascararTelefone(telefone)} não está em COLLECTION_TEST_PHONE_ALLOWLIST.`)
+  }
+
+  const idempotencyKey = idempotencyKeyInternalTest(testKey)
+  const { data: existente } = await supabase.from('collection_dispatches').select('*').eq('idempotency_key', idempotencyKey).maybeSingle()
+  if (existente) {
+    return { status: existente.status, motivo: 'idempotencia_existente', dispatchId: existente.id }
+  }
+
+  const { data: criado, error } = await supabase
+    .from('collection_dispatches')
+    .insert({
+      contas_financeiras_id: null, etapa: null, canal: 'whatsapp', idempotency_key: idempotencyKey,
+      status: 'queued', origem: 'manual', purpose: 'internal_test',
+      mensagem, cliente_nome: 'INTERNAL_TEST', cliente_telefone: telefone, valor: null,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    if (error.code === '23505') {
+      const { data: concorrente } = await supabase.from('collection_dispatches').select('*').eq('idempotency_key', idempotencyKey).single()
+      return { status: concorrente.status, motivo: 'idempotencia_existente', dispatchId: concorrente.id }
+    }
+    throw error
+  }
+
+  await atualizarDispatch(criado.id, { status: 'sending' })
+  const instancia = await selecionarProximaInstancia({})
+  if (!instancia) {
+    await atualizarDispatch(criado.id, { status: 'failed' })
+    return { status: 'failed', motivo: 'sem_instancia_saudavel', dispatchId: criado.id }
+  }
+
+  const tentativa = await registrarTentativa(criado.id, 1, instancia.id)
+  try {
+    const resultado = await enviarTexto(instancia, telefone, mensagem)
+    await atualizarTentativa(tentativa.id, { status: 'sent', provider_message_id: resultado.providerMessageId, enviado_em: new Date().toISOString() })
+    await registrarSucessoEnvio(instancia.id)
+    await atualizarDispatch(criado.id, { status: 'sent' })
+    return { status: 'sent', dispatchId: criado.id, tentativas: 1, instancia: instancia.name, providerMessageId: resultado.providerMessageId }
+  } catch (err) {
+    const classificado = classifyEvolutionFailure(err)
+    await atualizarTentativa(tentativa.id, { status: 'failed', failure_kind: classificado.failureKind, erro: classificado.mensagem, falhou_em: new Date().toISOString() })
+    await registrarFalhaEnvio(instancia.id)
+    await atualizarDispatch(criado.id, { status: 'failed' })
+    return { status: 'failed', motivo: classificado.failureKind, categoria: classificado.category, dispatchId: criado.id, erro: classificado.mensagem }
+  }
 }

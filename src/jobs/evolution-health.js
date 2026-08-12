@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { atualizarStatusConexao } from '../lib/collection/whatsappInstances.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -153,6 +154,17 @@ export async function runEvolutionHealthCheck() {
     resultados.push(await registrarEAlertar(nomeInstancia, status, latencia, {
       raw_status: status,
     }))
+
+    // Espelha na Central de Instâncias (whatsapp_instances) do motor de cobrança
+    // v2 — no-op silencioso se a instância não estiver cadastrada lá (ex: só
+    // 'vivenzza' comercial hoje, que não faz parte do motor de cobrança — a
+    // função é um UPDATE por instance_name, casa zero linhas e não cria nada).
+    try {
+      await atualizarStatusConexao(nomeInstancia, status)
+    } catch {
+      // tabela pode não existir se a migration não tiver sido aplicada neste
+      // ambiente — não deve derrubar o healthcheck real (evolution_health).
+    }
   }
 
   console.log('[evolution-health]', resultados)
