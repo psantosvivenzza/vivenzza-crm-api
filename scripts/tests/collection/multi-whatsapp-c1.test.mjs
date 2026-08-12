@@ -124,6 +124,30 @@ test('Central Multi-WhatsApp: failover só em falha TÉCNICA inequívoca', async
     await desligarFailover()
   })
 
+  await t.test('2b. Cooldown EXPIRADO (cooldown_until no passado) → principal volta a ser elegível', async () => {
+    fakeEvolution.resetar()
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia(supabase, 'wa01-cooldown-expirado', 1, 'principal', {
+      health_status: 'cooldown', cooldown_until: new Date(Date.now() - 60 * 1000).toISOString(), consecutive_failures: 6,
+    })
+    await criarInstancia(supabase, 'wa02-reserva-nao-usada', 2, 'reserva')
+    fakeEvolution.controlarInstancia('wa01-cooldown-expirado', { comportamento: 'ok' })
+    fakeEvolution.controlarInstancia('wa02-reserva-nao-usada', { comportamento: 'ok' })
+    await comFailoverLigado()
+
+    const conta = await criarContaDeTeste(supabase)
+    const resultado = await enviarComFailover({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca,
+      valor: conta.valor, mensagem: 'Teste cooldown expirado', origem: 'manual',
+    })
+
+    assert.equal(resultado.status, 'sent')
+    assert.equal(resultado.instancia, 'wa01-cooldown-expirado', 'cooldown já passou — principal deveria voltar a ser elegível, sem precisar de reconexão manual')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1)
+    assert.equal(fakeEvolution.mensagensEnviadas[0].instancia, 'wa01-cooldown-expirado')
+    await desligarFailover()
+  })
+
   await t.test('5. UNKNOWN (erro sem categoria reconhecida) → NÃO tenta reserva mesmo com whatsapp_failover=true', async () => {
     fakeEvolution.resetar()
     await limparInstanciasDeTeste(supabase)
