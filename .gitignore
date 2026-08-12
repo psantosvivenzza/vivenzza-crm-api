@@ -1,2 +1,7 @@
 .env
 node_modules/
+
+# Ambiente de desenvolvimento local (Postgres) — ver
+# docs/cobranca-ai/LOCAL_DEVELOPMENT.md. Nunca commitar dados/binários locais.
+.localdev/
+supabase/.temp/

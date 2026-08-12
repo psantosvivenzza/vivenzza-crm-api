@@ -525,9 +525,13 @@ router.post('/executar-agora', async (req, res) => {
   res.json({ sucesso: true, iniciado: true })
 })
 
-// Todo dia útil às 09:00 horário de Brasília
-cron.schedule('0 9 * * 1-5', () => {
-  verificarElegiveis().catch((err) => console.error('[reativacao] erro no job agendado:', err.message))
-}, { timezone: 'America/Sao_Paulo' })
+// Todo dia útil às 09:00 horário de Brasília — não agenda em teste (achado
+// real: node-cron mantém um timer vivo que nunca deixa o processo de teste
+// sair sozinho, homologação 2026-08-12).
+if (process.env.NODE_ENV !== 'test') {
+  cron.schedule('0 9 * * 1-5', () => {
+    verificarElegiveis().catch((err) => console.error('[reativacao] erro no job agendado:', err.message))
+  }, { timezone: 'America/Sao_Paulo' })
+}
 
 export default router

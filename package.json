@@ -7,6 +7,10 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "db:local:start": "node scripts/localdb-start.mjs",
+    "db:local:stop": "node scripts/localdb-stop.mjs",
+    "db:local:reset": "node scripts/localdb-reset.mjs",
+    "test:collection": "node scripts/run-collection-tests.mjs",
     "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs"
   },
   "dependencies": {
