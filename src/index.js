@@ -70,6 +70,10 @@ import collectionWhatsappMonitorRouter from './routes/collection-whatsapp-monito
 // IA WhatsApp MVP (2026-08-12) — só GET, mostra sugestões de IA (shadow,
 // nenhuma enviada de verdade) pro operador revisar. Ver src/lib/collection/ai/.
 import aiSuggestionsRouter from './routes/ai-suggestions.js'
+// Worker local Ollama (2026-08-12) — auth própria (aiWorkerAuth), nunca JWT
+// de usuário comum. Ver src/lib/collection/ai/jobQueue.js.
+import aiWorkerRouter from './routes/ai-worker.js'
+import { aiWorkerAuth } from './middleware/aiWorkerAuth.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -184,6 +188,7 @@ app.use('/api/notifications', auth, notificationsRouter)
 app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
 app.use('/api/collection-shadow', auth, adminOnly, collectionShadowReportsRouter)
 app.use('/api/ai-suggestions', auth, adminOnly, aiSuggestionsRouter)
+app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 
 // FASE C.1 (homologação) — painel Financeiro → Cobranças → WhatsApps. Só GET,
 // nenhuma escrita — CRUD de instâncias (criar/desabilitar/reabilitar,

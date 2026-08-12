@@ -11,7 +11,8 @@
     "db:local:stop": "node scripts/localdb-stop.mjs",
     "db:local:reset": "node scripts/localdb-reset.mjs",
     "test:collection": "node scripts/run-collection-tests.mjs",
-    "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs"
+    "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs",
+    "ai:worker": "node scripts/ai-worker.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

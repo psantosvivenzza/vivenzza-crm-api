@@ -16,7 +16,10 @@ export const INTENTS = Object.freeze([
   'JA_PAGUEI', 'CONTESTA_VALOR', 'QUERO_ATENDENTE', 'DUVIDA_GERAL', 'UNKNOWN',
 ])
 
-const SYSTEM_PROMPT = `Você classifica mensagens de clientes recebidas em uma conversa de cobrança financeira.
+// Exportado — reaproveitado tanto pela chamada direta (abaixo) quanto pelo
+// worker local (jobQueue.js prepara o job com este MESMO prompt, pra nunca
+// haver 2 versões divergentes do guardrail rodando em paralelo).
+export const CLASSIFY_SYSTEM_PROMPT = `Você classifica mensagens de clientes recebidas em uma conversa de cobrança financeira.
 Responda APENAS com um JSON válido no formato:
 {"intent": "<uma das opções>", "confidence": "<alta|media|baixa>", "cliente_irritado": <true|false>}
 
@@ -34,12 +37,24 @@ Use "confidence":"baixa" sempre que a mensagem for ambígua, confusa, tiver múl
 intenções misturadas, ou você não tiver certeza real. Não infle a confiança.
 Não adicione texto fora do JSON. Se não tiver certeza do intent, use "UNKNOWN".`
 
-function validar(json) {
+// Nunca confia em JSON cru do LLM (worker local incluso) — valida contra o
+// enum sempre no BACKEND, nunca no worker.
+export function validarClassificacao(json) {
   if (!json || typeof json !== 'object') return null
   if (!INTENTS.includes(json.intent)) return null
   const confidence = ['alta', 'media', 'baixa'].includes(json.confidence) ? json.confidence : 'baixa'
   const clienteIrritado = json.cliente_irritado === true
   return { intent: json.intent, confidence, clienteIrritado }
+}
+
+// Política de confidence/fallback aplicada sobre um resultado JÁ validado —
+// mesma regra pro caminho direto e pro resultado vindo do worker.
+export function resolverClassificacao(validado) {
+  if (!validado) return { intent: 'UNKNOWN', needsHuman: true, motivo: 'json_invalido_do_llm' }
+  const { intent, confidence, clienteIrritado } = validado
+  if (confidence === 'baixa') return { intent, needsHuman: true, motivo: 'confidence_baixa', confidence, clienteIrritado }
+  if (clienteIrritado) return { intent, needsHuman: true, motivo: 'cliente_irritado', confidence, clienteIrritado }
+  return { intent, needsHuman: false, confidence, clienteIrritado }
 }
 
 export async function classificarIntencao(textoCliente) {
@@ -51,7 +66,7 @@ export async function classificarIntencao(textoCliente) {
 
   try {
     const resposta = await provider.chat({
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: CLASSIFY_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: textoCliente }],
       jsonMode: true,
     })
@@ -61,13 +76,7 @@ export async function classificarIntencao(textoCliente) {
     } catch {
       parsed = null
     }
-    const validado = validar(parsed)
-    if (!validado) return { intent: 'UNKNOWN', needsHuman: true, motivo: 'json_invalido_do_llm' }
-
-    const { intent, confidence, clienteIrritado } = validado
-    if (confidence === 'baixa') return { intent, needsHuman: true, motivo: 'confidence_baixa', confidence, clienteIrritado }
-    if (clienteIrritado) return { intent, needsHuman: true, motivo: 'cliente_irritado', confidence, clienteIrritado }
-    return { intent, needsHuman: false, confidence, clienteIrritado }
+    return resolverClassificacao(validarClassificacao(parsed))
   } catch (err) {
     return { intent: 'UNKNOWN', needsHuman: true, motivo: `erro_classificacao: ${err.message}` }
   }
