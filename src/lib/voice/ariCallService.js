@@ -12,6 +12,20 @@ import { transcrever, iniciarSttWorker, aguardarSttPronto } from './sttBridge.js
 import { sintetizar, iniciarTtsWorker, aguardarTtsPronto } from './ttsBridge.js'
 import { responderTurno, aquecerCerebro } from './voiceBrain.js'
 import { inspecionarWav } from './wavInspector.js'
+import { ENDPOINT_PERMITIDO, APP_ARGS_MARCADOR, classificarCausaSemAtendimento } from './outboundInternalTest.js'
+
+// VOICE AI OUTBOUND INTERNAL MVP: a originação em si (o POST que faz o
+// telefone tocar) acontece num script separado (scripts/voice/
+// trigger-outbound-test.mjs), via REST puro — não precisa da mesma
+// conexão WebSocket. Mas todo canal criado com app=ARI_APP (mesmo antes de
+// StasisStart) já fica associado a essa app pro Asterisk, então ESTE
+// processo (dono da conexão WebSocket já ativa) recebe os eventos de
+// ciclo de vida (Ringing/Up/Destroyed) mesmo de canais originados por
+// outro processo — é assim que a REST action (originate) e o event stream
+// (app subscription) se conectam no ARI. Filtra pelo nome do canal
+// (PJSIP/7001-...) já que é o único destino permitido neste MVP.
+const PREFIXO_CANAL_OUTBOUND = `${ENDPOINT_PERMITIDO}-`
+const canaisOutboundEmStasis = new Set()
 
 // ACHADO (rodada de UX de voz — "chiado" reportado numa ligação real):
 // precisamos poder ouvir EXATAMENTE o áudio que tocou numa chamada real
@@ -131,8 +145,26 @@ export async function iniciarServicoVoz() {
 
   const client = await AriClient.connect(ARI_URL, ARI_USER, ARI_PASSWORD)
 
+  // Eventos de ciclo de vida do canal outbound ANTES de entrar em Stasis
+  // (a originação em si roda noutro processo — ver nota acima do arquivo).
+  // Só loga pra canais que nunca chegaram a StasisStart (senão duplicaria
+  // o que instrumentarCanal() já loga depois de StasisStart).
+  client.on('ChannelStateChange', (event, channel) => {
+    if (!channel.name?.startsWith(PREFIXO_CANAL_OUTBOUND) || canaisOutboundEmStasis.has(channel.id)) return
+    if (channel.state === 'Ring' || channel.state === 'Ringing') console.log(`[voice-ai] OUTBOUND_EVENT=RINGING channel=${channel.id}`)
+    if (channel.state === 'Up') console.log(`[voice-ai] OUTBOUND_EVENT=ANSWERED channel=${channel.id}`)
+  })
+  client.on('ChannelDestroyed', (event, channel) => {
+    if (!channel.name?.startsWith(PREFIXO_CANAL_OUTBOUND) || canaisOutboundEmStasis.has(channel.id)) return
+    const resultado = classificarCausaSemAtendimento(event.cause)
+    console.log(`[voice-ai] OUTBOUND_EVENT=${resultado} channel=${channel.id} cause=${event.cause} cause_txt="${event.cause_txt}" (nunca entrou em conversa — desligado antes de atender)`)
+  })
+
   client.on('StasisStart', async (event, channel) => {
-    console.log(`[voice-ai] StasisStart channel=${channel.id}`)
+    const ehOutbound = Array.isArray(event.args) && event.args.includes(APP_ARGS_MARCADOR)
+    if (ehOutbound) canaisOutboundEmStasis.add(channel.id)
+    console.log(`[voice-ai] StasisStart channel=${channel.id} outbound=${ehOutbound}`)
+    if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=STASIS_START channel=${channel.id}`)
     instrumentarCanal(channel)
 
     try {
@@ -144,10 +176,17 @@ export async function iniciarServicoVoz() {
     }
 
     try {
-      console.log(`[voice-ai] answer() channel=${channel.id}`)
-      await channel.answer()
-      console.log(`[voice-ai] answer() OK channel=${channel.id}`)
+      // Canal outbound originado com `app` já chega ANSWERED em Stasis por
+      // definição do próprio ARI (só entra na app quando atendido) — um
+      // answer() redundante aqui não teria efeito útil e some casos do
+      // Asterisk retornam erro pra isso, então pulamos pro outbound.
+      if (!ehOutbound) {
+        console.log(`[voice-ai] answer() channel=${channel.id}`)
+        await channel.answer()
+        console.log(`[voice-ai] answer() OK channel=${channel.id}`)
+      }
 
+      if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=CONVERSATION_STARTED channel=${channel.id}`)
       await tocarComFallback(channel, async () => {
         if (!saudacaoFixa) throw new Error('saudação pré-gerada indisponível')
         return saudacaoFixa
@@ -171,15 +210,21 @@ export async function iniciarServicoVoz() {
         }
       }
       console.log(`[voice-ai] fim do loop de turnos channel=${channel.id} ultimoRequiresHuman=${ultimoRequiresHuman}`)
+      if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=COMPLETED channel=${channel.id}`)
     } catch (err) {
       console.error(`[voice-ai] EXCEÇÃO não tratada no ciclo da chamada channel=${channel.id}: ${err.message}`)
       console.error(err.stack)
+      if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=FAILED channel=${channel.id} motivo="${err.message}"`)
     } finally {
       try {
         await channel.hangup()
         console.log(`[voice-ai] hangup() explícito OK channel=${channel.id}`)
       } catch (e) {
         console.log(`[voice-ai] hangup() explícito falhou (provavelmente já desligado) channel=${channel.id}: ${e.message}`)
+      }
+      if (ehOutbound) {
+        console.log(`[voice-ai] OUTBOUND_EVENT=HANGUP channel=${channel.id}`)
+        canaisOutboundEmStasis.delete(channel.id)
       }
     }
   })
