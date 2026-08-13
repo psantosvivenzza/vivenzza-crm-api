@@ -44,6 +44,31 @@ test('Voice AI: voiceBrain.js reaproveita o mesmo cérebro do WhatsApp', async (
   })
 })
 
+test('Voice AI: pedido de humano em frase composta SEMPRE vence outro intent (achado real de homologação)', async (t) => {
+  const { responderTurno } = await import('../../../src/lib/voice/voiceBrain.js')
+
+  await t.test('F. "Quero pagar na sexta, quero falar com um atendente." -> QUERO_ATENDENTE, requiresHuman=true', async () => {
+    const r = await responderTurno('Quero pagar na sexta, quero falar com um atendente.')
+    assert.equal(r.intent, 'QUERO_ATENDENTE')
+    assert.equal(r.requiresHuman, true)
+  })
+
+  await t.test('G. "Quero pagar sexta, mas quero falar com um atendente." -> requiresHuman=true', async () => {
+    const r = await responderTurno('Quero pagar sexta, mas quero falar com um atendente.')
+    assert.equal(r.requiresHuman, true)
+  })
+
+  await t.test('H. "Pode me mandar o boleto e me passa para uma pessoa." -> requiresHuman=true', async () => {
+    const r = await responderTurno('Pode me mandar o boleto e me passa para uma pessoa.')
+    assert.equal(r.requiresHuman, true)
+  })
+
+  await t.test('I. "Quero negociar, mas prefiro falar com alguém." -> requiresHuman=true', async () => {
+    const r = await responderTurno('Quero negociar, mas prefiro falar com alguém.')
+    assert.equal(r.requiresHuman, true)
+  })
+})
+
 test('Voice AI: pontes STT/TTS reais (faster-whisper/Piper já instalados)', async (t) => {
   const { sintetizar } = await import('../../../src/lib/voice/ttsBridge.js')
   const { transcrever } = await import('../../../src/lib/voice/sttBridge.js')

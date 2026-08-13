@@ -218,6 +218,7 @@ async function executarTurno(client, channel, numeroTurno) {
     const captureMs = Date.now() - tCapture0
     console.log(`[voice-ai] RECORD_FINISHED turno=${numeroTurno} capture_ms=${captureMs} channel=${channel.id}`)
 
+    const tInspect0 = Date.now()
     const wavGravado = path.join(RECORDINGS_DIR, `${nomeGravacao}.wav`)
     let inspecao
     try {
@@ -226,7 +227,8 @@ async function executarTurno(client, channel, numeroTurno) {
       console.error(`[voice-ai] arquivo de gravação não encontrado/ilegível turno=${numeroTurno}: ${err.message}`)
       return { ok: false, motivo: 'arquivo_gravacao_ausente' }
     }
-    console.log(`[voice-ai] WAV_INSPECAO turno=${numeroTurno} tamanhoBytes=${inspecao.tamanhoBytes} sampleRate=${inspecao.sampleRate} canais=${inspecao.numChannels} bits=${inspecao.bitsPerSample} duracaoMs=${inspecao.duracaoMs} valido=${inspecao.valido}`)
+    const wavInspectMs = Date.now() - tInspect0
+    console.log(`[voice-ai] WAV_INSPECAO turno=${numeroTurno} wav_inspect_ms=${wavInspectMs} tamanhoBytes=${inspecao.tamanhoBytes} sampleRate=${inspecao.sampleRate} canais=${inspecao.numChannels} bits=${inspecao.bitsPerSample} duracaoMs=${inspecao.duracaoMs} valido=${inspecao.valido}`)
     if (!inspecao.valido) {
       console.log(`[voice-ai] gravação inválida turno=${numeroTurno}: ${inspecao.motivo} — nada foi dito ou silêncio total`)
       return { ok: false, motivo: `gravacao_invalida: ${inspecao.motivo}` }
@@ -240,10 +242,22 @@ async function executarTurno(client, channel, numeroTurno) {
     const timeToFeedbackMs = Date.now() - tPosRecord
     console.log(`[voice-ai] time_to_feedback_ms=${timeToFeedbackMs} turno=${numeroTurno}`)
 
+    // ACHADO (PARTE C — instrumentação de latência): antes, STT_ms logava só
+    // o `transcribe_ms` que o Python devolve (tempo interno do
+    // whisper.transcribe(), sem contar load_ms do modelo, cópia do arquivo
+    // pra temp local, spawn do processo Python nem o parse do JSON). Isso
+    // escondia um pedaço real de latência dentro do "gap não explicado"
+    // entre a soma dos estágios e o time_to_real_reply_ms medido. Agora
+    // stt_wall_ms mede o tempo de parede real (Date.now() ao redor da
+    // chamada inteira a transcrever()), e loga junto o breakdown interno
+    // (load/transcribe) pra deixar claro quanto é overhead de bridge vs.
+    // motor de fato.
     console.log(`[voice-ai] STT_STARTED turno=${numeroTurno} channel=${channel.id}`)
     const tStt0 = Date.now()
-    const { texto: transcript, transcribeMs } = await transcrever(wavGravado)
-    console.log(`[voice-ai] STT_FINISHED turno=${numeroTurno} STT_ms=${transcribeMs} caracteres=${transcript.length}`)
+    const { texto: transcript, transcribeMs, loadMs: sttLoadMs } = await transcrever(wavGravado)
+    const sttWallMs = Date.now() - tStt0
+    const sttBridgeOverheadMs = sttWallMs - (transcribeMs ?? 0) - (sttLoadMs ?? 0)
+    console.log(`[voice-ai] STT_FINISHED turno=${numeroTurno} stt_wall_ms=${sttWallMs} stt_load_ms=${sttLoadMs} stt_transcribe_ms=${transcribeMs} stt_bridge_overhead_ms=${sttBridgeOverheadMs} caracteres=${transcript.length}`)
     // HOMOLOGAÇÃO INTERNAL_TEST (voz do próprio operador, não cliente real) —
     // log verboso do transcript só nesta fase de diagnóstico controlado,
     // nunca em produção real (ver nota equivalente em replySuggestion.js).
@@ -261,15 +275,25 @@ async function executarTurno(client, channel, numeroTurno) {
     console.log(`[voice-ai] LLM_FINISHED turno=${numeroTurno} LLM_ms=${llmMs} intent=${resultado.intent} requiresHuman=${resultado.requiresHuman}`)
 
     const nomeResposta = `voice-ai-${channel.id}-resposta${numeroTurno}`
+    let ttsWallMs = 0
+    let ttsLoadMs = null
+    let ttsSynthMs = null
     await tocarComFallback(channel, async () => {
       const t0tts = Date.now()
       const wavResposta = path.join(SOUNDS_DIR, `${nomeResposta}.wav`)
       const resultadoTts = await sintetizar(resultado.respostaTexto, wavResposta)
-      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} TTS_ms=${Date.now() - t0tts} duracaoMs=${resultadoTts.duracaoAudioMs}`)
-      const timeToRealReplyMs = Date.now() - tPosRecord
-      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar)`)
+      ttsWallMs = Date.now() - t0tts
+      ttsLoadMs = resultadoTts.loadMs
+      ttsSynthMs = resultadoTts.synthMs
+      const ttsBridgeOverheadMs = ttsWallMs - (ttsSynthMs ?? 0) - (ttsLoadMs ?? 0)
+      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} tts_load_ms=${ttsLoadMs} tts_synth_ms=${ttsSynthMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} duracaoMs=${resultadoTts.duracaoAudioMs}`)
       return { media: `custom/${nomeResposta}`, duracaoMs: resultadoTts.duracaoAudioMs }
     }, `resposta-turno${numeroTurno}`)
+
+    const timeToRealReplyMs = Date.now() - tPosRecord
+    const somaEstagiosMs = wavInspectMs + sttWallMs + llmMs + ttsWallMs
+    const overheadNaoExplicadoMs = timeToRealReplyMs - somaEstagiosMs
+    console.log(`[voice-ai] LATENCIA_RESUMO turno=${numeroTurno} time_to_feedback_ms=${timeToFeedbackMs} wav_inspect_ms=${wavInspectMs} stt_wall_ms=${sttWallMs} llm_ms=${llmMs} tts_wall_ms=${ttsWallMs} soma_estagios_ms=${somaEstagiosMs} time_to_real_reply_ms=${timeToRealReplyMs} overhead_nao_explicado_ms=${overheadNaoExplicadoMs}`)
 
     return { ok: true, requiresHuman: resultado.requiresHuman, intent: resultado.intent }
   } catch (err) {

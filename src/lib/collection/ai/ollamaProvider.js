@@ -20,12 +20,16 @@ export function getOllamaProvider() {
   if (provider) return provider
 
   provider = {
-    async chat({ systemPrompt, messages, jsonMode = false }) {
+    async chat({ systemPrompt, messages, jsonMode = false, options }) {
       const payload = {
         model: MODEL,
         stream: false,
         messages: [{ role: 'system', content: systemPrompt }, ...messages],
         ...(jsonMode ? { format: 'json' } : {}),
+        // `options` é opt-in (nenhum caller existente passa isso hoje) —
+        // usado pelo voiceBrain.js pra limitar num_predict e reduzir a
+        // cauda de latência de respostas de voz, sem afetar o WhatsApp.
+        ...(options ? { options } : {}),
       }
       const { data } = await client().post('/api/chat', payload)
       return { content: data?.message?.content ?? null, raw: data }
