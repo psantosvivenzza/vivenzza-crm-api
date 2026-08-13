@@ -1,0 +1,5 @@
+; Voice AI MVP — servidor HTTP do Asterisk (necessário pro ARI), só loopback.
+[general]
+enabled = yes
+bindaddr = 127.0.0.1
+bindport = 8088

@@ -1,0 +1,7 @@
+; Voice AI MVP — dialplan mínimo: ramal 7001 discando 8001 entra na Stasis
+; app "vivenzza-voice-ai" (controlada pelo serviço Node via ARI).
+
+[voice-ai-internal]
+exten => 8001,1,NoOp(Voice AI MVP - chamada interna de teste)
+ same => n,Stasis(vivenzza-voice-ai)
+ same => n,Hangup()
