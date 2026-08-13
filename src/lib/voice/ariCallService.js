@@ -7,10 +7,46 @@
 // nunca deve derrubar a ligação sem log).
 import AriClient from 'ari-client'
 import path from 'node:path'
-import { transcrever } from './sttBridge.js'
-import { sintetizar } from './ttsBridge.js'
+import { copyFile, mkdir, rm } from 'node:fs/promises'
+import { transcrever, iniciarSttWorker, aguardarSttPronto } from './sttBridge.js'
+import { sintetizar, iniciarTtsWorker, aguardarTtsPronto } from './ttsBridge.js'
 import { responderTurno, aquecerCerebro } from './voiceBrain.js'
 import { inspecionarWav } from './wavInspector.js'
+
+// ACHADO (rodada de UX de voz — "chiado" reportado numa ligação real):
+// precisamos poder ouvir EXATAMENTE o áudio que tocou numa chamada real
+// específica, fora do telefone, sem precisar regenerar nada (regenerar
+// produz uma síntese DIFERENTE, já que o Piper tem variação estocástica
+// entre gerações). Copia local (fora do \\wsl$, direto no Windows) do
+// áudio de cada chamada — pasta é limpa no início de CADA StasisStart, então
+// sempre reflete só a ligação mais recente.
+const DIAG_ULTIMA_LIGACAO_DIR = process.env.VOICE_LAST_CALL_DIAG_DIR || 'C:\\Users\\msi\\AppData\\Local\\Temp\\vivenzza-last-call'
+
+async function preservarAudioDiagnostico(origemPath, nomeArquivo) {
+  try {
+    await copyFile(origemPath, path.join(DIAG_ULTIMA_LIGACAO_DIR, nomeArquivo))
+  } catch (err) {
+    console.error(`[voice-ai] falha ao preservar áudio de diagnóstico (${nomeArquivo}), não crítico: ${err.message}`)
+  }
+}
+
+// Quanto esperar pelos workers persistentes de STT/TTS carregarem o modelo
+// antes de desistir e seguir só com o fallback de subprocesso avulso (mais
+// lento, mas nunca impede o serviço de subir — degradação visível nos logs,
+// nunca silenciosa).
+const WORKER_READY_TIMEOUT_MS = Number(process.env.VOICE_WORKER_READY_TIMEOUT_MS || 60000)
+
+async function aguardarComTimeout(promessa, timeoutMs, rotulo) {
+  let timeoutId
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`timeout de ${timeoutMs}ms esperando ${rotulo}`)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promessa, timeout])
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
 
 const ARI_URL = process.env.ARI_URL || 'http://127.0.0.1:8088'
 const ARI_USER = process.env.ARI_USER
@@ -41,11 +77,35 @@ export async function iniciarServicoVoz() {
   if (!ARI_USER || !ARI_PASSWORD) throw new Error('ARI_USER/ARI_PASSWORD não configurados (env local, nunca commitados)')
   if (!SOUNDS_DIR || !RECORDINGS_DIR) throw new Error('ASTERISK_SOUNDS_DIR/ASTERISK_RECORDINGS_DIR não configurados')
 
+  // Sobe os workers persistentes de STT/TTS ANTES de qualquer síntese —
+  // assim a pré-geração da saudação/feedback logo abaixo já se beneficia do
+  // modelo já carregado (load_ms=0), em vez de pagar esse custo de novo.
+  // Se um worker não ficar pronto a tempo, o serviço SEGUE (nunca trava a
+  // subida por isso) — sttBridge/ttsBridge caem pro fallback de
+  // subprocesso avulso automaticamente, sempre logando a degradação.
+  let sttReady = false
+  let ttsReady = false
+  try {
+    iniciarSttWorker()
+    await aguardarComTimeout(aguardarSttPronto(), WORKER_READY_TIMEOUT_MS, 'STT_WORKER pronto')
+    sttReady = true
+  } catch (err) {
+    console.error(`[voice-ai] STT_WORKER não ficou pronto (${err.message}) — turnos vão usar o fallback de subprocesso avulso (mais lento)`)
+  }
+
+  try {
+    iniciarTtsWorker()
+    await aguardarComTimeout(aguardarTtsPronto(), WORKER_READY_TIMEOUT_MS, 'TTS_WORKER pronto')
+    ttsReady = true
+  } catch (err) {
+    console.error(`[voice-ai] TTS_WORKER não ficou pronto (${err.message}) — turnos vão usar o fallback de subprocesso avulso (mais lento)`)
+  }
+
   try {
     const t0 = Date.now()
     const resultado = await sintetizar(SAUDACAO, path.join(SOUNDS_DIR, `${NOME_SAUDACAO_FIXA}.wav`))
     saudacaoFixa = { media: `custom/${NOME_SAUDACAO_FIXA}`, duracaoMs: resultado.duracaoAudioMs }
-    console.log(`[voice-ai] saudação pré-gerada na subida do serviço, TTS_ms=${Date.now() - t0} duracaoMs=${resultado.duracaoAudioMs}`)
+    console.log(`[voice-ai] saudação pré-gerada na subida do serviço, TTS_ms=${Date.now() - t0} duracaoMs=${resultado.duracaoAudioMs} via_worker=${resultado.viaWorker}`)
   } catch (err) {
     console.error(`[voice-ai] falha ao pré-gerar saudação (vai cair pro fallback tone:ring em toda chamada): ${err.message}`)
   }
@@ -54,14 +114,16 @@ export async function iniciarServicoVoz() {
     const t0 = Date.now()
     const resultado = await sintetizar(FEEDBACK_IMEDIATO, path.join(SOUNDS_DIR, `${NOME_FEEDBACK_FIXO}.wav`))
     feedbackFixo = { media: `custom/${NOME_FEEDBACK_FIXO}`, duracaoMs: resultado.duracaoAudioMs }
-    console.log(`[voice-ai] feedback imediato pré-gerado na subida do serviço, TTS_ms=${Date.now() - t0} duracaoMs=${resultado.duracaoAudioMs}`)
+    console.log(`[voice-ai] feedback imediato pré-gerado na subida do serviço, TTS_ms=${Date.now() - t0} duracaoMs=${resultado.duracaoAudioMs} via_worker=${resultado.viaWorker}`)
   } catch (err) {
     console.error(`[voice-ai] falha ao pré-gerar feedback imediato (turno seguirá sem ele, sem travar): ${err.message}`)
   }
 
+  let ollamaReady = false
   try {
     const t0 = Date.now()
     await aquecerCerebro()
+    ollamaReady = true
     console.log(`[voice-ai] cérebro (Ollama) aquecido na subida do serviço, warmup_ms=${Date.now() - t0}`)
   } catch (err) {
     console.error(`[voice-ai] falha ao aquecer o cérebro (1ª chamada real pode ficar mais lenta): ${err.message}`)
@@ -74,6 +136,14 @@ export async function iniciarServicoVoz() {
     instrumentarCanal(channel)
 
     try {
+      await rm(DIAG_ULTIMA_LIGACAO_DIR, { recursive: true, force: true }).catch(() => {})
+      await mkdir(DIAG_ULTIMA_LIGACAO_DIR, { recursive: true })
+      console.log(`[voice-ai] pasta de diagnóstico da última ligação limpa: ${DIAG_ULTIMA_LIGACAO_DIR}`)
+    } catch (err) {
+      console.error(`[voice-ai] falha preparando pasta de diagnóstico, não crítico: ${err.message}`)
+    }
+
+    try {
       console.log(`[voice-ai] answer() channel=${channel.id}`)
       await channel.answer()
       console.log(`[voice-ai] answer() OK channel=${channel.id}`)
@@ -82,6 +152,8 @@ export async function iniciarServicoVoz() {
         if (!saudacaoFixa) throw new Error('saudação pré-gerada indisponível')
         return saudacaoFixa
       }, 'saudação')
+      if (saudacaoFixa) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_SAUDACAO_FIXA}.wav`), '01-saudacao.wav')
+      if (feedbackFixo) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_FEEDBACK_FIXO}.wav`), '02-feedback.wav')
 
       let turno = 1
       let ultimoRequiresHuman = false
@@ -114,6 +186,7 @@ export async function iniciarServicoVoz() {
 
   client.start(ARI_APP)
   console.log(`[voice-ai] conectado ao ARI (${ARI_URL}), app="${ARI_APP}", aguardando chamadas...`)
+  console.log(`[voice-ai] VOICE_READY ari=true ollama=${ollamaReady} stt_worker=${sttReady} tts_worker=${ttsReady}`)
   return client
 }
 
@@ -254,10 +327,10 @@ async function executarTurno(client, channel, numeroTurno) {
     // motor de fato.
     console.log(`[voice-ai] STT_STARTED turno=${numeroTurno} channel=${channel.id}`)
     const tStt0 = Date.now()
-    const { texto: transcript, transcribeMs, loadMs: sttLoadMs } = await transcrever(wavGravado)
+    const { texto: transcript, transcribeMs, loadMs: sttLoadMs, requestMs: sttRequestMs, viaWorker: sttViaWorker } = await transcrever(wavGravado)
     const sttWallMs = Date.now() - tStt0
     const sttBridgeOverheadMs = sttWallMs - (transcribeMs ?? 0) - (sttLoadMs ?? 0)
-    console.log(`[voice-ai] STT_FINISHED turno=${numeroTurno} stt_wall_ms=${sttWallMs} stt_load_ms=${sttLoadMs} stt_transcribe_ms=${transcribeMs} stt_bridge_overhead_ms=${sttBridgeOverheadMs} caracteres=${transcript.length}`)
+    console.log(`[voice-ai] STT_FINISHED turno=${numeroTurno} stt_wall_ms=${sttWallMs} STT_request_ms=${sttRequestMs} STT_transcribe_ms=${transcribeMs} stt_load_ms=${sttLoadMs} stt_bridge_overhead_ms=${sttBridgeOverheadMs} via_worker=${sttViaWorker} caracteres=${transcript.length}`)
     // HOMOLOGAÇÃO INTERNAL_TEST (voz do próprio operador, não cliente real) —
     // log verboso do transcript só nesta fase de diagnóstico controlado,
     // nunca em produção real (ver nota equivalente em replySuggestion.js).
@@ -299,8 +372,14 @@ async function executarTurno(client, channel, numeroTurno) {
       ttsSynthMs = resultadoTts.synthMs
       timeToRealReplyMs = Date.now() - tPosRecord
       const ttsBridgeOverheadMs = ttsWallMs - (ttsSynthMs ?? 0) - (ttsLoadMs ?? 0)
-      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} tts_load_ms=${ttsLoadMs} tts_synth_ms=${ttsSynthMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} duracaoMs=${resultadoTts.duracaoAudioMs}`)
-      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar — NÃO inclui a duração do playback)`)
+      // audio_preroll_ms é só silêncio ANEXADO ao áudio já pronto (custo de
+      // escrita ~0ms, incluído no synth_ms acima) — NÃO é tempo de espera
+      // nem entra separadamente em nenhum cálculo de latência de
+      // processamento; só alonga a DURAÇÃO do playback. Logado à parte
+      // para ficar auditável, por pedido explícito desta rodada de UX.
+      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} TTS_request_ms=${resultadoTts.requestMs} TTS_synth_ms=${ttsSynthMs} tts_load_ms=${ttsLoadMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} audio_preroll_ms=${resultadoTts.audioPrerollMs} via_worker=${resultadoTts.viaWorker} duracaoMs=${resultadoTts.duracaoAudioMs}`)
+      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar — NÃO inclui a duração do playback nem o preroll)`)
+      await preservarAudioDiagnostico(wavResposta, `0${2 + numeroTurno}-resposta-turno${numeroTurno}.wav`)
       return { media: `custom/${nomeResposta}`, duracaoMs: resultadoTts.duracaoAudioMs }
     }, `resposta-turno${numeroTurno}`)
 
