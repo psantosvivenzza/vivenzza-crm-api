@@ -134,3 +134,85 @@ VOICE_TTS_PREROLL_MS=200
 # opcional — pasta de diagnóstico da última ligação (default já mostrado acima)
 VOICE_LAST_CALL_DIAG_DIR=C:\Users\<usuário>\AppData\Local\Temp\vivenzza-last-call
 ```
+
+## Outbound interno — homologado (PR #19)
+
+Além de receber ligação (8001), o serviço consegue ORIGINAR uma ligação de
+teste pro ramal interno: `npm run voice:outbound:test` (dry-run por
+padrão; `--confirm` pra originar de verdade). Único destino permitido é
+`PJSIP/7001` — fail-closed em código (`outboundInternalTest.js`), sem
+parâmetro de destino em lugar nenhum do fluxo. Homologado numa ligação
+real: origem → toque → atendimento → saudação Jeff → STT → intent → TTS →
+encerramento limpo.
+
+## VOICE EXTERNAL PILOT READINESS (preparação, sem chamada externa ainda)
+
+Nenhuma chamada para número externo acontece nesta fase — só a
+arquitetura de guardrails, testada sem tocar telefone nenhum:
+
+- `destinoResolver.js` — abstrai `INTERNAL` (resolve pro mesmo
+  `PJSIP/7001` já homologado) de `EXTERNAL` (sempre falha fechado nesta
+  rodada — não há trunk/adapter configurado; o único jeito de mudar isso é
+  editar a constante `TRUNK_EXTERNO_CONFIGURADO` DEPOIS que um trunk real
+  existir).
+- `externalPilotGuardrails.js` — `avaliarAutorizacaoChamadaExterna()`
+  combina TODOS os guards (flag `voice_external_enabled`, allowlist,
+  idempotência, chamada duplicada ativa, janela de horário — fail-closed
+  sem política configurada, limite diário por telefone) e só autoriza se
+  TODOS passarem. Sem trunk configurado, o primeiro guard já bloqueia
+  sempre, então nenhuma combinação de flags "engana" o sistema pra ligar
+  de verdade nesta fase.
+- `voiceCallResult.js` — vocabulário de RESULTADO TÉCNICO (canal: tocou?
+  atendeu? caiu?) separado de RESULTADO CONVERSACIONAL (intent final —
+  reexporta `INTENTS` do `intentClassifier.js` compartilhado com o
+  WhatsApp, nunca duplica a taxonomia).
+- `collectionContextFixture.js` — fixture SINTÉTICA da interface que uma
+  integração real com o ERP/CRM vai precisar preencher um dia
+  (contaId/pessoaId/tituloId/telefone/valor/vencimento/régua). Nenhuma
+  busca real, nenhum cron.
+- `promiseCandidateDetector.js` — se o cliente disser algo como "pago
+  sexta", vira `promise_candidate` (rótulo pra revisão humana) — NUNCA
+  cria promessa real, NUNCA baixa título, NUNCA muta financeiro.
+- `supabase/migrations/20260101000033_voice_calls_audit.sql` — schema de
+  auditoria (`call_id`, `direction`, `destination_masked`,
+  `idempotency_key`, resultado técnico/conversacional, timestamps, causa
+  de encerramento). **Criada mas NÃO aplicada em produção nesta rodada**
+  (nem local) — fica pra revisão antes de qualquer chamada externa real.
+
+### Estratégia de handoff pro atendente — decisão pendente
+
+`QUERO_ATENDENTE`/`requires_human=true` continua preservado e obrigatório
+(regra determinística da PARTE B, PR #17). O que ainda falta decidir,
+ANTES de qualquer cliente real, é o que acontece tecnicamente quando isso
+dispara numa ligação externa — três caminhos possíveis, nenhum implementado
+ainda porque não existe ramal humano disponível pra transferir:
+
+1. **Transferência real** (`channel.continueInDialplan`/bridge pra um
+   ramal humano) — exige um ramal humano real configurado no Asterisk.
+2. **Callback** — a IA encerra educadamente e registra um pedido de
+   retorno humano (via `voice_calls`), sem tentar transferir ao vivo.
+3. **Tarefa pro operador** — cria uma tarefa/alerta (reaproveitando o
+   endpoint de alerta WhatsApp já existente) sem nenhuma ação na própria
+   ligação além de encerrar.
+
+### O que falta pra UMA chamada externa de teste (não contratado nesta rodada)
+
+1. **Trunk SIP** de algum provedor (ex: opções self-hosted/gratuitas
+   costumam não existir pra SIP trunk real — normalmente é um serviço
+   pago por minuto/número; decisão de fornecedor fica pra quando formos
+   avançar, respeitando a preferência por free/self-hosted onde existir
+   alternativa real).
+2. **Um número de teste NOSSO** (não do cliente) pra ligar — celular ou
+   fixo próprio, cadastrado na allowlist.
+3. Configuração do trunk no `pjsip.conf` (novo endpoint/registration, tudo
+   isolado do `PJSIP/7001` interno que já funciona — não deve alterar a
+   config interna existente).
+4. Decisão de estratégia de handoff (seção acima) — pelo menos a opção 2
+   ou 3 (callback/tarefa) dá pra implementar sem depender de ramal humano
+   real.
+5. Ativar `voice_external_enabled=true` + preencher a allowlist com o
+   número de teste — só depois disso o guard deixa de bloquear.
+6. Definir a política de horário permitido (hoje fail-closed, sem
+   política = nunca autoriza).
+7. Aplicar a migration `voice_calls` (revisão + `apply_migration` em
+   ambiente controlado).
