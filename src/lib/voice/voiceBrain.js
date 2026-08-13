@@ -20,6 +20,20 @@ import { classificarIntencao } from '../collection/ai/intentClassifier.js'
 import { validarGeracao, INTENTS_SEMPRE_HUMANO } from '../collection/ai/replySuggestion.js'
 import { getAIProvider } from '../collection/ai/aiProvider.js'
 
+// Regra determinística de precedência (NÃO delegada só à LLM/classificador):
+// se o cliente mencionar explicitamente que quer falar com uma pessoa em
+// QUALQUER parte da frase — mesmo combinada com outro pedido no mesmo
+// turno, ex.: "Quero pagar na sexta, quero falar com um atendente." —
+// isso sempre vence qualquer outro intent classificado. Achado real de
+// homologação: o classificador priorizou PEDIDO_NOVA_DATA nesse caso e
+// perdeu o pedido de humano. Regex simples e auditável, sem depender do
+// LLM interpretar corretamente a ordem/peso das cláusulas.
+const PEDIDO_ATENDENTE_HUMANO_REGEX = /\b(atendente|humano|uma pessoa|alguem|algu[ée]m|supervisor|gerente)\b/i
+
+function mencionaPedidoDeHumano(textoTranscrito) {
+  return PEDIDO_ATENDENTE_HUMANO_REGEX.test(textoTranscrito)
+}
+
 const VOICE_GERACAO_SYSTEM_PROMPT = `Você é um assistente de voz de cobrança da Vivenzza, respondendo por telefone em português do Brasil.
 Responda em NO MÁXIMO 2 frases curtas, direto ao ponto, cordial — está sendo ouvido, não lido.
 NUNCA prometa desconto, parcelamento ou condição especial.
@@ -27,10 +41,24 @@ NUNCA confirme pagamento sem confirmação explícita.
 Responda APENAS com um JSON válido: {"suggested_reply": "<resposta curta>"}
 Não adicione texto fora do JSON.`
 
+// PARTE E (endurecimento pós-merge, otimização de latência sem trocar
+// modelo): teto de tokens de saída só pro caminho de voz — a resposta já é
+// pedida em no máximo 2 frases curtas (raramente mais que ~60 tokens em
+// JSON), então este teto nunca deveria truncar uma resposta normal; ele
+// só protege contra a cauda (uma geração anormalmente longa) sem mudar o
+// comportamento típico. Não é aplicado ao WhatsApp (options é opt-in em
+// ollamaProvider.js).
+const VOICE_NUM_PREDICT_MAX = Number(process.env.VOICE_LLM_NUM_PREDICT_MAX || 150)
+
 async function gerarRespostaVoz(textoTranscrito, intent) {
   const provider = getAIProvider()
   const systemPrompt = `${VOICE_GERACAO_SYSTEM_PROMPT}\nIntenção já classificada: ${intent}.`
-  const resposta = await provider.chat({ systemPrompt, messages: [{ role: 'user', content: textoTranscrito }], jsonMode: true })
+  const resposta = await provider.chat({
+    systemPrompt,
+    messages: [{ role: 'user', content: textoTranscrito }],
+    jsonMode: true,
+    options: { num_predict: VOICE_NUM_PREDICT_MAX },
+  })
   let parsed = null
   try {
     parsed = JSON.parse(resposta.content ?? '')
@@ -47,12 +75,21 @@ export async function responderTurno(textoTranscrito) {
   // essa camada (ela vive em replySuggestion.js/montarSugestaoFinal), então
   // reaplica aqui pra não perder o guardrail só porque a voz não persiste
   // suggestion.
-  const requiresHuman = classificacao.needsHuman || INTENTS_SEMPRE_HUMANO.has(classificacao.intent)
+  let intent = classificacao.intent
+  let requiresHuman = classificacao.needsHuman || INTENTS_SEMPRE_HUMANO.has(classificacao.intent)
 
-  const geracao = await gerarRespostaVoz(textoTranscrito, classificacao.intent)
+  // Override determinístico: pedido explícito de humano vence qualquer
+  // outro intent, mesmo em frase composta (ex.: "Quero pagar na sexta,
+  // quero falar com um atendente." não pode virar PEDIDO_NOVA_DATA).
+  if (mencionaPedidoDeHumano(textoTranscrito)) {
+    intent = 'QUERO_ATENDENTE'
+    requiresHuman = true
+  }
+
+  const geracao = await gerarRespostaVoz(textoTranscrito, intent)
 
   return {
-    intent: classificacao.intent,
+    intent,
     confidence: classificacao.confidence,
     requiresHuman,
     respostaTexto: geracao.suggestedReply || 'Desculpe, não consegui gerar uma resposta.',

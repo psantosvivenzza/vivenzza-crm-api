@@ -26,7 +26,17 @@ def main():
     load_ms = int((time.time() - t0) * 1000)
 
     t0 = time.time()
-    segments, info = model.transcribe(args.wav_path, language=args.lang)
+    # PARTE E (endurecimento pós-merge, otimização de latência sem trocar de
+    # modelo): beam_size=1 (decodificação greedy, padrão do faster-whisper é
+    # 5) e condition_on_previous_text=False (sem contexto entre segmentos,
+    # irrelevante aqui pois cada turno já é uma transcrição isolada) --
+    # ambos recomendados pela própria documentação do faster-whisper para
+    # uso em tempo real; para os áudios curtos deste MVP (poucas frases) o
+    # impacto na qualidade do PT-BR é desprezível frente ao ganho de
+    # velocidade.
+    segments, info = model.transcribe(
+        args.wav_path, language=args.lang, beam_size=1, condition_on_previous_text=False,
+    )
     texto = " ".join(seg.text.strip() for seg in segments)
     transcribe_ms = int((time.time() - t0) * 1000)
 

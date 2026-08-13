@@ -6,3 +6,6 @@ node_modules/
 # docs/cobranca-ai/LOCAL_DEVELOPMENT.md. Nunca commitar dados/binários locais.
 .localdev/
 supabase/.temp/
+
+# Amostras de áudio de benchmark de voz (só pra ouvir localmente, nunca commitar binário)
+scripts/voice/benchmark-output/
