@@ -274,10 +274,22 @@ async function executarTurno(client, channel, numeroTurno) {
     const llmMs = Date.now() - tLlm0
     console.log(`[voice-ai] LLM_FINISHED turno=${numeroTurno} LLM_ms=${llmMs} intent=${resultado.intent} requiresHuman=${resultado.requiresHuman}`)
 
+    // ACHADO (correção de medição, mesma rodada de PARTE C): a 1ª versão
+    // desta instrumentação calculava time_to_real_reply_ms DEPOIS do
+    // `await tocarComFallback(...)` inteiro — mas tocarComFallback não só
+    // gera o áudio, também DISPARA o playback e ESPERA a duração inteira
+    // dele terminar (esperarPlaybackFinalizar). Isso inflava o número em
+    // ~8.5s (a duração do próprio áudio de resposta) numa chamada real,
+    // aparecendo como "overhead não explicado" que na verdade era tempo de
+    // playback, não de processamento. Fix: capturar time_to_real_reply_ms
+    // no instante em que a resposta fica PRONTA (fim do TTS), de dentro do
+    // callback `gerarMedia`, antes do play() ser sequer chamado — mesmo
+    // ponto de medição que a versão original (pré-instrumentação) usava.
     const nomeResposta = `voice-ai-${channel.id}-resposta${numeroTurno}`
     let ttsWallMs = 0
     let ttsLoadMs = null
     let ttsSynthMs = null
+    let timeToRealReplyMs = null
     await tocarComFallback(channel, async () => {
       const t0tts = Date.now()
       const wavResposta = path.join(SOUNDS_DIR, `${nomeResposta}.wav`)
@@ -285,12 +297,13 @@ async function executarTurno(client, channel, numeroTurno) {
       ttsWallMs = Date.now() - t0tts
       ttsLoadMs = resultadoTts.loadMs
       ttsSynthMs = resultadoTts.synthMs
+      timeToRealReplyMs = Date.now() - tPosRecord
       const ttsBridgeOverheadMs = ttsWallMs - (ttsSynthMs ?? 0) - (ttsLoadMs ?? 0)
       console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} tts_load_ms=${ttsLoadMs} tts_synth_ms=${ttsSynthMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} duracaoMs=${resultadoTts.duracaoAudioMs}`)
+      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar — NÃO inclui a duração do playback)`)
       return { media: `custom/${nomeResposta}`, duracaoMs: resultadoTts.duracaoAudioMs }
     }, `resposta-turno${numeroTurno}`)
 
-    const timeToRealReplyMs = Date.now() - tPosRecord
     const somaEstagiosMs = wavInspectMs + sttWallMs + llmMs + ttsWallMs
     const overheadNaoExplicadoMs = timeToRealReplyMs - somaEstagiosMs
     console.log(`[voice-ai] LATENCIA_RESUMO turno=${numeroTurno} time_to_feedback_ms=${timeToFeedbackMs} wav_inspect_ms=${wavInspectMs} stt_wall_ms=${sttWallMs} llm_ms=${llmMs} tts_wall_ms=${ttsWallMs} soma_estagios_ms=${somaEstagiosMs} time_to_real_reply_ms=${timeToRealReplyMs} overhead_nao_explicado_ms=${overheadNaoExplicadoMs}`)
