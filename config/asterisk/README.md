@@ -5,57 +5,78 @@ segredos) para rodar um Asterisk local mínimo, só pra ligação interna de
 teste (ramal 7001 → 8001 → IA). Nada aqui expõe o Asterisk publicamente,
 nada configura trunk PSTN/SIP externo.
 
-## Bloqueio atual (ação humana necessária)
+**Status: homologado com sucesso em ambiente WSL2 + Asterisk 22.5.2 —
+StasisStart → answer → captura de fala → STT → IA (mesmo cérebro do
+WhatsApp) → TTS → playback → 2 turnos completos ouvidos de verdade pelo
+operador, canal encerrado por hangup() explícito do próprio serviço.**
 
-Nesta sessão, nem **WSL2** nem **Docker Desktop** estavam disponíveis na
-máquina — e o Asterisk é um daemon Linux, não roda nativamente no Windows.
-Sem um desses dois, não é possível rodar o Asterisk e portanto não é
-possível originar uma ligação real.
+## Setup usado na homologação (WSL2 + Ubuntu + Asterisk nativo, não Docker)
 
-**Para desbloquear, escolha UMA das opções abaixo (ação manual, fora do
-Claude Code):**
+1. `wsl --install` (PowerShell administrador) + reboot.
+2. `sudo apt update && sudo apt install -y asterisk`.
+3. Copiar os arquivos `.example` deste diretório para os caminhos reais
+   (`/etc/asterisk/pjsip.conf`, `extensions.conf`, `ari.conf`, `http.conf`),
+   gerando senha própria (nunca reusar o placeholder).
+4. `sudo systemctl restart asterisk` (ou `core reload` via CLI depois de
+   mudar config).
 
-### Opção A — WSL2 (recomendado)
-1. Abrir PowerShell **como administrador**.
-2. Rodar: `wsl --install`
-3. Reiniciar o computador quando solicitado.
-4. Depois do reboot, abrir o Ubuntu (ou a distro instalada) e rodar:
-   ```
-   sudo apt update && sudo apt install -y asterisk
-   ```
-5. Copiar os arquivos `.example` deste diretório para os caminhos reais do
-   Asterisk (tipicamente `/etc/asterisk/pjsip.conf`,
-   `/etc/asterisk/extensions.conf`, `/etc/asterisk/ari.conf`,
-   `/etc/asterisk/http.conf`), gerando suas próprias senhas.
-6. `sudo systemctl restart asterisk`
+## ACHADO CRÍTICO — diretório real de sons "custom"
 
-### Opção B — Docker Desktop
-1. Instalar o Docker Desktop for Windows (usa WSL2 por baixo, mas o
-   instalador cuida disso automaticamente na maioria dos casos).
-2. Rodar um container Asterisk (ex: `andrius/asterisk` ou equivalente),
-   montando os arquivos deste diretório como config.
+`ASTERISK_SOUNDS_DIR` **NÃO é** `/var/lib/asterisk/sounds/custom` (esse
+caminho existe, é gravável, mas o Asterisk NUNCA procura arquivos lá para
+`sound:custom/...`). O Asterisk resolve `sound:custom/X` relativo a
+`astdatadir` (`/usr/share/asterisk`, não `astvarlibdir`), e
+`/usr/share/asterisk/sounds/custom` é um **symlink**:
 
-## Depois do Asterisk rodando
+```
+/usr/share/asterisk/sounds/custom -> ../../../local/share/asterisk/sounds
+```
 
-1. Configurar as env locais (nunca commitadas — ver `.env.voice.example` na
-   raiz do backend):
-   - `ARI_URL` (ex: `http://127.0.0.1:8088`)
-   - `ARI_USER` / `ARI_PASSWORD` (as mesmas de `ari.conf`)
-   - `ARI_APP=vivenzza-voice-ai`
-   - `ASTERISK_SOUNDS_DIR` (ex: `/var/lib/asterisk/sounds/custom`)
-   - `ASTERISK_RECORDINGS_DIR` (ex: `/var/spool/asterisk/recording`)
-   - `VOICE_PYTHON_BIN`, `VOICE_STT_SCRIPT_PATH`, `VOICE_TTS_SCRIPT_PATH`,
-     `VOICE_TTS_MODEL_PATH` (ver scripts/voice/README.md)
-2. `npm run voice:service`
-3. Registrar um softphone (ex: Zoiper, Linphone) no ramal `7001` (usuário
-   `voice-test-7001`, senha que você gerou) apontando pro Asterisk local.
-4. Discar `8001` a partir do softphone.
-5. Ouvir a saudação e conversar com a IA por até `VOICE_MAX_TURNOS` turnos.
+Ou seja, o destino REAL onde gravar os `.wav`/`.ulaw` gerados pela IA é:
 
-## O que NÃO foi testado nesta sessão
+```
+ASTERISK_SOUNDS_DIR=/usr/local/share/asterisk/sounds
+```
 
-A integração ARI em si (`src/lib/voice/ariCallService.js`) nunca rodou
-contra um Asterisk real — está escrita seguindo os padrões documentados da
-API ARI, mas não homologada. As peças de STT/cérebro/TTS que ela orquestra
-FORAM testadas de ponta a ponta fora do contexto de chamada telefônica (ver
-`scripts/voice/README.md`).
+(a URI `sound:custom/X` continua sendo usada no código — ela resolve
+corretamente pelo symlink, só o caminho de ESCRITA precisava apontar pro
+alvo real). Escrever no lugar errado produz exatamente este sintoma
+enganoso: nenhum erro de permissão, arquivo existe no disco, mas o
+Asterisk loga `File custom/X does not exist in any format` — porque ele
+está procurando num diretório completamente diferente.
+
+## ACHADO — formato de áudio
+
+O parser de WAV do Asterisk é restrito e rejeitava a saída do Piper mesmo
+em PCM 8kHz/16-bit/mono válido (mesmo sintoma: "does not exist in any
+format"). Fix: `tts_synthesize.py` grava também uma cópia `.ulaw` bruta
+(G.711 mu-law, sem container) ao lado do `.wav` — o Asterisk sempre
+reconhece `.ulaw` nativamente.
+
+## ACHADO — latência
+
+`PlaybackFinished`/`RecordingFinished` via WebSocket ARI eram pouco
+confiáveis neste ambiente (nem sempre chegavam a tempo). O serviço usa a
+duração conhecida do áudio gerado como cronômetro determinístico em vez de
+depender só do evento. Uma frase de feedback curta ("Só um instante
+enquanto verifico isso.") toca imediatamente após a captura, sem esperar
+STT/LLM/TTS — o processamento real roda "por baixo" dela.
+
+## Env locais necessárias (nunca commitadas)
+
+- `ARI_URL` (ex: `http://127.0.0.1:8088`)
+- `ARI_USER` / `ARI_PASSWORD` (as mesmas de `ari.conf`)
+- `ARI_APP=vivenzza-voice-ai`
+- `ASTERISK_SOUNDS_DIR=/usr/local/share/asterisk/sounds` (ver achado acima)
+- `ASTERISK_RECORDINGS_DIR=/var/spool/asterisk/recording` (criar com
+  `sudo mkdir -p` se não existir — não vem criado por padrão)
+- `VOICE_PYTHON_BIN`, `VOICE_STT_SCRIPT_PATH`, `VOICE_TTS_SCRIPT_PATH`,
+  `VOICE_TTS_MODEL_PATH` (ver scripts/voice/README.md)
+
+## Fluxo
+
+1. `npm run voice:service` — pré-gera saudação + feedback, aquece o Ollama.
+2. Registrar um softphone (ex: MicroSIP) no ramal `7001`.
+3. Discar `8001`.
+4. Ouvir a saudação, falar depois do bipe, ouvir a resposta da IA — até
+   `VOICE_MAX_TURNOS` turnos, ou até `requires_human=true`.

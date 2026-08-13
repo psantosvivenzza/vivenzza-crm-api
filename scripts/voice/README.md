@@ -16,11 +16,21 @@ Resultado real: `intent=PEDIDO_NOVA_DATA`, `requires_human=false`, resposta
 gerada coerente ("Compreendemos sua situação. Se puder, por favor, nos
 informe a data exata de pagamento...").
 
-## O que NÃO foi testado
+## Ligação real — homologada com sucesso
 
-A chamada telefônica real (Asterisk + PJSIP + ARI) — sem WSL2/Docker
-disponíveis nesta máquina nesta sessão, não havia como rodar o Asterisk.
-Ver `config/asterisk/README.md` para a ação manual necessária.
+Depois que WSL2 + Asterisk ficaram disponíveis, a ligação interna completa
+foi testada de verdade: ramal 7001 (MicroSIP) → 8001 → Stasis → saudação
+ouvida → fala capturada → STT → IA → TTS → resposta ouvida → 2 turnos
+completos → hangup limpo pelo próprio serviço. Ver
+`config/asterisk/README.md` para os 3 achados que precisaram de correção
+no caminho (diretório real de sons via symlink, formato de áudio ulaw,
+latência/feedback imediato) — nenhum deles bloqueia mais nada, documentados
+lá para quem for reproduzir o setup.
+
+`diag-service.mjs` é o harness de diagnóstico isolado (só `tone:ring`, sem
+TTS/STT/IA) que ajudou a provar que a camada SIP/ARI/Asterisk estava
+saudável antes de investigar o resto — útil pra qualquer futuro
+troubleshooting de infraestrutura sem misturar com bugs de aplicação.
 
 ## Dependências Python
 

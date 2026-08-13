@@ -70,6 +70,7 @@ test('Voice AI: pontes STT/TTS reais (faster-whisper/Piper já instalados)', asy
     assert.equal(resultadoStt.idioma, 'pt')
 
     fs.unlinkSync(wavTeste)
+    fs.unlinkSync(wavTeste.replace(/\.wav$/, '.ulaw')) // sintetizar() agora também grava um .ulaw sibling (ver ttsBridge.js)
   })
 })
 
@@ -83,7 +84,8 @@ test('Voice AI: prova estática — sem Evolution, sem SQL arbitrário, sem muta
   }
 
   const brain = fs.readFileSync(path.join(SRC, 'lib/voice/voiceBrain.js'), 'utf8')
-  assert.ok(brain.includes('CONTEXTO_INTERNAL_TEST'), 'voiceBrain.js deveria usar um contexto de homologação, nunca conta real')
+  assert.equal(brain.includes('collectionContext'), false, 'voiceBrain.js nunca deveria carregar contexto de conta financeira real')
+  assert.equal(/contas_financeiras_id/.test(brain), false, 'voiceBrain.js nunca deveria referenciar um id de conta real')
 
   const service = fs.readFileSync(path.join(SRC, 'lib/voice/ariCallService.js'), 'utf8')
   assert.equal(/console\.log\([^)]*textoTranscrito\)/.test(service), false, 'nunca logar o texto transcrito bruto (pode conter fala do interlocutor)')
