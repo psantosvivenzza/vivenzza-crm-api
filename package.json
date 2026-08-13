@@ -13,7 +13,8 @@
     "test:collection": "node scripts/run-collection-tests.mjs",
     "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs",
     "ai:worker": "node scripts/ai-worker.mjs",
-    "voice:service": "node scripts/voice/run-voice-service.mjs"
+    "voice:service": "node scripts/voice/run-voice-service.mjs",
+    "voice:outbound:test": "node scripts/voice/trigger-outbound-test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
