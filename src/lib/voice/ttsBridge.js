@@ -32,6 +32,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 let worker = null
 
+// Calibragem provisória de UX de voz (validada por amostras ouvidas antes
+// de aplicar): length_scale=1.10 deixa a fala ~10% mais devagar (só
+// cadência, nunca pitch — parâmetro nativo do Piper), preroll_ms=200
+// evita que a 1ª sílaba comece "em cima" do início do playback. Configurável
+// via env sem precisar mexer em código se a calibragem mudar depois.
+function argsCalibragemVoz() {
+  const args = []
+  if (process.env.VOICE_TTS_LENGTH_SCALE) args.push('--length-scale', process.env.VOICE_TTS_LENGTH_SCALE)
+  if (process.env.VOICE_TTS_PREROLL_MS) args.push('--preroll-ms', process.env.VOICE_TTS_PREROLL_MS)
+  return args
+}
+
 export function iniciarTtsWorker() {
   if (worker) return worker
   const pythonBin = process.env.VOICE_PYTHON_BIN || 'python'
@@ -39,7 +51,7 @@ export function iniciarTtsWorker() {
     || path.join(__dirname, '..', '..', '..', 'scripts', 'voice', 'tts_worker.py')
   const modelo = process.env.VOICE_TTS_MODEL_PATH
   if (!modelo) throw new Error('VOICE_TTS_MODEL_PATH não configurado (necessário pro worker de TTS)')
-  worker = criarWorkerPersistente({ label: 'TTS', pythonBin, scriptPath, args: ['--model', modelo] })
+  worker = criarWorkerPersistente({ label: 'TTS', pythonBin, scriptPath, args: ['--model', modelo, ...argsCalibragemVoz()] })
   return worker
 }
 
@@ -55,7 +67,7 @@ async function sintetizarViaWorker(texto, wavLocalTemp) {
   const t0 = Date.now()
   const resultado = await worker.enviar({ texto, wav_out: wavLocalTemp })
   return {
-    loadMs: 0, synthMs: resultado.synth_ms, duracaoAudioMs: resultado.duracao_audio_ms,
+    loadMs: 0, synthMs: resultado.synth_ms, audioPrerollMs: resultado.audio_preroll_ms, duracaoAudioMs: resultado.duracao_audio_ms,
     requestMs: Date.now() - t0, viaWorker: true,
   }
 }
@@ -69,10 +81,11 @@ async function sintetizarViaSubprocessoAvulso(texto, wavLocalTemp) {
   const t0 = Date.now()
   const args = [ttsScript, texto, wavLocalTemp]
   if (ttsModel) args.push('--model', ttsModel)
+  args.push(...argsCalibragemVoz())
   const { stdout } = await execFileAsync(pythonBin, args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 })
   const resultado = JSON.parse(stdout.trim().split('\n').pop())
   return {
-    loadMs: resultado.load_ms, synthMs: resultado.synth_ms, duracaoAudioMs: resultado.duracao_audio_ms,
+    loadMs: resultado.load_ms, synthMs: resultado.synth_ms, audioPrerollMs: resultado.audio_preroll_ms, duracaoAudioMs: resultado.duracao_audio_ms,
     requestMs: Date.now() - t0, viaWorker: false,
   }
 }
@@ -99,7 +112,7 @@ export async function sintetizar(texto, wavSaidaPath) {
 
     return {
       wavPath: wavSaidaPath, ulawPath: ulawSaidaPath,
-      loadMs: resultado.loadMs, synthMs: resultado.synthMs, duracaoAudioMs: resultado.duracaoAudioMs,
+      loadMs: resultado.loadMs, synthMs: resultado.synthMs, audioPrerollMs: resultado.audioPrerollMs, duracaoAudioMs: resultado.duracaoAudioMs,
       requestMs: resultado.requestMs, viaWorker: resultado.viaWorker,
     }
   } finally {

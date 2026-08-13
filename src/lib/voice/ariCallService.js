@@ -7,10 +7,28 @@
 // nunca deve derrubar a ligação sem log).
 import AriClient from 'ari-client'
 import path from 'node:path'
+import { copyFile, mkdir, rm } from 'node:fs/promises'
 import { transcrever, iniciarSttWorker, aguardarSttPronto } from './sttBridge.js'
 import { sintetizar, iniciarTtsWorker, aguardarTtsPronto } from './ttsBridge.js'
 import { responderTurno, aquecerCerebro } from './voiceBrain.js'
 import { inspecionarWav } from './wavInspector.js'
+
+// ACHADO (rodada de UX de voz — "chiado" reportado numa ligação real):
+// precisamos poder ouvir EXATAMENTE o áudio que tocou numa chamada real
+// específica, fora do telefone, sem precisar regenerar nada (regenerar
+// produz uma síntese DIFERENTE, já que o Piper tem variação estocástica
+// entre gerações). Copia local (fora do \\wsl$, direto no Windows) do
+// áudio de cada chamada — pasta é limpa no início de CADA StasisStart, então
+// sempre reflete só a ligação mais recente.
+const DIAG_ULTIMA_LIGACAO_DIR = process.env.VOICE_LAST_CALL_DIAG_DIR || 'C:\\Users\\msi\\AppData\\Local\\Temp\\vivenzza-last-call'
+
+async function preservarAudioDiagnostico(origemPath, nomeArquivo) {
+  try {
+    await copyFile(origemPath, path.join(DIAG_ULTIMA_LIGACAO_DIR, nomeArquivo))
+  } catch (err) {
+    console.error(`[voice-ai] falha ao preservar áudio de diagnóstico (${nomeArquivo}), não crítico: ${err.message}`)
+  }
+}
 
 // Quanto esperar pelos workers persistentes de STT/TTS carregarem o modelo
 // antes de desistir e seguir só com o fallback de subprocesso avulso (mais
@@ -118,6 +136,14 @@ export async function iniciarServicoVoz() {
     instrumentarCanal(channel)
 
     try {
+      await rm(DIAG_ULTIMA_LIGACAO_DIR, { recursive: true, force: true }).catch(() => {})
+      await mkdir(DIAG_ULTIMA_LIGACAO_DIR, { recursive: true })
+      console.log(`[voice-ai] pasta de diagnóstico da última ligação limpa: ${DIAG_ULTIMA_LIGACAO_DIR}`)
+    } catch (err) {
+      console.error(`[voice-ai] falha preparando pasta de diagnóstico, não crítico: ${err.message}`)
+    }
+
+    try {
       console.log(`[voice-ai] answer() channel=${channel.id}`)
       await channel.answer()
       console.log(`[voice-ai] answer() OK channel=${channel.id}`)
@@ -126,6 +152,8 @@ export async function iniciarServicoVoz() {
         if (!saudacaoFixa) throw new Error('saudação pré-gerada indisponível')
         return saudacaoFixa
       }, 'saudação')
+      if (saudacaoFixa) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_SAUDACAO_FIXA}.wav`), '01-saudacao.wav')
+      if (feedbackFixo) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_FEEDBACK_FIXO}.wav`), '02-feedback.wav')
 
       let turno = 1
       let ultimoRequiresHuman = false
@@ -344,8 +372,14 @@ async function executarTurno(client, channel, numeroTurno) {
       ttsSynthMs = resultadoTts.synthMs
       timeToRealReplyMs = Date.now() - tPosRecord
       const ttsBridgeOverheadMs = ttsWallMs - (ttsSynthMs ?? 0) - (ttsLoadMs ?? 0)
-      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} TTS_request_ms=${resultadoTts.requestMs} TTS_synth_ms=${ttsSynthMs} tts_load_ms=${ttsLoadMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} via_worker=${resultadoTts.viaWorker} duracaoMs=${resultadoTts.duracaoAudioMs}`)
-      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar — NÃO inclui a duração do playback)`)
+      // audio_preroll_ms é só silêncio ANEXADO ao áudio já pronto (custo de
+      // escrita ~0ms, incluído no synth_ms acima) — NÃO é tempo de espera
+      // nem entra separadamente em nenhum cálculo de latência de
+      // processamento; só alonga a DURAÇÃO do playback. Logado à parte
+      // para ficar auditável, por pedido explícito desta rodada de UX.
+      console.log(`[voice-ai] TTS_FINISHED turno=${numeroTurno} tts_wall_ms=${ttsWallMs} TTS_request_ms=${resultadoTts.requestMs} TTS_synth_ms=${ttsSynthMs} tts_load_ms=${ttsLoadMs} tts_bridge_overhead_ms=${ttsBridgeOverheadMs} audio_preroll_ms=${resultadoTts.audioPrerollMs} via_worker=${resultadoTts.viaWorker} duracaoMs=${resultadoTts.duracaoAudioMs}`)
+      console.log(`[voice-ai] time_to_real_reply_ms=${timeToRealReplyMs} turno=${numeroTurno} (do fim da gravação até a resposta pronta pra tocar — NÃO inclui a duração do playback nem o preroll)`)
+      await preservarAudioDiagnostico(wavResposta, `0${2 + numeroTurno}-resposta-turno${numeroTurno}.wav`)
       return { media: `custom/${nomeResposta}`, duracaoMs: resultadoTts.duracaoAudioMs }
     }, `resposta-turno${numeroTurno}`)
 

@@ -53,6 +53,26 @@ def resample_para_telefonia(wav_path):
     return frames, sample_width
 
 
+def aplicar_preroll(wav_path, preroll_ms, sample_width):
+    if preroll_ms <= 0:
+        with wave.open(wav_path, "rb") as wav_in:
+            return wav_in.readframes(wav_in.getnframes())
+
+    n_amostras_silencio = int(TELEFONIA_SAMPLE_RATE * preroll_ms / 1000)
+    silencio = b"\x00" * (n_amostras_silencio * sample_width)
+
+    with wave.open(wav_path, "rb") as wav_in:
+        params = wav_in.getparams()
+        frames = wav_in.readframes(wav_in.getnframes())
+
+    frames_com_preroll = silencio + frames
+    with wave.open(wav_path, "wb") as wav_out:
+        wav_out.setparams(params)
+        wav_out.writeframes(frames_com_preroll)
+
+    return frames_com_preroll
+
+
 def gravar_ulaw(wav_path, frames_8k_16bit, sample_width):
     frames_16bit = frames_8k_16bit if sample_width == 2 else audioop.lin2lin(frames_8k_16bit, sample_width, 2)
     ulaw_bytes = audioop.lin2ulaw(frames_16bit, 2)
@@ -66,10 +86,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("texto")
     parser.add_argument("wav_saida")
-    parser.add_argument("--model", default=r"C:\Users\msi\Projeto Claude Code\voice-models\pt_BR-faber-medium.onnx")
+    parser.add_argument("--model", default=r"C:\Users\msi\Projeto Claude Code\voice-models\pt_BR-jeff-medium.onnx")
+    # Mesma calibragem final validada por amostras nesta rodada de UX de
+    # voz (ver tts_worker.py) -- este script é só o fallback (subprocesso
+    # avulso), mantido consistente com o worker pra não soar diferente se o
+    # fallback for ativado. A voz em si (Jeff vs Faber) vem de --model.
+    parser.add_argument("--length-scale", type=float, default=1.00)
+    parser.add_argument("--preroll-ms", type=int, default=200)
     args = parser.parse_args()
 
     from piper import PiperVoice
+    from piper.config import SynthesisConfig
 
     t0 = time.time()
     voice = PiperVoice.load(args.model)
@@ -77,11 +104,12 @@ def main():
 
     t0 = time.time()
     with wave.open(args.wav_saida, "wb") as wav_file:
-        voice.synthesize_wav(args.texto, wav_file)
+        voice.synthesize_wav(args.texto, wav_file, syn_config=SynthesisConfig(length_scale=args.length_scale))
     synth_ms = int((time.time() - t0) * 1000)
 
     frames, sample_width = resample_para_telefonia(args.wav_saida)
-    ulaw_path = gravar_ulaw(args.wav_saida, frames, sample_width)
+    frames_com_preroll = aplicar_preroll(args.wav_saida, args.preroll_ms, sample_width)
+    ulaw_path = gravar_ulaw(args.wav_saida, frames_com_preroll, sample_width)
 
     with wave.open(args.wav_saida, "rb") as wav_file:
         duracao_ms = int((wav_file.getnframes() / wav_file.getframerate()) * 1000)
@@ -91,6 +119,7 @@ def main():
         "ulaw_path": ulaw_path,
         "load_ms": load_ms,
         "synth_ms": synth_ms,
+        "audio_preroll_ms": args.preroll_ms,
         "duracao_audio_ms": duracao_ms,
     }, ensure_ascii=False))
 
