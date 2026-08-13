@@ -39,12 +39,49 @@ pip install faster-whisper piper-tts
 python -m piper.download_voices --download-dir <pasta> pt_BR-faber-medium
 ```
 
+## Workers persistentes de STT/TTS (endurecimento pós-PR #17)
+
+`stt_transcribe.py`/`tts_synthesize.py` (scripts avulsos, um processo
+Python novo por requisição) recarregavam o modelo do ZERO em todo turno —
+~2.3s (Whisper) + ~2s (Piper) de `load_ms` pagos repetidamente, o maior
+gargalo medido numa ligação real homologada (ver PR #17).
+
+`stt_worker.py`/`tts_worker.py` são a versão PERSISTENTE: sobem uma vez na
+inicialização do serviço (`iniciarServicoVoz()`), carregam o modelo uma
+única vez, e respondem requisições via stdin/stdout (protocolo JSON de uma
+linha por mensagem) enquanto o processo viver — ver `pyWorkerClient.js`.
+`sttBridge.js`/`ttsBridge.js` usam o worker automaticamente quando ele está
+pronto; se o worker não subiu ainda ou morreu (excedeu o limite de
+restarts), caem pro script avulso antigo como fallback — sempre logando a
+degradação (`STT_WORKER indisponível...`/`TTS_WORKER indisponível...`),
+nunca mascarando em silêncio.
+
+Antes de pedir uma ligação real, rode o smoke test local (sem Asterisk):
+
+```
+node scripts/voice/smoke-test-workers.mjs
+```
+
+Ele sobe os dois workers, confirma `load_ms` só na 1ª requisição de cada, e
+faz 3 sínteses + 3 transcrições consecutivas medindo a latência de cada
+uma — prova que o modelo não está recarregando por turno.
+
 ## Env necessárias (nunca commitadas)
 
 ```
 VOICE_PYTHON_BIN=python
-VOICE_STT_SCRIPT_PATH=<caminho absoluto para stt_transcribe.py>
 VOICE_STT_MODEL=small
-VOICE_TTS_SCRIPT_PATH=<caminho absoluto para tts_synthesize.py>
 VOICE_TTS_MODEL_PATH=<caminho absoluto para o .onnx do Piper>
+
+# fallback (script avulso, só usado se o worker não estiver disponível)
+VOICE_STT_SCRIPT_PATH=<caminho absoluto para stt_transcribe.py>
+VOICE_TTS_SCRIPT_PATH=<caminho absoluto para tts_synthesize.py>
+
+# opcional — só se os workers não estiverem em scripts/voice/stt_worker.py
+# e scripts/voice/tts_worker.py (caminho default já resolvido em runtime)
+VOICE_STT_WORKER_SCRIPT_PATH=<caminho absoluto para stt_worker.py>
+VOICE_TTS_WORKER_SCRIPT_PATH=<caminho absoluto para tts_worker.py>
+
+# opcional — timeout esperando os workers ficarem prontos na subida (default 60000ms)
+VOICE_WORKER_READY_TIMEOUT_MS=60000
 ```
