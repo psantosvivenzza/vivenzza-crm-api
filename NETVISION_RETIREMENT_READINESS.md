@@ -100,7 +100,7 @@ como decisão de migração.
 | B) Pagamento NetVision não refletido no Vivenzza (ERP>CRM) | 0 | R$0,00 | — | — |
 | C) Encerrado no ERP com saldo residual (acordo/desconto) | 10 | R$2.681,36 | SIM | NÃO |
 | D) Importação legada só-CRM (prefixo e99) | 3 | — | NÃO (sem origem ERP) | SIM (decisão já tomada: não tocar) |
-| E) Duplicidade histórica (mesmo título, 2 linhas — formatos `cr-` e `{filial}-` coexistindo) | **48** | ambos fechados, sem risco de cobrança dupla | NÃO decidido nesta rodada | SIM (decidir qual registro é o canônico) |
+| E) Duplicidade histórica (mesmo título, 2 linhas — formatos `cr-` e `{filial}-` coexistindo) | **48** | ambos fechados, sem risco de cobrança dupla | NÃO decidido nesta rodada | SIM (decidir qual registro é o canônico — análise título a título em `npm run analise:duplicados-financeiro`, 23 casos com candidato canônico claro, 25 ambíguos) |
 | G) Status divergente puro | 0 | — | — | — |
 | H) Outro | 0 | — | — | — |
 
@@ -113,19 +113,28 @@ DUPLICADOS entre os dois formatos históricos de `legacy_id` (`cr-N-S` e `{filia
 saldo em aberto duplicado, então não infla a dívida cobrável hoje), mas é sujeira de dado real
 que deveria ser resolvida (qual registro manter) antes de qualquer migração definitiva.
 
-### Decomposição do delta de saldo (R$17.900,33)
+### Decomposição do delta de saldo — 100% FECHADA
 
-Cálculo exato (não heurístico — mesma partição usada pra somar os totais originais):
+Cálculo exato (não heurístico — mesma partição usada pra somar os totais originais).
+**Achado desta rodada**: os R$433,51 antes "não explicados" tinham causa concreta — o loop de
+decomposição pulava títulos sem `legacy_id` (lançamentos manuais no Vivenzza, nunca vieram do
+NetVision), enquanto o total geral (`totCrm.saldo`) somava TODOS os títulos abertos, com ou sem
+`legacy_id`. Corrigido: agora contam como categoria própria (F). Hipótese dos 48 duplicados como
+causa foi testada e **descartada** antes de achar a causa real (nenhum dos 48 pares tem saldo em
+aberto).
 
 ```text
-R$17.900,33 (delta bruto, CRM abaixo do ERP)
-  = R$15.652,48  categoria A (pagamento só no CRM, reduz o saldo aberto do CRM vs ERP)
+R$17.900,33 (delta bruto no momento da classificação original, CRM abaixo do ERP)
+  = R$15.652,48  categoria A (pagamento só no CRM, bloqueado por desenho)
   + R$ 2.681,36  categoria C (título encerrado no ERP com saldo residual não refletido no CRM)
-  + R$   433,51  não explicado nesta rodada (2,4% do total — investiguei a hipótese dos 48
-                 duplicados como causa e DESCARTEI: todos os 48 pares estão fechados dos dois
-                 lados, não contribuem pro saldo aberto. Causa real do resíduo fica pra próxima
-                 rodada, não vale forçar uma explicação sem evidência)
+  + R$   433,51  categoria F (3 títulos manuais sem legacy_id — nunca vieram do NetVision,
+                 saldo próprio do CRM, não é gap de sincronização)
+  = R$17.900,33 — soma bate 100% com o delta real (gap de checagem = R$0,00)
 ```
+
+Números mudam a cada execução (dado vivo, sync residente roda continuamente) — rodar
+`npm run audit:netvision:financeiro` pra números atuais; a mecânica de decomposição agora fecha
+sempre, não só neste snapshot.
 
 - 3 títulos só no CRM (e99), 0 só no NetVision.
 - Sync financeiro em si (`sync-financeiro-legado.js`) roda numa máquina do escritório, fora
@@ -141,21 +150,30 @@ no campo agregado de `CR_Duplicatas`). Vivenzza **não tem ledger de eventos de 
 `pagamentos`/`baixas`/`historico_pagamentos` (erro `PGRST205` nos três nomes tentados);
 `estornos_financeiros` existe mas está vazia (0 linhas, não usada).
 
-**Achado de consistência interna do NetVision**: dos 2.521 títulos com evento em
-`CR_PagtoParcial`, **2.489 (98,7%) têm o campo de "pago" de `CR_Duplicatas` DIVERGINDO da
-soma dos eventos de `CR_PagtoParcial`** para o mesmo título. Isso não é necessariamente um bug
-— pode ser que o campo detectado (`ValorParcialmentePago`, ver `financeiroLegado.js`) represente
-algo diferente de "soma cumulativa de pagamentos" (ex: saldo remanescente, último pagamento,
-etc.) — schema não deixa isso claro sem confirmação de quem opera o NetVision. Registrado como
-achado, não como conclusão.
+**Fonte canônica de recebimentos — encontrada (achado desta rodada)**: `CR_Duplicatas` tem DOIS
+campos de valor pago com semântica diferente — `"ValorPago"` (geral, populado em 16.470/17.735
+títulos, soma R$5.689.576,51 — é o campo que `financeiroLegado.js` usa pro sync/auditoria
+principal) e `"ValorParcialmentePago"` (específico de pagamento parcial/negociado, populado em
+exatamente 2.521 títulos). Confirmado: **`"ValorParcialmentePago"` bate EXATAMENTE com a soma de
+`CR_PagtoParcial`** — mesma contagem de títulos (2.521), mesma soma (R$311.154,70). **Não é
+inconsistência/corrupção do NetVision** — são dois campos legítimos e internamente consistentes,
+cada um com seu propósito. A divergência que a primeira versão desta auditoria relatou como
+"NetVision diverge de si mesmo em 98,7% dos títulos" comparava o campo ERRADO
+(`"ValorPago"` geral) contra o ledger de eventos parciais — corrigido no script e neste
+documento.
 
-**Comparação Vivenzza x NetVision (só universo comparável — os 2.521 títulos com evento)**:
-0 sem correspondência no Vivenzza; 145 batem exatamente; **2.376 com VALUE_MISMATCH**
-(valor pago Vivenzza R$183.351,84 vs NetVision R$311.154,70 no universo comparável). Dado o
-achado de inconsistência interna acima, não dá pra atribuir esse mismatch só ao Vivenzza — o
-próprio NetVision já diverge de si mesmo na maioria desses títulos.
+**Comparação Vivenzza x NetVision (só universo comparável — os 2.521 títulos com evento
+parcial, usando `CR_PagtoParcial`/`ValorParcialmentePago`, que são a mesma coisa)**:
+0 sem correspondência no Vivenzza; 145 batem exatamente; **2.376 com VALUE_MISMATCH** (valor
+pago Vivenzza R$183.351,84 vs NetVision R$311.154,70 no universo comparável). **Este mismatch
+agora É atribuível ao Vivenzza** (não mais explicável por inconsistência do NetVision) —
+`contas_financeiras.valor_pago` provavelmente reflete `"ValorPago"` (o campo geral) em vez de
+`"ValorParcialmentePago"` pros títulos negociados, o que pode ser uma causa real de divergência
+a investigar numa próxima rodada — não corrigido aqui.
 
 Script: `scripts/audit-netvision-pagamentos.mjs`.
+
+## CLIENTES PARITY = PASS
 
 ## CLIENTES — GAP FECHADO NESTA RODADA
 
@@ -179,6 +197,13 @@ Script: `scripts/audit-netvision-pagamentos.mjs`.
   (agendado externamente via Task Scheduler do Windows, fora deste repositório). Recomendo
   agendar ANTES do sync de pedidos na mesma máquina — não fiz essa configuração de SO, é
   fora do alcance do que dá pra automatizar a partir daqui.
+- **Por que não reimportar tudo a cada ciclo, mesmo sendo pequeno**: o job já é seguro pra rodar
+  em loop (varredura completa, só cria o que falta, nunca escreve em cima de existente) — então
+  agendar de 30 em 30 min (mesmo intervalo já sugerido pro sync de pedidos) é suficiente e
+  simples. Não construí um cursor incremental porque, com ~2.048 linhas, o custo de reler tudo
+  a cada execução é desprezível — um cursor incremental adicionaria complexidade (rastrear
+  `DataAtualizacao`, lidar com janela de segurança) sem ganho de performance real nesta escala.
+  Só valeria a pena revisitar se o volume de clientes crescesse ordens de grandeza.
 
 ## PRODUTOS
 
@@ -238,14 +263,22 @@ P0 = necessário pra operar sem NetVision. P1 = importante. P2 = conveniência.
    adiantamento). Pareamento pra reconciliação fiscal continuará heurístico.
 3. **48 títulos financeiros duplicados** (formatos `cr-`/`{filial}-` coexistindo) — não afeta
    cobrança hoje (ambos os lados de cada par já estão fechados), mas é sujeira de dado real.
+   Análise título a título em `npm run analise:duplicados-financeiro` (23 com canônico claro,
+   25 ambíguos) — nada foi deduplicado.
 4. **125 títulos financeiros em conflito** (115 categoria A, bloqueados por desenho; 10
    categoria C, encerramento com saldo residual pendente de aplicar) — seguem isolados,
    nenhuma correção automática nesta rodada.
 5. **`SYNC_SINGLE_HOST_DEPENDENCY`** — toda a sincronização (financeiro, pedidos, clientes)
    depende de uma única máquina sem redundância.
-6. **`NFE_CERT_SENHA` precisa ser rotacionada** — exposta inadvertidamente durante esta
-   investigação (comando errado usado pra checar presença da variável). Achado de segurança,
-   não bloqueia paridade em si, mas bloqueia qualquer teste fiscal seguro até ser trocada.
+6. **`NFE_CERT_SENHA` precisa ser rotacionada CORRETAMENTE** — não é um simples swap de
+   variável: o certificado é um arquivo `.pfx` cuja própria senha de abertura é essa variável;
+   trocar só o valor no Railway sem reexportar o arquivo com senha nova vai QUEBRAR a assinatura
+   (o `.pfx` continua protegido pela senha antiga). Rotação real exige ação de quem administra o
+   certificado digital da empresa (certificadora/contador) — **ação humana necessária, não
+   executável a partir daqui.**
+
+**Relatório pro contador**: `RELATORIO_CONTADOR.md` — séries, numeração, status, pergunta
+objetiva a responder, sem decidir o número por conta própria.
 
 **Estado atual: NÃO PRONTO para desligar o NetVision.** O bloqueador dominante continua sendo
 fiscal — mesmo com clientes resolvido e financeiro/pagamentos bem mais entendidos nesta rodada,
