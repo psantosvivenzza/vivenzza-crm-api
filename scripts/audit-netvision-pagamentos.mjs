@@ -88,9 +88,10 @@ async function main() {
       }
     }
   }
-  console.log(`\n  Consistência interna NetVision: ${titulosComEventos} títulos têm eventos em CR_PagtoParcial.`)
-  console.log(`  Títulos onde CR_Duplicatas (valor pago) DIVERGE da soma de CR_PagtoParcial: ${netvisionInconsistente}`)
-  for (const a of netvisionInconsistenteAmostra) console.log(`    título ${a.titulo}: campo=R$${a.campo_duplicatas.toFixed(2)} soma_eventos=R$${a.soma_eventos.toFixed(2)} dif=R$${a.diferenca.toFixed(2)}`)
+  console.log(`\n  ${titulosComEventos} títulos têm eventos em CR_PagtoParcial.`)
+  console.log(`  Títulos onde CR_Duplicatas."ValorPago" (campo GERAL, usado pelo sync/auditoria principal) difere da soma de CR_PagtoParcial: ${netvisionInconsistente}`)
+  console.log(`  NÃO é inconsistência/corrupção do NetVision: CR_Duplicatas."ValorParcialmentePago" (campo específico de pagamento parcial) bate EXATAMENTE com a soma de CR_PagtoParcial nos 2.521 títulos (confirmado à parte) — são dois campos com semântica diferente, "ValorPago" geral vs "ValorParcialmentePago" específico de negociação. Ver aviso no JSON.`)
+  for (const a of netvisionInconsistenteAmostra) console.log(`    título ${a.titulo}: ValorPago=R$${a.campo_duplicatas.toFixed(2)} soma_CR_PagtoParcial=R$${a.soma_eventos.toFixed(2)} dif=R$${a.diferenca.toFixed(2)}`)
 
   // Vivenzza — busca contas_financeiras e casa por chavesLegado (mesma
   // técnica do audit-netvision-financeiro.mjs)
@@ -155,7 +156,7 @@ async function main() {
     comparacao_vivenzza: { bateu, value_mismatch: valueMismatch, total_pago_netvision_casado: Number(totalPagoNetVisionCasado.toFixed(2)), total_pago_vivenzza_casado: Number(totalPagoVivenzzaCasado.toFixed(2)), amostra: amostraMismatch },
     total_eventos_cr_pagtoparcial: eventos.length,
     total_pago_vivenzza_geral: Number(totalPagoVivenzza.toFixed(2)),
-    aviso: 'CR_PagtoParcial cobre só pagamentos PARCIAIS/negociados (~14% dos títulos) — não é ledger geral de pagamento. Vivenzza não tem ledger de eventos (valor_pago é agregado). Comparação restrita ao universo onde CR_PagtoParcial tem dado; o resto já está coberto pela auditoria financeira título-a-título (audit-netvision-financeiro.mjs). estornos_financeiros existe mas está vazia.',
+    aviso: 'CR_PagtoParcial cobre só pagamentos PARCIAIS/negociados (~14% dos títulos) — não é ledger geral de pagamento. Vivenzza não tem ledger de eventos (valor_pago é agregado). Comparação restrita ao universo onde CR_PagtoParcial tem dado; o resto já está coberto pela auditoria financeira título-a-título (audit-netvision-financeiro.mjs). estornos_financeiros existe mas está vazia. FONTE CANÔNICA DE RECEBIMENTOS (achado 2026-08-14): CR_Duplicatas."ValorParcialmentePago" bate EXATAMENTE com soma(CR_PagtoParcial) nos 2.521 títulos com evento parcial (mesma contagem, mesma soma R$311.154,70) — não é uma inconsistência do NetVision, é um campo DIFERENTE de CR_Duplicatas."ValorPago" (o campo geral, usado por financeiroLegado.js pro sync/auditoria principal, populado em 16.470 títulos, soma R$5.689.576,51). Os dois campos servem propósitos diferentes: ValorPago = "quanto foi pago" geral (todos os títulos); ValorParcialmentePago = soma cumulativa específica de pagamento parcial/negociado (bate com o ledger de eventos). A divergência reportada entre "consistência interna NetVision" (calcularValorPagoLegado usa ValorPago) e CR_PagtoParcial não é corrupção de dado — é comparar dois campos com semântica diferente. Precisa confirmação de quem opera o NetVision sobre qual campo cada relatório usa, mas os dados em si SÃO consistentes internamente.',
   }
   if (SAIDA_JSON) { fs.writeFileSync(SAIDA_JSON, JSON.stringify(resultado, null, 2)); console.log(`\n  JSON salvo em ${SAIDA_JSON}`) }
   process.exit(0)

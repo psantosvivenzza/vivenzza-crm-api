@@ -172,7 +172,7 @@ console.log(`  G) Status divergente puro (CRM fechado, ERP aberto, sem saldo res
 console.log(`     n=${categorias.G_status_divergente_puro.length}  correção determinística: SIM (aplicar 'atualizar' do sync)  exige revisão humana: NÃO`)
 console.log(`  D) Importação legada só-CRM (prefixo e99, nunca existiu no ERP consultado)`)
 console.log(`     n=${divergencias.soNoCrm.length}  correção determinística: NÃO (não tem origem ERP pra comparar)  exige revisão humana: SIM — decisão de negócio já tomada de NÃO tocar (ver memória: "3 só CRM e99")`)
-console.log(`  E) Duplicidade histórica: não encontrada nesta rodada (nenhum legacy_id duplicado detectado)`)
+console.log(`  E) Duplicidade histórica: 48 títulos com 2 linhas (formatos cr-/{filial}- coexistindo) — ver 'npm run analise:duplicados-financeiro' pro detalhe título a título (não afeta saldo em aberto: todos os 48 pares já estão fechados dos dois lados)`)
 console.log(`  H) Outro: 0 (todos os 125 caíram em A/B/C/G)`)
 
 const resultado = {
@@ -208,10 +208,18 @@ const deltaGrupos = {}
 const soma = (grupo, valor) => { deltaGrupos[grupo] = (deltaGrupos[grupo] || 0) + valor }
 
 // Títulos que existem no CRM (visitados uma vez cada, uma linha = um título).
+// ACHADO (2026-08-14): a versão anterior deste loop pulava linhas sem
+// legacy_id (`if (!c.legacy_id) continue`), mas totCrm.saldo (usado no
+// delta "real") soma TODAS as linhas abertas, com ou sem legacy_id — títulos
+// manuais (nunca vieram do NetVision) ficavam de fora da decomposição sem
+// aparecer em categoria nenhuma. Isso sozinho explicava o resíduo de
+// R$433,51 que antes ficava "não explicado": 3 títulos manuais sem
+// legacy_id (R$289,00 + R$144,50 + R$0,01). Corrigido: contam como grupo
+// próprio, contribErp=0 (não tem contrapartida NetVision por definição).
 for (const c of crm) {
-  if (!c.legacy_id) continue
-  const e = erpPorChave.get(c.legacy_id)
   const contribCrm = ABERTO_CRM.has(c.status) ? Number(c.valor || 0) - Number(c.valor_pago || 0) : 0
+  if (!c.legacy_id) { soma('F_manual_sem_legacy_id', contribCrm); continue }
+  const e = erpPorChave.get(c.legacy_id)
   if (!e) { soma('D_so_no_crm_e99', contribCrm); continue } // soNoCrm: sem contrapartida ERP, contribErp=0
   const contribErp = e.aberto ? e.saldo : 0
   const grupo = grupoDoTitulo.get(c.legacy_id) || (Math.abs(contribCrm - contribErp) <= CENTAVO ? 'sem_divergencia' : 'H_outro_nao_classificado')
