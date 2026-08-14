@@ -240,9 +240,15 @@ router.get('/', async (req, res) => {
             porRepresentante[chave].valor += Number(n.valor_nota) || 0
             valorTotal += Number(n.valor_nota) || 0
           }
-          return { quantidade: (data ?? []).length, valor: valorTotal, por_representante: porRepresentante }
+          return { disponivel: true, quantidade: (data ?? []).length, valor: valorTotal, por_representante: porRepresentante }
         }),
-      { quantidade: 0, valor: 0, por_representante: {} }
+      // `disponivel: false` — nunca confundir com "zero vendas real". Cai
+      // aqui se notas_fiscais_netvision ainda não existe em produção (a
+      // migration pode não ter sido aplicada ainda) ou qualquer outro erro
+      // de consulta — o resto do dashboard continua funcionando normalmente
+      // (safe() garante isso), só este indicador fica marcado indisponível
+      // pro frontend não desenhar R$0,00 como se fosse dado fiscal confirmado.
+      { disponivel: false, quantidade: 0, valor: 0, por_representante: {} }
     ),
   ])
 
