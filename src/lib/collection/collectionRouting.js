@@ -14,8 +14,22 @@
 import { enviarTextoFinanceiro } from '../evolutionFinanceiro.js'
 import { enviarComFailover } from './dispatchEngine.js'
 import { obterConfigCobranca } from './featureFlags.js'
+import { verificarFrescorSync, logBloqueioSyncStale } from './financialSyncGuard.js'
 
+// Ponto único de verdade pra TODO envio real de cobrança (cron, /disparar,
+// /disparar-individual — todos chegam aqui) — por isso é o lugar certo pro
+// guard de frescor do sync financeiro: protege os 3 caminhos de uma vez,
+// sem duplicar a checagem em cada um. Também serve como revalidação
+// "antes do envio" pra lotes longos (a régua chama isso 1x por conta) —
+// cacheado em financialSyncGuard.js pra não consultar o banco a cada
+// mensagem.
 export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem }) {
+  const guardSync = await verificarFrescorSync()
+  if (!guardSync.allowed) {
+    logBloqueioSyncStale(origem, guardSync)
+    return { status: 'blocked', motor: null, reason: guardSync.reason, motivo: 'Sincronização financeira desatualizada — cobrança bloqueada (fail-closed)', guard: guardSync }
+  }
+
   const config = await obterConfigCobranca()
 
   if (config.multi_whatsapp !== true) {

@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
+import { verificarFrescorSync, logBloqueioSyncStale } from '../lib/collection/financialSyncGuard.js'
 
 // CORREÇÃO URGENTE 2026-07-30: o número 5551983270024 foi suspenso temporariamente
 // por enviar ~50 mensagens em rajada (sem intervalo). Limites abaixo existem
@@ -105,6 +106,17 @@ export async function executarReguaCobranca() {
   if (!dentroDoHorarioPermitido()) {
     console.log('[cobranca-whatsapp] fora do horário permitido (08h-17h BRT) — nada enviado, aguardando próximo ciclo')
     return resumoVazio('fora_do_horario')
+  }
+
+  // Gate de frescor do sync financeiro — checado aqui pra sair cedo e limpo
+  // (sem nem consultar contas), e de novo dentro de enviarCobrancaComRoteamento
+  // (collectionRouting.js) a cada envio real, como revalidação — essa segunda
+  // checagem é quem realmente protege contra o sync cair NO MEIO de um lote
+  // longo, já que reusa o mesmo cache curto.
+  const guardSyncInicial = await verificarFrescorSync()
+  if (!guardSyncInicial.allowed) {
+    logBloqueioSyncStale('cron_batch_inicio', guardSyncInicial)
+    return { ...resumoVazio('sync_stale'), guard: guardSyncInicial }
   }
 
   emExecucao = true
@@ -212,6 +224,14 @@ export async function executarReguaCobranca() {
           contasFinanceirasId: conta.id, etapa, clienteNome: conta.pessoa_nome,
           clienteTelefone: conta.telefone_cobranca, valor: saldo, mensagem, origem: 'cron',
         })
+        if (resultadoEnvio.status === 'blocked' && resultadoEnvio.reason === 'sync_stale') {
+          // Sync ficou velho/caiu NO MEIO da execução — para o lote inteiro
+          // (não é erro desta conta, é sinal de que nenhuma conta seguinte
+          // deveria ser tentada agora).
+          resumo.paradoPor = 'sync_stale'
+          resumo.guard = resultadoEnvio.guard
+          break
+        }
         if (resultadoEnvio.status !== 'sent') {
           throw new Error(`motor de envio não concluiu: ${resultadoEnvio.motivo || resultadoEnvio.status}`)
         }
