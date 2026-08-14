@@ -59,7 +59,7 @@ router.get('/', async (req, res) => {
   // travava em 1000 leads mesmo com a tabela tendo mais.
   const ETAPAS = ['novo', 'contato', 'proposta', 'negociacao', 'fechado', 'perdido']
 
-  const [r1, r2, r3, r4, r5, r6, r7, r8, r9] = await Promise.all([
+  const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10] = await Promise.all([
     safe(
       (async () => {
         const porEtapa = {}
@@ -206,6 +206,50 @@ router.get('/', async (req, res) => {
       }),
       0
     ),
+
+    // VENDAS DO MÊS (fiscal) — 2026-08-14: indicador DIFERENTE de
+    // "Pedidos do Mês" (r6 acima). Fonte: notas_fiscais_netvision (read
+    // model espelhado de EN_Notas), regra homologada = nota válida
+    // (cancelada=0) + CFOP classificado VENDA (hoje só 5102/6102,
+    // ver VENDAS_DO_MES_RECONCILIACAO.md) + data_emissao no período.
+    // NÃO usa pedidos.total — pedido ≠ venda fiscal realizada (achado
+    // desta rodada: pedido conta valor cheio mesmo quando só uma fração
+    // foi faturada, e conta pedidos que viraram bonificação/remessa).
+    // Filtro por vendedor NÃO aplicado aqui ainda: representante_codigo é
+    // o código do NetVision, espaço de ID diferente de usuarios.id — cruzar
+    // os dois exige o mesmo casamento por nome que sync-pedidos-legado.js
+    // já faz (buscarMapaVendedores), não replicado aqui por ora. O
+    // indicador retorna sempre o total geral + a quebra por representante
+    // (nome bruto do NetVision), sem filtro por vendedor logado.
+    safe(
+      supabase.from('notas_fiscais_netvision')
+        .select('valor_nota, representante_codigo, representante_nome')
+        .eq('codigo_filial', '001')
+        .eq('cfop_classificacao', 'VENDA')
+        .eq('cancelada', 0)
+        .gte('data_emissao', inicioMes.slice(0, 10))
+        .lte('data_emissao', fimMes.slice(0, 10))
+        .then(({ data, error }) => {
+          if (error) throw error
+          const porRepresentante = {}
+          let valorTotal = 0
+          for (const n of data ?? []) {
+            const chave = n.representante_nome || n.representante_codigo || 'Sem representante'
+            if (!porRepresentante[chave]) porRepresentante[chave] = { codigo: n.representante_codigo, quantidade: 0, valor: 0 }
+            porRepresentante[chave].quantidade++
+            porRepresentante[chave].valor += Number(n.valor_nota) || 0
+            valorTotal += Number(n.valor_nota) || 0
+          }
+          return { disponivel: true, quantidade: (data ?? []).length, valor: valorTotal, por_representante: porRepresentante }
+        }),
+      // `disponivel: false` — nunca confundir com "zero vendas real". Cai
+      // aqui se notas_fiscais_netvision ainda não existe em produção (a
+      // migration pode não ter sido aplicada ainda) ou qualquer outro erro
+      // de consulta — o resto do dashboard continua funcionando normalmente
+      // (safe() garante isso), só este indicador fica marcado indisponível
+      // pro frontend não desenhar R$0,00 como se fosse dado fiscal confirmado.
+      { disponivel: false, quantidade: 0, valor: 0, por_representante: {} }
+    ),
   ])
 
   const porEtapa = r1.value
@@ -221,6 +265,7 @@ router.get('/', async (req, res) => {
     pedidos_mes:    r6.value,
     leads_manuais:  r7.value,
     ligacoes:       { hoje: r8.value, total: r9.value },
+    vendas_fiscais_mes: r10.value,
     gerado_em:      new Date().toISOString(),
   })
 })
