@@ -23,7 +23,11 @@
     "audit:netvision:full": "npm run audit:netvision:pedidos && npm run audit:netvision:faturamento && npm run audit:netvision:financeiro && npm run audit:netvision:clientes && npm run audit:netvision:pagamentos",
     "sync:clientes:legado:dry-run": "node scripts/sync-clientes-legado.mjs --dry-run",
     "sync:clientes:legado": "node scripts/sync-clientes-legado.mjs",
-    "analise:duplicados-financeiro": "node scripts/analise-duplicados-financeiro.mjs"
+    "analise:duplicados-financeiro": "node scripts/analise-duplicados-financeiro.mjs",
+    "preview:duplicados-financeiro": "node scripts/preview-duplicados-financeiro.mjs",
+    "preview:resolucao-conflitos-financeiro": "node scripts/preview-resolucao-conflitos-financeiro.mjs",
+    "sync:pagamentos:legado:dry-run": "node scripts/sync-pagamentos-legado.mjs --dry-run",
+    "sync:pagamentos:legado": "node scripts/sync-pagamentos-legado.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
