@@ -14,7 +14,12 @@
     "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs",
     "ai:worker": "node scripts/ai-worker.mjs",
     "voice:service": "node scripts/voice/run-voice-service.mjs",
-    "voice:outbound:test": "node scripts/voice/trigger-outbound-test.mjs"
+    "voice:outbound:test": "node scripts/voice/trigger-outbound-test.mjs",
+    "audit:netvision:pedidos": "node scripts/audit-netvision-pedidos.mjs",
+    "audit:netvision:faturamento": "node scripts/audit-netvision-faturamento.mjs",
+    "audit:netvision:financeiro": "node scripts/audit-netvision-financeiro.mjs",
+    "audit:netvision:clientes": "node scripts/audit-netvision-clientes.mjs",
+    "audit:netvision:full": "npm run audit:netvision:pedidos && npm run audit:netvision:faturamento && npm run audit:netvision:financeiro && npm run audit:netvision:clientes"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
