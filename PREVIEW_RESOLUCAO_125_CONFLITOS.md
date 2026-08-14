@@ -1,10 +1,14 @@
 # Preview — reprocessamento dos conflitos financeiros com a regra canônica
 
-Gerado 2026-08-14T18:39:44.676Z. **NADA foi alterado** — isto é só o preview do que a régua de sync faria se rodasse, usando o campo correto (`ValorParcialmentePago` para títulos com pagamento negociado, `ValorPago` pro resto).
+Gerado 2026-08-14T19:13:22.434Z. **NADA foi alterado.**
+
+## ⚠️ Antes de usar este arquivo
+
+Comparar `valor_pago` contra `ValorParcialmentePago` (em vez de `ValorPago`) NÃO é uma regra geral segura — testado contra a base inteira (17.735 títulos), essa troca sozinha geraria 2.384 conflitos NOVOS. `ValorPago` e `ValorParcialmentePago` são campos genuinamente diferentes na maioria dos títulos negociados, não um "certo" e um "errado" — significado exato de cada um não confirmado sem alguém que opera o NetVision. A detecção real de conflito (`audit-netvision-financeiro.mjs`) continua usando só `ValorPago`, sem alteração. Os resultados abaixo são investigação, não recomendação de liberar `em_revisao_financeira` em massa.
 
 Total reprocessado: 137
 
-## NO_CHANGE_REQUIRED (123)
+## NO_CHANGE_REQUIRED (122)
 
 | legacy_id | pessoa | valor Vivenzza | valor correto (regra canônica) | campo usado | status atual | status esperado | ação proposta |
 |---|---|---|---|---|---|---|---|
@@ -107,7 +111,6 @@ Total reprocessado: 137
 | cr-1008200-4 | Izabel Cristina Pereira de Souza | R$ 1.000,00 | R$ 1.000,00 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 | cr-1008652-4 | Rosalina Rocha Laranjeira | R$ 200,00 | R$ 200,00 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 | cr-1002754-6 | ANA PAULA NUNES DA SILVA | R$ 44,02 | R$ 44,02 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
-| cr-1008128-2 | 61.246.046 EDUARDO FLORES GONCALVES | R$ 265,41 | R$ 265,41 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 | cr-1007582-12 | LEONARDO SOARES SEVERO | R$ 60,00 | R$ 60,00 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 | cr-1008200-3 | Izabel Cristina Pereira de Souza | R$ 550,00 | R$ 550,00 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 | cr-1006934-2 | ANGELICA RODRIGUES | R$ 300,00 | R$ 300,00 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
@@ -132,13 +135,14 @@ Total reprocessado: 137
 | 001-1009063-3 | Francisco Freitas Oliveira | R$ 0,00 | R$ 0,00 | ValorPago | - | - | com o campo canônico, já bate |
 | 001-1009075-1 | Diego afonso martins | R$ 1.063,98 | R$ 1.063,98 | ValorParcialmentePago | - | - | com o campo canônico, já bate |
 
-## AUTO_RESOLVABLE_DETERMINISTIC (14)
+## AUTO_RESOLVABLE_DETERMINISTIC (15)
 
 | legacy_id | pessoa | valor Vivenzza | valor correto (regra canônica) | campo usado | status atual | status esperado | ação proposta |
 |---|---|---|---|---|---|---|---|
 | cr-1008797-4 | Francisco Freitas Oliveira | R$ 0,00 | R$ 636,71 | ValorParcialmentePago | vencida | pago_parcial | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
 | cr-1000653-2 | FABIANO KAMPFF LEITE | R$ 1.350,00 | R$ 1.500,00 | ValorParcialmentePago | vencida | pago_parcial | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
 | cr-1008186-4 | CELSON MARIO ROSA DINIZ | R$ 150,00 | R$ 160,00 | ValorParcialmentePago | vencida | pago_parcial | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
+| cr-1008128-2 | 61.246.046 EDUARDO FLORES GONCALVES | R$ 265,41 | R$ 265,41 | ValorParcialmentePago | vencida | paga | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
 | 001-1002230-7 | THAINA RODRIGUES | R$ 0,00 | R$ 0,00 | ValorPago | paga | aberta/vencida | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
 | 001-1002230-8 | THAINA RODRIGUES | R$ 0,00 | R$ 0,00 | ValorPago | paga | aberta/vencida | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |
 | 001-1008147-4 | DIEGO RIBEIRO | R$ 0,00 | R$ 0,00 | ValorPago | paga | aberta/vencida | aplicar via decidirAtualizacao()/fn_sincronizar_baixa_legado — não executado nesta rodada |

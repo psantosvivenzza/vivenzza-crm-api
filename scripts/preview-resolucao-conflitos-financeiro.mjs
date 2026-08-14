@@ -1,9 +1,19 @@
 /**
  * PREVIEW read-only — reprocessa os conflitos financeiros isolados
- * (em_revisao_financeira=true) usando a regra canônica descoberta:
- * ValorParcialmentePago (CR_Duplicatas) para títulos com evento em
- * CR_PagtoParcial, ValorPago (o campo geral, já usado por
- * calcularValorPagoLegado) pro resto.
+ * (em_revisao_financeira=true) comparando também contra
+ * ValorParcialmentePago (CR_Duplicatas), pra títulos com evento em
+ * CR_PagtoParcial, além do ValorPago geral já usado por
+ * calcularValorPagoLegado.
+ *
+ * ⚠️ CORREÇÃO (2026-08-14, mesma rodada): NÃO tratar "bater com
+ * ValorParcialmentePago" como prova de falso-positivo. Testado contra a
+ * base inteira (17.735 títulos, não só os já isolados), essa comparação
+ * sozinha geraria 2.384 NOVOS conflitos — ValorPago e
+ * ValorParcialmentePago são campos genuinamente diferentes na maioria dos
+ * títulos negociados, não um "certo" e um "errado". A lógica real de
+ * detecção de conflito (audit-netvision-financeiro.mjs) continua usando só
+ * ValorPago — não foi alterada. Este script serve pra INVESTIGAR, não pra
+ * decidir liberação em massa.
  *
  * NÃO altera nenhum dado. Classifica cada conflito em:
  *   AUTO_RESOLVABLE_DETERMINISTIC — a regra canônica aplicada resolveria
@@ -129,7 +139,14 @@ async function main() {
 
   // Markdown legível pra revisão humana
   let md = '# Preview — reprocessamento dos conflitos financeiros com a regra canônica\n\n'
-  md += `Gerado ${new Date().toISOString()}. **NADA foi alterado** — isto é só o preview do que a régua de sync faria se rodasse, usando o campo correto (\`ValorParcialmentePago\` para títulos com pagamento negociado, \`ValorPago\` pro resto).\n\n`
+  md += `Gerado ${new Date().toISOString()}. **NADA foi alterado.**\n\n`
+  md += '## ⚠️ Antes de usar este arquivo\n\n'
+  md += 'Comparar `valor_pago` contra `ValorParcialmentePago` (em vez de `ValorPago`) NÃO é uma regra geral segura — '
+  md += 'testado contra a base inteira (17.735 títulos), essa troca sozinha geraria 2.384 conflitos NOVOS. '
+  md += '`ValorPago` e `ValorParcialmentePago` são campos genuinamente diferentes na maioria dos títulos negociados, '
+  md += 'não um "certo" e um "errado" — significado exato de cada um não confirmado sem alguém que opera o NetVision. '
+  md += 'A detecção real de conflito (`audit-netvision-financeiro.mjs`) continua usando só `ValorPago`, sem alteração. '
+  md += 'Os resultados abaixo são investigação, não recomendação de liberar `em_revisao_financeira` em massa.\n\n'
   md += `Total reprocessado: ${resultados.length}\n\n`
   for (const [cat, lista] of Object.entries(porClassificacao)) {
     md += `## ${cat} (${lista.length})\n\n`
