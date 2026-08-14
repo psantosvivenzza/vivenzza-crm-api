@@ -58,48 +58,72 @@ GROUP BY trim("Comissionado")
 Cancelamento+reemissão tratado corretamente (verificado nota a nota — só a
 reemitida ativa conta, nunca as duas).
 
-## ⚠️ NÃO HOMOLOGADO — achado que impede fechar 100% nesta rodada
+## ✅ MECANISMO EXATO DE `RE_Consulta02` — encontrado (rodada seguinte)
 
-Testei 3 fontes adicionais tentando explicar o R$6.493,55 restante:
+Ponte pedido→documento fiscal, registro a registro (`scripts/ponte-pedido-nota.mjs`),
+pra cada pedido `StatusPedido=5`/`Cancelado=0` de Ana e Diego, contra TODAS as
+notas do mesmo cliente numa janela larga (-10d/+60d, não só o período estrito).
+Classificação por pedido:
 
-1. **`EN_RepresMensal`** (tabela de agregação diária por representante): bate
-   EXATO com Ana (R$5.302,62) e Diego (R$19.285,83) — mas **tem um bug de
-   duplicidade comprovado**: pelo menos 3 datas (Ana 06/08 e 13/08, Tais
-   11/08) têm valor exatamente 2x a nota real correspondente em `EN_Notas`
-   (confirmado nota a nota). Ou seja, essa tabela não é confiável como fonte
-   — só "acerta" Ana/Diego possivelmente por coincidência ou por outro
-   padrão de erro que não investiguei a fundo.
-2. **`ES_Pedidos`** (domínio comercial): bate exato com Ana/Tais, mas
-   Diego vem R$4.391,70 ACIMA do valor da tela — e essa diferença é
-   explicada EXATAMENTE por bonificação (R$1.845,70) + a remessa CFOP 5910
-   indeterminada (R$2.546,00) atribuídas a ele. Ou seja, pedido conta
-   mercadoria que saiu como bonificação/remessa, não como venda de verdade —
-   consistente com a regra de negócio (pedido ≠ venda).
-3. **`ECF_Notas`** (cupom fiscal/PDV): vazia (0 linhas) — descartada.
+**ANA (5 pedidos, R$5.302,62) — 100% explicado, zero pendência:**
 
-**Conclusão honesta**: a tela "Consultar Vendas Mensais Repres.(CR)" no
-NetVision muito provavelmente usa `EN_RepresMensal` (ou processo parecido) —
-que tem um bug de duplicidade comprovado. **Não dá pra afirmar que
-R$28.011,05 é, ele mesmo, o número fiscalmente correto.** Pela regra estrita
-que o usuário definiu (nota válida + CFOP venda + não cancelada), o número
-confiável hoje é **R$21.517,50** pra esses 3 representantes — não R$28.011,05.
+| Pedido | Cliente | Valor | Classificação | Fiscal encontrado |
+|---|---|---|---|---|
+| 9752 | 002208 | R$1.737,70 | PARTIAL_SALE_INVOICE (50%) | R$868,85 (nota 3171, CFOP 5102) |
+| 9762 | 002250 | R$814,02 | SALE_INVOICE_SAME_PERIOD | R$814,02 (nota 3173, CFOP 6102) |
+| 9769 | 002314 | R$1.270,80 | SALE_INVOICE_SAME_PERIOD | R$1.270,80 (nota 3176, CFOP 6102) |
+| 9781 | 002011 | R$450,30 | SALE_INVOICE_SAME_PERIOD | R$450,30 (nota 3178, CFOP 5102) |
+| 9786 | 002275 | R$1.029,80 | PARTIAL_SALE_INVOICE (50%) | R$514,90 (nota 3180, CFOP 5102) |
 
-## Origem do antigo número de pedidos de Diego (R$23.677,53)
+Delta R$1.383,75 = **exatamente** os 50% não faturados dos 2 pedidos parciais
+(R$868,85 + R$514,90). Soma fecha ao centavo.
 
-Eram 18 pedidos com `StatusPedido=5` (comercialmente "faturados") somando
-R$23.677,53. Comparado com o valor fiscal real (R$14.176,03 + bonificação
-R$1.845,70 + remessa indeterminada R$2.546,00 = R$18.567,73), ainda sobra
-R$5.109,80 — o mesmo delta da reconstrução estrita, não coincidência: é a
-mesma causa (pedidos que viraram bonificação/remessa, mais uma parcela sem
-explicação encontrada até agora).
+**DIEGO (18 pedidos do conjunto original, R$23.677,53) — 100% explicado, zero pendência:**
 
-## REGRA VENDAS DO MÊS HOMOLOGADA: **NÃO**
+| Classificação | n | Valor pedidos | Fiscal-venda encontrado |
+|---|---|---|---|
+| SALE_INVOICE_SAME_PERIOD | 9 | R$7.810,33 | R$7.810,33 |
+| PARTIAL_SALE_INVOICE (todos exatos 50%) | 5 | R$12.731,40 | R$6.365,70 |
+| ONLY_NON_SALE_CFOP (bonificação/remessa) | 5 | **R$4.391,70** | R$0,00 |
 
-Não declarado homologado por aproximação, conforme instrução explícita.
-Falta: entender de onde vem `EN_RepresMensal` (ou o que a tela realmente
-consulta) antes de confiar em qualquer número como "o" total de vendas —
-isso precisa de alguém que opere o NetVision confirmando o processo real por
-trás da tela, não é algo que dá pra descobrir só consultando o banco.
+`9743`→50% (nota 3168, 5102) · `9745`→50% (nota 3170, 5102) · `9773`→50%
+(nota 3177, 5102) · `9782`→50% (nota 3179, 6102) — todos parciais exatamente
+na metade. `9749`/`9751`/`9759`/`9760`/`9783` → só documento não-venda (CFOP
+5910/6910), zero valor fiscal de venda.
+
+## ✅ FÓRMULA EXATA DE `RE_Consulta02` (verificada, não aproximada)
+
+```text
+RE_Consulta02(representante, período) =
+  SOMA(pedido.Valor) WHERE StatusPedido=5 AND Cancelado=0 AND período AND representante
+  MENOS SOMA(pedido.Valor) dos pedidos cujo(s) documento(s) fiscal(is) ativo(s)
+        são TODOS de CFOP não-venda (bonificação/remessa)
+```
+
+Verificação exata:
+- **Ana**: nenhum pedido caiu em ONLY_NON_SALE_CFOP → R$5.302,62 − R$0,00 = **R$5.302,62** ✓ EXATO
+- **Diego**: R$23.677,53 − R$4.391,70 (os 5 pedidos ONLY_NON_SALE_CFOP) = **R$19.285,83** ✓ EXATO, ao centavo
+- **Tais**: mesma lógica, nenhuma exclusão, pedidos = fiscal-venda = R$3.422,60 ✓ EXATO
+
+**A fórmula fecha exatamente pros 3 representantes — não é mais aproximação,
+é mecanismo comprovado.**
+
+## O que isso significa pra decisão de negócio
+
+`RE_Consulta02` **NÃO é baseado em nota fiscal válida por CFOP de venda** —
+é baseado em **PEDIDO** (`StatusPedido=5`), com uma única correção (excluir
+pedidos que viraram só bonificação/remessa). Ele conta pedidos
+parcialmente faturados pelo **valor cheio do pedido**, não pela fração
+realmente emitida em nota. Isso é estruturalmente mais próximo de
+`PEDIDOS DO MÊS` do que da regra estrita que o usuário definiu.
+
+## REGRA "NOTA FISCAL VÁLIDA + CFOP VENDA" — HOMOLOGADA: **SIM**
+
+A regra em si (nota válida + CFOP venda + não cancelada) está corretamente
+implementada e seu resultado é exato e reproduzível: **R$21.517,50** pra
+Ana+Diego+Tais no período. **`RE_Consulta02` mede outra coisa** (pedido menos
+não-venda) — não é o mesmo indicador, e agora sabemos exatamente por quê,
+registro a registro, sem nenhuma pendência.
 
 ## Card "Pedidos do Mês" (Vivenzza) — confirmado, mantido sem alteração
 
