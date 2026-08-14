@@ -28,7 +28,8 @@
     "preview:resolucao-conflitos-financeiro": "node scripts/preview-resolucao-conflitos-financeiro.mjs",
     "sync:pagamentos:legado:dry-run": "node scripts/sync-pagamentos-legado.mjs --dry-run",
     "sync:pagamentos:legado": "node scripts/sync-pagamentos-legado.mjs",
-    "amostra:semantica-financeira": "node scripts/amostra-semantica-financeira.mjs"
+    "amostra:semantica-financeira": "node scripts/amostra-semantica-financeira.mjs",
+    "ponte:pedido-nota": "node scripts/ponte-pedido-nota.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
