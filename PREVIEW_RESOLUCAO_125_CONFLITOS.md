@@ -1,6 +1,6 @@
 # Preview — reprocessamento dos conflitos financeiros com a regra canônica
 
-Gerado 2026-08-14T19:13:22.434Z. **NADA foi alterado.**
+Gerado 2026-08-14T19:39:04.523Z. **NADA foi alterado.**
 
 ## ⚠️ Antes de usar este arquivo
 
