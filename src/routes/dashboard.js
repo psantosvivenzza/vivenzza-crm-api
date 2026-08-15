@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { verificarStatusSyncFiscal } from '../lib/vendaFiscalSyncStatus.js'
 
 const router = Router()
 
@@ -222,33 +223,49 @@ router.get('/', async (req, res) => {
     // indicador retorna sempre o total geral + a quebra por representante
     // (nome bruto do NetVision), sem filtro por vendedor logado.
     safe(
-      supabase.from('notas_fiscais_netvision')
-        .select('valor_nota, representante_codigo, representante_nome')
-        .eq('codigo_filial', '001')
-        .eq('cfop_classificacao', 'VENDA')
-        .eq('cancelada', 0)
-        .gte('data_emissao', inicioMes.slice(0, 10))
-        .lte('data_emissao', fimMes.slice(0, 10))
-        .then(({ data, error }) => {
-          if (error) throw error
-          const porRepresentante = {}
-          let valorTotal = 0
-          for (const n of data ?? []) {
-            const chave = n.representante_nome || n.representante_codigo || 'Sem representante'
-            if (!porRepresentante[chave]) porRepresentante[chave] = { codigo: n.representante_codigo, quantidade: 0, valor: 0 }
-            porRepresentante[chave].quantidade++
-            porRepresentante[chave].valor += Number(n.valor_nota) || 0
-            valorTotal += Number(n.valor_nota) || 0
-          }
-          return { disponivel: true, quantidade: (data ?? []).length, valor: valorTotal, por_representante: porRepresentante }
-        }),
+      // 2026-08-14 (achado pós-PR#28): consulta em notas_fiscais_netvision
+      // vazia NÃO é erro — retorna sucesso com data=[], e o código antigo
+      // devolvia disponivel:true, valor:0 como se fosse "zero vendas
+      // confirmado". Mas a tabela fica vazia tanto quando ninguém nunca
+      // sincronizou quanto (hipoteticamente) quando sincronizou e não achou
+      // nada — e o NetVision está offline desde então, então hoje é sempre o
+      // primeiro caso. verificarStatusSyncFiscal() consulta
+      // sincronizacoes_fiscal (log da sincronização real, nunca populado por
+      // dry-run) pra checar se HOUVE sync bem-sucedido e recente antes de
+      // confiar no valor agregado — só then confia validando o schema disso.
+      verificarStatusSyncFiscal().then((statusSync) => {
+        if (!statusSync.disponivel) {
+          return { disponivel: false, motivo: statusSync.reason, ultima_sincronizacao: statusSync.last_sync_at, quantidade: 0, valor: 0, por_representante: {} }
+        }
+        return supabase.from('notas_fiscais_netvision')
+          .select('valor_nota, representante_codigo, representante_nome')
+          .eq('codigo_filial', '001')
+          .eq('cfop_classificacao', 'VENDA')
+          .eq('cancelada', 0)
+          .gte('data_emissao', inicioMes.slice(0, 10))
+          .lte('data_emissao', fimMes.slice(0, 10))
+          .then(({ data, error }) => {
+            if (error) throw error
+            const porRepresentante = {}
+            let valorTotal = 0
+            for (const n of data ?? []) {
+              const chave = n.representante_nome || n.representante_codigo || 'Sem representante'
+              if (!porRepresentante[chave]) porRepresentante[chave] = { codigo: n.representante_codigo, quantidade: 0, valor: 0 }
+              porRepresentante[chave].quantidade++
+              porRepresentante[chave].valor += Number(n.valor_nota) || 0
+              valorTotal += Number(n.valor_nota) || 0
+            }
+            return { disponivel: true, ultima_sincronizacao: statusSync.last_sync_at, quantidade: (data ?? []).length, valor: valorTotal, por_representante: porRepresentante }
+          })
+      }),
       // `disponivel: false` — nunca confundir com "zero vendas real". Cai
-      // aqui se notas_fiscais_netvision ainda não existe em produção (a
-      // migration pode não ter sido aplicada ainda) ou qualquer outro erro
-      // de consulta — o resto do dashboard continua funcionando normalmente
-      // (safe() garante isso), só este indicador fica marcado indisponível
-      // pro frontend não desenhar R$0,00 como se fosse dado fiscal confirmado.
-      { disponivel: false, quantidade: 0, valor: 0, por_representante: {} }
+      // aqui se notas_fiscais_netvision/sincronizacoes_fiscal ainda não
+      // existem em produção, se nunca houve sync bem-sucedido, se o sync
+      // está desatualizado, ou qualquer erro de consulta — o resto do
+      // dashboard continua funcionando normalmente (safe() garante isso), só
+      // este indicador fica marcado indisponível pro frontend não desenhar
+      // R$0,00 como se fosse dado fiscal confirmado.
+      { disponivel: false, motivo: 'erro_inesperado', quantidade: 0, valor: 0, por_representante: {} }
     ),
   ])
 

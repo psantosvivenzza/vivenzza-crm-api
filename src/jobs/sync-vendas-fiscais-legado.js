@@ -79,12 +79,27 @@ function montarNota(row, mapaRepresentantes) {
 
 /**
  * `dryRun: true` (padrão) só reporta o que seria criado/atualizado, nenhuma
- * escrita. Filtro opcional `filial`/`desde` pra rodadas parciais.
+ * escrita — inclusive no log de sincronização abaixo, que só registra
+ * execuções reais (dry_run nunca conta como sincronização pro indicador de
+ * frescor em vendaFiscalSyncStatus.js, mesma convenção de
+ * financialSyncGuard.js/sincronizacoes_financeiro). Filtro opcional
+ * `filial`/`desde` pra rodadas parciais.
  */
 export async function executarSincronizacaoVendasFiscais({ dryRun = true, filial = '001', poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
   const contadores = { total_netvision: 0, total_criado: 0, total_atualizado: 0, total_com_erro: 0 }
   const erros = []
+
+  let syncLogId = null
+  if (!dryRun) {
+    const { data, error } = await supabase
+      .from('sincronizacoes_fiscal')
+      .insert({ status: 'executando', dry_run: false, host_origem: process.env.HOSTNAME || process.env.COMPUTERNAME || null })
+      .select('id')
+      .single()
+    if (error) log(`[sync-vendas-fiscais-legado] aviso: não registrou início do sync em sincronizacoes_fiscal: ${error.message}`)
+    else syncLogId = data.id
+  }
 
   try {
     const { rows } = await pool.query(
@@ -142,7 +157,25 @@ export async function executarSincronizacaoVendasFiscais({ dryRun = true, filial
       else contadores.total_atualizado++
     }
 
+    if (syncLogId) {
+      await supabase.from('sincronizacoes_fiscal').update({
+        status: contadores.total_com_erro > 0 ? 'concluido_com_erros' : 'concluido',
+        concluido_em: new Date().toISOString(),
+        total_lido: contadores.total_netvision,
+        total_criado: contadores.total_criado,
+        total_atualizado: contadores.total_atualizado,
+        total_com_erro: contadores.total_com_erro,
+      }).eq('id', syncLogId)
+    }
+
     return { ...contadores, dry_run: false, erros }
+  } catch (err) {
+    if (syncLogId) {
+      await supabase.from('sincronizacoes_fiscal').update({
+        status: 'falhou', concluido_em: new Date().toISOString(), mensagem_erro: err.message,
+      }).eq('id', syncLogId)
+    }
+    throw err
   } finally {
     if (!poolE01) await pool.end()
   }
