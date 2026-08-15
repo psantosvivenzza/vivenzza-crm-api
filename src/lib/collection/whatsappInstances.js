@@ -23,6 +23,51 @@ const COOLDOWN_MINUTES = 30
 // profundidade, sem depender só da disciplina operacional.
 const INSTANCIAS_COMERCIAIS_PROIBIDAS = ['vivenzza', 'vivenzza-teste-cloud']
 
+// BRT fixo (Brasil não observa DST desde 2019) — mesmo padrão de
+// globalSendLimit.js/cobranca-whatsapp.js.
+function inicioDoDiaBrtISO() {
+  const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  return `${hojeBrt}T03:00:00.000Z`
+}
+
+// 2026-08-15 — achado real (B1): whatsapp_instances.sent_today diverge da
+// contagem real de envios porque (a) também soma dispatches purpose=
+// 'internal_test' (homologação, nunca é cobrança de verdade) e (b) só
+// reseta de forma PREGUIÇOSA (garantirContadoresDoDia roda como efeito
+// colateral do próximo dispatch — se um dia passar sem nenhum envio, o
+// contador fica travado no valor do último dia que teve envio, em vez de
+// reflitir "0 hoje"). Pra qualquer decisão de LIMITE (instanciaApta), a
+// fonte canônica agora é o envio real persistido — não o contador
+// incremental. 2 queries (nunca N+1 por instância): pega os dispatches
+// reais de hoje, depois as tentativas bem-sucedidas de hoje que apontam
+// pra eles, agrupadas por instância.
+export async function contarEnviosReaisHojePorInstancia() {
+  const inicioDia = inicioDoDiaBrtISO()
+
+  const { data: dispatches, error: erroDispatches } = await supabase
+    .from('collection_dispatches')
+    .select('id')
+    .eq('purpose', 'collection')
+    .gte('criado_em', inicioDia)
+  if (erroDispatches) throw erroDispatches
+  const idsReais = new Set((dispatches ?? []).map((d) => d.id))
+  if (!idsReais.size) return new Map()
+
+  const { data: tentativas, error: erroTentativas } = await supabase
+    .from('collection_dispatch_attempts')
+    .select('whatsapp_instance_id, status, dispatch_id, enviado_em')
+    .in('status', ['sent', 'delivered', 'read'])
+    .gte('enviado_em', inicioDia)
+  if (erroTentativas) throw erroTentativas
+
+  const contagem = new Map()
+  for (const t of tentativas ?? []) {
+    if (!t.whatsapp_instance_id || !idsReais.has(t.dispatch_id)) continue // exclui internal_test e qualquer coisa fora de hoje
+    contagem.set(t.whatsapp_instance_id, (contagem.get(t.whatsapp_instance_id) ?? 0) + 1)
+  }
+  return contagem
+}
+
 async function garantirContadoresDoDia(instancia) {
   const hojeISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
   if (instancia.counters_reset_at === hojeISO) return instancia
@@ -60,17 +105,23 @@ function estaEmCooldown(instancia) {
   return instancia.health_status === 'cooldown' && instancia.cooldown_until && new Date(instancia.cooldown_until) > new Date()
 }
 
-function instanciaApta(instancia) {
+// 2026-08-15 — `enviosReaisHoje` (Map instanciaId -> contagem) é a fonte
+// canônica pro daily_limit (ver contarEnviosReaisHojePorInstancia acima) —
+// nunca mais instancia.sent_today, que pode divergir (internal_test
+// contaminando, ou reset preguiçoso deixando o valor travado num dia sem
+// envio nenhum). Instância sem nenhuma linha no Map = 0 envios reais hoje.
+function instanciaApta(instancia, enviosReaisHoje) {
   if (INSTANCIAS_COMERCIAIS_PROIBIDAS.includes(instancia.instance_name)) return false
   if (!instancia.enabled) return false
   if (instancia.health_status === 'disabled') return false
   if (estaEmCooldown(instancia)) return false
-  if (instancia.daily_limit != null && instancia.sent_today >= instancia.daily_limit) return false
+  const enviosHoje = enviosReaisHoje.get(instancia.id) ?? 0
+  if (instancia.daily_limit != null && enviosHoje >= instancia.daily_limit) return false
   if (instancia.hourly_limit != null) {
     // Limite por hora por instância é aproximado por sent_today (contador diário) —
     // controle fino de janela horária por instância fica a cargo do limite GLOBAL
-    // (automacoes_config.global_hourly_limit), que o dispatchEngine já aplica de
-        // forma exata contando collection_dispatch_attempts da última hora.
+    // (automacoes_config.global_hourly_limit), que collectionRouting.js/
+    // globalSendLimit.js já aplica de forma exata (ver PR #31).
     return true
   }
   return true
@@ -80,10 +131,10 @@ function instanciaApta(instancia) {
 // (ex: já tentadas neste dispatch) nunca voltam a ser escolhidas no mesmo ciclo de
 // tentativas — evita re-tentar a mesma instância que acabou de falhar.
 export async function selecionarProximaInstancia({ excluirIds = [] } = {}) {
-  const instancias = await listarInstancias()
+  const [instancias, enviosReaisHoje] = await Promise.all([listarInstancias(), contarEnviosReaisHojePorInstancia()])
   const candidatas = instancias
     .filter((i) => !excluirIds.includes(i.id))
-    .filter(instanciaApta)
+    .filter((i) => instanciaApta(i, enviosReaisHoje))
     .sort((a, b) => a.priority - b.priority)
   return candidatas[0] ?? null
 }
@@ -138,20 +189,39 @@ export async function registrarFalhaEnvio(instanciaId) {
   return { healthStatus, falhas }
 }
 
+// 2026-08-15 — achado real (B3): o comentário abaixo sempre afirmou que
+// 'open' só vira 'connected' se não estiver em cooldown, mas o código nunca
+// checou isso — fazia UPDATE incondicional. Com o healthcheck rodando a
+// cada 15min (evolution-health.js) e COOLDOWN_MINUTES=30, isso podia furar
+// o circuit breaker pela metade do tempo: a Evolution respondendo "open"
+// (conectividade física real) reescrevia health_status='connected' mesmo
+// com cooldown_until ainda no futuro, e estaEmCooldown() (que checa
+// health_status==='cooldown' AND cooldown_until>now) passava a devolver
+// false antes da hora. Corrigido: connection_status (conectividade física)
+// sempre reflete a realidade; health_status (estado do circuit breaker) só
+// é tocado quando NÃO há cooldown ativo — cooldown só termina por tempo,
+// nunca por um healthcheck isolado responder bem.
 export async function atualizarStatusConexao(instanceName, connectionStatus) {
-  const { error } = await supabase
+  const { data: atual, error: erroBusca } = await supabase
     .from('whatsapp_instances')
-    .update({
-      connection_status: connectionStatus,
-      last_connection_update: new Date().toISOString(),
-      // connectionStatus vem do healthcheck da Evolution (open/close/connecting).
-      // 'open' garante saúde 'connected' apenas se não estiver em cooldown —
-      // cooldown só se resolve por tempo, não por reconexão isolada (o circuit
-      // breaker existe pra evitar reconectar-e-falhar em loop rápido).
-      ...(connectionStatus === 'open' ? { health_status: 'connected' } : { health_status: 'disconnected' }),
-      updated_at: new Date().toISOString(),
-    })
+    .select('health_status, cooldown_until')
     .eq('instance_name', instanceName)
+    .maybeSingle()
+  if (erroBusca) throw erroBusca
+  if (!atual) return // instância não cadastrada (ex: comercial) — nada a atualizar
+
+  const emCooldownAtivo = atual.health_status === 'cooldown' && atual.cooldown_until && new Date(atual.cooldown_until) > new Date()
+
+  const campos = {
+    connection_status: connectionStatus,
+    last_connection_update: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  if (!emCooldownAtivo) {
+    campos.health_status = connectionStatus === 'open' ? 'connected' : 'disconnected'
+  }
+
+  const { error } = await supabase.from('whatsapp_instances').update(campos).eq('instance_name', instanceName)
   if (error) throw error
 }
 
