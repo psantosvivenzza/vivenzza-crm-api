@@ -109,7 +109,14 @@ class QueryBuilder {
   insert(data) { this._op = 'insert'; this._insertData = data; this._returning = false; return this }
   update(data) { this._op = 'update'; this._updateData = data; this._returning = false; return this }
   upsert(data, opts = {}) { this._op = 'upsert'; this._insertData = data; this._upsertConflict = opts.onConflict || 'id'; this._returning = false; return this }
-  delete() { this._op = 'delete'; return this }
+  // 2026-08-15 — achado real (regressão própria, pegada antes do merge):
+  // faltava zerar _returning aqui, diferente de insert/update/upsert acima
+  // — herdava o `true` default do construtor (que existe pra SELECT puro),
+  // então TODO .delete() (mesmo sem .select() encadeado) passou a gerar
+  // RETURNING * depois da correção de .delete().select(). Sem isso,
+  // .delete() nunca deveria "retornar" nada por padrão, só quando
+  // .select() for chamado explicitamente — mesma regra de insert/update/upsert.
+  delete() { this._op = 'delete'; this._returning = false; return this }
 
   eq(col, val) { this._filters.push({ col: assertIdent(col, 'coluna'), op: '=', val }); return this }
   neq(col, val) { this._filters.push({ col: assertIdent(col, 'coluna'), op: '<>', val }); return this }
