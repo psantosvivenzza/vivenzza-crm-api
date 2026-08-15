@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS public.nba_shadow_log (
   legacy_action text,
   recovery_score integer,
   priority_score integer,
-  criado_em timestamptz NOT NULL DEFAULT now()
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  effective_legacy_action text,
+  blocked_reason text
 );
 
 CREATE TABLE IF NOT EXISTS public.collection_promises (
@@ -45,7 +47,7 @@ CREATE TABLE IF NOT EXISTS public.collection_promises (
   valor numeric NOT NULL,
   promised_date date NOT NULL,
   origem text NOT NULL CHECK (origem IN ('AUTOMATION', 'AI', 'HUMAN')),
-  status text NOT NULL CHECK (status IN ('ativa', 'cumprida', 'quebrada', 'cancelada')),
+  status text NOT NULL DEFAULT 'ativa' CHECK (status IN ('ativa', 'cumprida', 'quebrada', 'cancelada')),
   notes text,
   created_at timestamptz NOT NULL DEFAULT now(),
   fulfilled_at timestamptz,

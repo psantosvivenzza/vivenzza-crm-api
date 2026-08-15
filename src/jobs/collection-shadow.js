@@ -20,7 +20,7 @@ import { calcularEtapa } from '../lib/reguaCobranca.js'
 import { diasAtrasoDe } from '../lib/collection/collectionContactPolicy.js'
 import { calcularEPersistirRecoveryScore, ultimoRecoveryScore } from '../lib/collection/recoveryScore.js'
 import { calcularEPersistirPriorityScore, ultimoPriorityScore, carregarDistribuicaoSaldos } from '../lib/collection/priorityScore.js'
-import { decidirProximaAcao } from '../lib/collection/nextBestAction.js'
+import { decidirProximaAcao, carregarContextoNba } from '../lib/collection/nextBestAction.js'
 import { obterConfigCobranca } from '../lib/collection/featureFlags.js'
 import { getEligibleAccountsRotativo } from '../lib/collection/shadow/shadowReadRepository.js'
 import { persistNbaShadowDecision, persistShadowCursor } from '../lib/collection/shadow/shadowWriteRepository.js'
@@ -68,6 +68,19 @@ export async function runCollectionShadow() {
 
   const resumo = { processados: 0, comScore: 0, comNba: 0, idsProcessados: [] }
 
+  // 2026-08-15 — effective_legacy_action vive no vocabulário da régua LEGADA
+  // (WHATSAPP/NO_ACTION/WAIT_PROMISE) — nunca HUMAN_REVIEW, que é um canal que
+  // só existe no NBA (a régua legada não sabe "revisar com humano", ela só
+  // decide enviar ou não). Guards que hoje resultam em HUMAN_REVIEW no NBA
+  // (em_revisao_financeira, sem_telefone) mapeiam pra NO_ACTION — é
+  // exatamente o que cobranca-whatsapp.js/cobrancas.js já fazem hoje
+  // (excluem o título da elegibilidade, sem enviar nada, sem "revisar" nada).
+  // WAIT_PROMISE é preservado porque é um estado real e nomeado também no
+  // caminho de envio v2 real (dispatchEngine.enviarComFailover chama
+  // promessaAtivaPara() e retorna motivo='promessa_ativa' antes de qualquer
+  // tentativa) — diferente de HUMAN_REVIEW, não é um conceito exclusivo do NBA.
+  const paraAcaoLegado = (acaoEncerrada) => (acaoEncerrada === 'WAIT_PROMISE' ? 'WAIT_PROMISE' : 'NO_ACTION')
+
   for (const conta of contas) {
     const diasAtraso = diasAtrasoDe(conta.vencimento)
     const etapaLegado = calcularEtapa(diasAtraso)
@@ -95,10 +108,30 @@ export async function runCollectionShadow() {
     }
 
     if (config.nba_shadow_mode) {
-      const nba = await decidirProximaAcao(conta.id)
+      // 2026-08-15 — effective_legacy_action: carregarContextoNba() já
+      // implementa, num único lugar, exatamente os guards reais de
+      // elegibilidade (quitado/cancelado/em_revisao_financeira/opt-out/
+      // promessa ativa/fora da régua/sem telefone — nextBestAction.js:105-149).
+      // Calculado 1x e passado pra decidirProximaAcao() (2º argumento
+      // opcional) pra não ler o título 2x por conta. Nunca duplica a regra:
+      // se esses guards mudarem, effective_legacy_action muda junto,
+      // automaticamente, sem precisar editar nada aqui.
+      const contexto = await carregarContextoNba(conta.id)
+      const nba = await decidirProximaAcao(conta.id, { contexto })
+
       // "legacy_action": o que a régua ANTIGA realmente faria hoje — puramente
-      // baseada em etapa por dias de atraso, sem score/prioridade.
+      // baseada em etapa por dias de atraso, sem score/prioridade, SEM os
+      // guards reais (pré-guards, pra compatibilidade com todo consumidor já
+      // existente deste campo).
       const legacyAction = etapaLegado === null ? 'NO_ACTION' : 'WHATSAPP'
+
+      // "effective_legacy_action": a MESMA régua, mas depois de passar pelos
+      // guards reais — a comparação operacionalmente justa contra o NBA.
+      // Quando nenhum guard bloqueia (contexto.encerrado=null), a régua
+      // sempre teria enviado WHATSAPP nesse ponto (fora da régua e sem
+      // telefone já são guards cobertos por contexto.encerrado).
+      const effectiveLegacyAction = contexto.encerrado ? paraAcaoLegado(contexto.encerrado.acao) : legacyAction
+      const blockedReason = contexto.encerrado ? contexto.encerrado.reason_codes[0] ?? null : null
 
       if (recoveryScoreValor === null) {
         const ultimoRecovery = await ultimoRecoveryScore(conta.id)
@@ -112,6 +145,7 @@ export async function runCollectionShadow() {
       await persistNbaShadowDecision({
         contasFinanceirasId: conta.id, nbaSuggestedAction: nba.acao, nbaReasonCodes: nba.reason_codes,
         legacyAction, recoveryScore: recoveryScoreValor, priorityScore: priorityScoreValor,
+        effectiveLegacyAction, blockedReason,
       })
       resumo.comNba++
     }

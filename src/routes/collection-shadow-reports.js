@@ -31,7 +31,7 @@ async function buscarUltimosScoresENba() {
   const [{ data: recoveries, error: e1 }, { data: priorities, error: e2 }, { data: nbas, error: e3 }] = await Promise.all([
     supabase.from('collection_recovery_scores').select('contas_financeiras_id, score, componentes, explicacao, calculado_em').order('calculado_em', { ascending: false }),
     supabase.from('collection_priority_scores').select('contas_financeiras_id, score, componentes, explicacao, calculado_em').order('calculado_em', { ascending: false }),
-    supabase.from('nba_shadow_log').select('contas_financeiras_id, nba_suggested_action, nba_reason_codes, legacy_action, criado_em').order('criado_em', { ascending: false }),
+    supabase.from('nba_shadow_log').select('contas_financeiras_id, nba_suggested_action, nba_reason_codes, legacy_action, effective_legacy_action, blocked_reason, criado_em').order('criado_em', { ascending: false }),
   ])
   if (e1) throw e1
   if (e2) throw e2
@@ -149,6 +149,8 @@ router.get('/customers', async (req, res) => {
         nba_suggested_action: nba?.nba_suggested_action ?? null,
         nba_reason_codes: nba?.nba_reason_codes ?? null,
         nba_legacy_action: nba?.legacy_action ?? null,
+        nba_effective_legacy_action: nba?.effective_legacy_action ?? null,
+        nba_blocked_reason: nba?.blocked_reason ?? null,
         nba_criado_em: nba?.criado_em ?? null,
       }
     })
@@ -186,7 +188,7 @@ router.get('/customers/:id', async (req, res) => {
       dias_atraso: diasAtrasoDe(conta.vencimento),
       recovery: recovery ? { score: recovery.score, componentes: recovery.componentes, explicacao: recovery.explicacao, calculado_em: recovery.calculado_em } : null,
       priority: priority ? { score: priority.score, faixa_risco: faixaRisco(priority.score), componentes: priority.componentes, explicacao: priority.explicacao, calculado_em: priority.calculado_em } : null,
-      nba: nba ? { acao: nba.nba_suggested_action, reason_codes: nba.nba_reason_codes, legacy_action: nba.legacy_action, criado_em: nba.criado_em } : null,
+      nba: nba ? { acao: nba.nba_suggested_action, reason_codes: nba.nba_reason_codes, legacy_action: nba.legacy_action, effective_legacy_action: nba.effective_legacy_action, blocked_reason: nba.blocked_reason, criado_em: nba.criado_em } : null,
     })
   } catch (err) {
     res.status(500).json({ erro: err.message })
@@ -218,6 +220,8 @@ router.get('/next-actions', async (req, res) => {
         nba_suggested_action: nba.nba_suggested_action,
         nba_reason_codes: nba.nba_reason_codes,
         nba_legacy_action: nba.legacy_action ?? null,
+        nba_effective_legacy_action: nba.effective_legacy_action ?? null,
+        nba_blocked_reason: nba.blocked_reason ?? null,
         nba_criado_em: nba.criado_em,
       }
     })
