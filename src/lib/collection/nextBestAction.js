@@ -14,6 +14,7 @@ import { promessaAtivaPara } from './promises.js'
 import { ultimoRecoveryScore } from './recoveryScore.js'
 import { ultimoPriorityScore } from './priorityScore.js'
 import { obterConfigCobranca } from './featureFlags.js'
+import { buscarRegistroDoNotContact } from './doNotContactGuard.js'
 
 export const ACAO = Object.freeze({
   NO_ACTION: 'NO_ACTION',
@@ -66,14 +67,15 @@ export function derivarAcao(channel, handler) {
   return acao
 }
 
+// 2026-08-15 — leitura extraída para doNotContactGuard.js (mesma query,
+// reusada agora também pelo guard do caminho real de envio) — comportamento
+// deste shadow preservado 100%: silenciosamente trata erro de consulta como
+// "não está em opt-out" (fail-open), igual a antes. O guard real usa a MESMA
+// função de leitura mas fail-closed (bloqueia em caso de erro) — ver
+// doNotContactGuard.js/estaEmDoNotContact.
 async function estaEmOptOut(clienteTelefone) {
   if (!clienteTelefone) return false
-  const { data } = await supabase
-    .from('collection_do_not_contact')
-    .select('id')
-    .eq('cliente_telefone', clienteTelefone)
-    .in('canal', ['todos', 'whatsapp'])
-    .limit(1)
+  const { data } = await buscarRegistroDoNotContact(clienteTelefone)
   return (data?.length ?? 0) > 0
 }
 
