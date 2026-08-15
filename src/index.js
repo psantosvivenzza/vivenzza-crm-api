@@ -61,6 +61,7 @@ import evolutionHealthRouter from './routes/evolution-health.js'
 // nba_shadow_mode/score_shadow_mode nascem OFF nesta migration; ligar é uma
 // ação humana separada e posterior. Ver docs/cobranca-ai/DEPLOY_PLAN_MINIMAL.md.
 import { runCollectionShadow } from './jobs/collection-shadow.js'
+import { runNbaShadowRetentionCleanup } from './jobs/nba-shadow-retention-cleanup.js'
 import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
 // FASE B.2 (homologação) — API de leitura para a visualização do ERP (Aging
 // Report + Cobranças → Inteligência/Próximas Ações). Só GET, nunca recalcula
@@ -311,6 +312,19 @@ cron.schedule('*/20 * * * *', async () => {
     await runCollectionShadow()
   } catch (err) {
     console.error('[cron collection-shadow] Erro:', err.message)
+  }
+})
+
+// 2026-08-15 — retenção do nba_shadow_log (automacoes_config.
+// nba_shadow_log_retention_days, default 90). Deliberadamente 1x/dia, nunca
+// junto do ciclo de 20min acima — rodar toda hora apagaria dado recém
+// gravado antes de alguém comparar régua atual x NBA. Só DELETE em
+// nba_shadow_log (cleanupNbaShadowLog), nunca em nenhuma outra tabela.
+cron.schedule('0 6 * * *', async () => {
+  try {
+    await runNbaShadowRetentionCleanup()
+  } catch (err) {
+    console.error('[cron nba-shadow-retention-cleanup] Erro:', err.message)
   }
 })
 
