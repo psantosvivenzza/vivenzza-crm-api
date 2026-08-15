@@ -232,6 +232,18 @@ export async function executarReguaCobranca() {
           resumo.guard = resultadoEnvio.guard
           break
         }
+        if (resultadoEnvio.status === 'blocked' && ['limite_global_diario', 'limite_global_horario'].includes(resultadoEnvio.reason)) {
+          // 2026-08-15 — teto GLOBAL (globalSendLimit.js, soma de todas as
+          // instâncias/motores) atingido no meio da execução — mesmo
+          // tratamento do sync_stale acima: para o lote inteiro em vez de
+          // contar cada conta seguinte como erro (o LIMITE_DIARIO/
+          // LIMITE_POR_HORA locais deste arquivo continuam intactos e
+          // seguem checando antes disto; este é um teto adicional que
+          // também cobre /disparar-individual, que não passava por eles).
+          resumo.paradoPor = resultadoEnvio.reason
+          resumo.limiteGlobal = resultadoEnvio.limite
+          break
+        }
         if (resultadoEnvio.status !== 'sent') {
           throw new Error(`motor de envio não concluiu: ${resultadoEnvio.motivo || resultadoEnvio.status}`)
         }
