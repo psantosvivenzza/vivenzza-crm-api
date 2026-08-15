@@ -8,18 +8,59 @@
 // arquivo, não confia só em revisão manual.
 import { supabase } from '../../supabase-admin.server.js'
 
-// Amostra controlada e determinística — mesma ordem sempre para o mesmo
-// `limit` (por id, estável), nunca aleatória entre execuções.
-export async function getEligibleAccounts(limit) {
-  const { data, error } = await supabase
+const COLUNAS_CONTA = 'id, valor, valor_pago, vencimento, pessoa_nome, codigo_cliente, telefone_cobranca, status, em_revisao_financeira'
+
+function queryContasElegiveis() {
+  return supabase
     .from('contas_financeiras')
-    .select('id, valor, valor_pago, vencimento, pessoa_nome, codigo_cliente, telefone_cobranca, status, em_revisao_financeira')
+    .select(COLUNAS_CONTA)
     .eq('tipo', 'receber')
     .in('status', ['aberta', 'vencida', 'pago_parcial'])
     .order('id', { ascending: true })
-    .limit(limit)
-  if (error) throw error
-  return data ?? []
+}
+
+// 2026-08-15 — achado real: getEligibleAccounts (versão anterior) ordenava
+// por id ASC LIMIT `limit` SEM cursor — sempre as mesmas ~50 contas de menor
+// UUID da carteira inteira, nunca cobria o resto (carteira real tem 1.161+
+// títulos em aberto). Substituída por keyset pagination com cursor
+// persistido (collection_shadow_cursor, singleton id=1): cada ciclo pega a
+// próxima fatia (id > cursor) e, se a carteira ordenada acabar antes de
+// preencher `limit`, completa voltando pro início (wrap-around) — nunca
+// menos que `limit` contas por ciclo quando a carteira tiver `limit` ou mais
+// elegíveis, e cobre a carteira inteira em ceil(carteira/limit) ciclos.
+// Cursor puramente sequencial por id — nunca aleatório, sempre auditável (dá
+// pra saber exatamente "por onde" o shadow está só olhando a tabela).
+// Só LEITURA aqui (lê a posição do cursor); persistir a nova posição é
+// responsabilidade de shadowWriteRepository.js (persistShadowCursor), nunca
+// misturado nesta função — mesma fronteira leitura/escrita do resto do
+// arquivo.
+export async function getEligibleAccountsRotativo(limit) {
+  const { data: cursorRow, error: erroCursor } = await supabase
+    .from('collection_shadow_cursor')
+    .select('ultimo_id_processado')
+    .eq('id', 1)
+    .maybeSingle()
+  if (erroCursor) throw erroCursor
+  const cursor = cursorRow?.ultimo_id_processado ?? null
+
+  let query = queryContasElegiveis().limit(limit)
+  if (cursor) query = query.gt('id', cursor)
+  const { data: primeiraLeva, error: erro1 } = await query
+  if (erro1) throw erro1
+
+  let contas = primeiraLeva ?? []
+
+  if (contas.length < limit) {
+    const faltam = limit - contas.length
+    const { data: voltaAoInicio, error: erro2 } = await queryContasElegiveis().limit(limit)
+    if (erro2) throw erro2
+    const jaIncluidos = new Set(contas.map((c) => c.id))
+    const complemento = (voltaAoInicio ?? []).filter((c) => !jaIncluidos.has(c.id)).slice(0, faltam)
+    contas = contas.concat(complemento)
+  }
+
+  const proximoCursor = contas.length ? contas[contas.length - 1].id : null
+  return { contas, proximoCursor }
 }
 
 export async function getCustomerReceivables(contasFinanceirasId) {

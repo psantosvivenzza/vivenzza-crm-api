@@ -9,8 +9,9 @@
 // cliente, exatamente para comparar "o que o motor novo faria" com "o que a
 // régua antiga realmente fez" antes de confiar nele.
 //
-// Toda leitura passa por shadowReadRepository (getEligibleAccounts); toda
-// escrita própria passa por shadowWriteRepository (persistNbaShadowDecision).
+// Toda leitura passa por shadowReadRepository (getEligibleAccountsRotativo);
+// toda escrita própria passa por shadowWriteRepository
+// (persistNbaShadowDecision, persistShadowCursor).
 // O cálculo de score em si continua delegado a recoveryScore.js/priorityScore.js
 // (módulos compartilhados, já testados, cada um só lê dado financeiro e escreve
 // SÓ na própria tabela de score — não duplicado aqui para não divergir da
@@ -21,8 +22,8 @@ import { calcularEPersistirRecoveryScore, ultimoRecoveryScore } from '../lib/col
 import { calcularEPersistirPriorityScore, ultimoPriorityScore, carregarDistribuicaoSaldos } from '../lib/collection/priorityScore.js'
 import { decidirProximaAcao } from '../lib/collection/nextBestAction.js'
 import { obterConfigCobranca } from '../lib/collection/featureFlags.js'
-import { getEligibleAccounts } from '../lib/collection/shadow/shadowReadRepository.js'
-import { persistNbaShadowDecision } from '../lib/collection/shadow/shadowWriteRepository.js'
+import { getEligibleAccountsRotativo } from '../lib/collection/shadow/shadowReadRepository.js'
+import { persistNbaShadowDecision, persistShadowCursor } from '../lib/collection/shadow/shadowWriteRepository.js'
 
 export async function runCollectionShadow() {
   const config = await obterConfigCobranca()
@@ -42,10 +43,13 @@ export async function runCollectionShadow() {
   // elegível, incluindo contas em contestação — que devem aparecer como
   // HUMAN_REVIEW no log, não desaparecer silenciosamente da amostra.
   //
-  // getEligibleAccounts ordena por id (determinístico) — a mesma amostra de
-  // até `limite` contas sempre que rodar sobre o mesmo dado, nunca aleatória
-  // (pedido explícito, seção 15).
-  const contas = await getEligibleAccounts(limite)
+  // 2026-08-15 — rotação por cursor (collection_shadow_cursor): antes disto,
+  // ordenar só por id ASC LIMIT sempre pegava as MESMAS ~50 contas de menor
+  // UUID, nunca cobria o resto da carteira real (achado, 1.161 títulos em
+  // aberto em produção só 50 eram vistos, pra sempre). Determinístico —
+  // nunca aleatório (pedido explícito, seção 15) — só avança
+  // sequencialmente por id, com wrap-around no fim da carteira ordenada.
+  const { contas, proximoCursor } = await getEligibleAccountsRotativo(limite)
 
   // 2026-08-15 — achado de performance (mesmo já documentado em
   // priorityScore.js:22-30, "~2,6s/conta, ~131s pra 50 contas"): esta função
@@ -114,6 +118,13 @@ export async function runCollectionShadow() {
     resumo.processados++
     resumo.idsProcessados.push(conta.id)
   }
+
+  // Avança o cursor só depois do ciclo inteiro processar (nunca no meio) —
+  // se o processo cair a meio caminho, o próximo ciclo REPETE o lote atual
+  // em vez de pular contas sem processar (mais seguro: repetir é inofensivo,
+  // pular é o que causava a cobertura incompleta original).
+  await persistShadowCursor(proximoCursor)
+  resumo.proximoCursor = proximoCursor
 
   console.log('[collection-shadow] ciclo concluído:', { ...resumo, idsProcessados: `${resumo.idsProcessados.length} id(s), ver retorno para lista completa` })
   return resumo
