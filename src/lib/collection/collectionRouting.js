@@ -16,6 +16,7 @@ import { enviarComFailover } from './dispatchEngine.js'
 import { obterConfigCobranca } from './featureFlags.js'
 import { verificarFrescorSync, logBloqueioSyncStale } from './financialSyncGuard.js'
 import { verificarLimiteGlobalEnvio } from './globalSendLimit.js'
+import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario } from './doNotContactGuard.js'
 
 // Ponto único de verdade pra TODO envio real de cobrança (cron, /disparar,
 // /disparar-individual — todos chegam aqui) — por isso é o lugar certo pro
@@ -42,6 +43,21 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
       status: 'blocked', motor: null, reason: limiteGlobal.motivo,
       motivo: `Teto global de envio atingido (${limiteGlobal.motivo})`, limite: limiteGlobal,
     }
+  }
+
+  // 2026-08-15 — DNC/opt-out (collection_do_not_contact), checado ANTES da
+  // escolha de motor de propósito: cobre os dois motores (legado
+  // enviarTextoFinanceiro E v2 enviarComFailover) de uma vez, igual ao guard
+  // de sync/teto global acima — mesma razão, mesmo ponto. Fail-closed: erro
+  // na consulta também bloqueia (estaEmDoNotContact nunca deixa passar por
+  // falha técnica do próprio guard). Nunca conta como falha técnica de
+  // instância/provider — bloqueia ANTES de qualquer seleção de instância,
+  // dispatch ou tentativa (nenhum failover, nenhum retry, nenhum provider
+  // attempt chega a existir pra esta cobrança).
+  const dnc = await estaEmDoNotContact(clienteTelefone)
+  if (dnc.blocked) {
+    await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId, clienteTelefone, reason: dnc.reason })
+    return { status: 'blocked', motor: null, reason: 'opt_out', motivo: `Cliente em opt-out/DNC (${dnc.reason})` }
   }
 
   const config = await obterConfigCobranca()

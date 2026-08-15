@@ -20,6 +20,7 @@ import { selecionarProximaInstancia, registrarSucessoEnvio, registrarFalhaEnvio 
 import { enviarTexto, classifyEvolutionFailure, normalizarStatusAck } from './evolutionAdapter.js'
 import { tituloEstaQuitado } from './paymentGuard.js'
 import { promessaAtivaPara } from './promises.js'
+import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario } from './doNotContactGuard.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
 import { telefonesEquivalentes, mascararTelefone } from '../telefone.js'
@@ -220,6 +221,17 @@ export async function reavaliarTimeoutsDeEntrega() {
 
   let reavaliados = 0
   for (const dispatch of presos ?? []) {
+    // 2026-08-15 — DNC/opt-out: este é um reenvio (não passa por
+    // enviarComFailover/enviarCobrancaComRoteamento de novo), então precisa
+    // do próprio guard — "independente de retry" (o pedido original de
+    // fechar o gap explicitamente cobre isto). Fail-closed, mesma semântica
+    // do guard central.
+    const dnc = await estaEmDoNotContact(dispatch.cliente_telefone)
+    if (dnc.blocked) {
+      await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId: dispatch.contas_financeiras_id, clienteTelefone: dispatch.cliente_telefone, reason: dnc.reason })
+      continue
+    }
+
     const { data: tentativasAnteriores } = await supabase
       .from('collection_dispatch_attempts')
       .select('whatsapp_instance_id')
