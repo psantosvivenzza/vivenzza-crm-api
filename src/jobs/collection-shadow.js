@@ -18,7 +18,7 @@
 import { calcularEtapa } from '../lib/reguaCobranca.js'
 import { diasAtrasoDe } from '../lib/collection/collectionContactPolicy.js'
 import { calcularEPersistirRecoveryScore, ultimoRecoveryScore } from '../lib/collection/recoveryScore.js'
-import { calcularEPersistirPriorityScore, ultimoPriorityScore } from '../lib/collection/priorityScore.js'
+import { calcularEPersistirPriorityScore, ultimoPriorityScore, carregarDistribuicaoSaldos } from '../lib/collection/priorityScore.js'
 import { decidirProximaAcao } from '../lib/collection/nextBestAction.js'
 import { obterConfigCobranca } from '../lib/collection/featureFlags.js'
 import { getEligibleAccounts } from '../lib/collection/shadow/shadowReadRepository.js'
@@ -47,6 +47,21 @@ export async function runCollectionShadow() {
   // (pedido explícito, seção 15).
   const contas = await getEligibleAccounts(limite)
 
+  // 2026-08-15 — achado de performance (mesmo já documentado em
+  // priorityScore.js:22-30, "~2,6s/conta, ~131s pra 50 contas"): esta função
+  // chamava calcularEPersistirPriorityScore sem a distribuição pré-carregada,
+  // então cada conta varria a carteira em aberto inteira do zero
+  // (carregarDistribuicaoSaldos, paginada) só pra achar o percentil de 1
+  // saldo. A otimização já existia na lib (percentilEmDistribuicao) mas não
+  // estava conectada aqui — carrega 1x por ciclo, reusa pra todas as contas.
+  // Resultado do score é idêntico (mesma fórmula/pesos, só decide de onde vem
+  // o percentil — distribuição em memória em vez de nova varredura por
+  // conta), ver score-formula-correctness.test.mjs e
+  // priority-score-otimizacao.test.mjs para a prova de equivalência. Só
+  // carrega se score_shadow_mode estiver ligado — nba_shadow_mode sozinho
+  // nunca calcula score (só lê o último persistido), não precisa da carteira.
+  const distribuicaoSaldos = config.score_shadow_mode ? await carregarDistribuicaoSaldos() : null
+
   const resumo = { processados: 0, comScore: 0, comNba: 0, idsProcessados: [] }
 
   for (const conta of contas) {
@@ -69,7 +84,7 @@ export async function runCollectionShadow() {
 
     if (config.score_shadow_mode) {
       const recovery = await calcularEPersistirRecoveryScore(conta.id)
-      const priority = await calcularEPersistirPriorityScore(conta.id, { recoveryScore: recovery.score })
+      const priority = await calcularEPersistirPriorityScore(conta.id, { recoveryScore: recovery.score, distribuicaoSaldos })
       recoveryScoreValor = recovery.score
       priorityScoreValor = priority.score
       resumo.comScore++
