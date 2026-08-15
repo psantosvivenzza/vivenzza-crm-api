@@ -7,10 +7,16 @@
 // não confia só em revisão manual).
 import { supabase } from '../../supabase-admin.server.js'
 
-export async function persistNbaShadowDecision({ contasFinanceirasId, nbaSuggestedAction, nbaReasonCodes, legacyAction, recoveryScore, priorityScore }) {
+// `effectiveLegacyAction`/`blockedReason` (2026-08-15) opcionais — só o
+// shadow os preenche hoje. legacy_action continua sendo a régua PRÉ-guards
+// (compatibilidade com todo consumidor existente); effective_legacy_action é
+// a mesma régua depois dos guards reais de elegibilidade — a comparação
+// operacionalmente justa contra nba_suggested_action.
+export async function persistNbaShadowDecision({ contasFinanceirasId, nbaSuggestedAction, nbaReasonCodes, legacyAction, recoveryScore, priorityScore, effectiveLegacyAction = null, blockedReason = null }) {
   const { error } = await supabase.from('nba_shadow_log').insert({
     contas_financeiras_id: contasFinanceirasId, nba_suggested_action: nbaSuggestedAction, nba_reason_codes: nbaReasonCodes,
     legacy_action: legacyAction, recovery_score: recoveryScore, priority_score: priorityScore,
+    effective_legacy_action: effectiveLegacyAction, blocked_reason: blockedReason,
   })
   if (error) throw error
 }

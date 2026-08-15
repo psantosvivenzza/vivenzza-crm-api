@@ -192,8 +192,13 @@ export function escolherCanalNba({ config, teveQuebra, priority, recovery, etapa
   return { channel, handler, acao: derivarAcao(channel, handler), reason_codes: reasonCodes }
 }
 
-export async function decidirProximaAcao(contasFinanceirasId) {
-  const contexto = await carregarContextoNba(contasFinanceirasId)
+// `contexto` opcional (2026-08-15, effective_legacy_action) — permite ao
+// shadow calcular carregarContextoNba() UMA vez e reusar tanto para o
+// effective_legacy_action (guards) quanto para a decisão NBA em si, sem ler o
+// título duas vezes por ciclo. Chamada normal (sem 2º argumento) continua
+// carregando o contexto internamente — comportamento 100% igual a antes.
+export async function decidirProximaAcao(contasFinanceirasId, { contexto: contextoInjetado } = {}) {
+  const contexto = contextoInjetado ?? await carregarContextoNba(contasFinanceirasId)
   if (contexto.encerrado) return contexto.encerrado
 
   const config = await obterConfigCobranca()
