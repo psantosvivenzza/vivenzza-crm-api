@@ -94,7 +94,13 @@ class QueryBuilder {
 
   select(cols = '*', opts = {}) {
     this._selectCols = cols
-    if (this._op === 'insert' || this._op === 'update') this._returning = true
+    // 2026-08-15 — achado real: faltava 'upsert' aqui. .upsert(...).select().single()
+    // silenciosamente devolvia data:null (sem RETURNING na query), diferente do
+    // Supabase real (que sempre devolve a linha upsertada com .select()) —
+    // exposto pela primeira vez por calcularEPersistirPriorityScore/
+    // RecoveryScore (priorityScore.js/recoveryScore.js) ao trocar insert por
+    // upsert.
+    if (this._op === 'insert' || this._op === 'update' || this._op === 'upsert' || this._op === 'delete') this._returning = true
     if (opts.count) this._count = opts.count
     if (opts.head) this._head = true
     return this
@@ -231,7 +237,17 @@ class QueryBuilder {
     const sql = `INSERT INTO ${this.table} (${cols.join(', ')}) VALUES ${placeholders.join(', ')} ` +
       `ON CONFLICT (${conflictCols.join(', ')}) DO UPDATE SET ${updateSet} ${returning}`
     const res = await this.pool.query(sql, values)
-    return { data: this._returning ? res.rows : null, error: null }
+    const rows = res.rows
+    // 2026-08-15 — faltava aqui (só _executeInsert/_executeUpdate/_executeSelect
+    // tinham): sem isso, .upsert(...).select().single() devolvia o array
+    // inteiro em `data` em vez do objeto único — `data.algumCampo` virava
+    // undefined silenciosamente, sem erro, diferente do Supabase real.
+    if (this._single) {
+      if (rows.length !== 1) return { data: null, error: { message: `expected 1 row, got ${rows.length}` } }
+      return { data: rows[0], error: null }
+    }
+    if (this._maybeSingle) return { data: rows[0] ?? null, error: null }
+    return { data: this._returning ? rows : null, error: null }
   }
 
   async _executeUpdate() {
@@ -253,9 +269,20 @@ class QueryBuilder {
 
   async _executeDelete() {
     const where = this._whereClause(1)
-    const sql = `DELETE FROM ${this.table} ${where.sql}`
-    await this.pool.query(sql, where.params)
-    return { data: null, error: null }
+    // 2026-08-15 — faltava RETURNING aqui: .delete().select() sempre devolvia
+    // data:null, diferente do Supabase real (que devolve as linhas apagadas
+    // com .select()) — exposto por cleanupNbaShadowLog (shadowWriteRepository.js)
+    // ao precisar saber quantas linhas um DELETE removeu de verdade.
+    const returning = this._returning ? `RETURNING ${this._selectCols === '*' ? '*' : this._selectCols}` : ''
+    const sql = `DELETE FROM ${this.table} ${where.sql} ${returning}`
+    const res = await this.pool.query(sql, where.params)
+    const rows = res.rows
+    if (this._single) {
+      if (rows.length !== 1) return { data: null, error: { message: `expected 1 row, got ${rows.length}` } }
+      return { data: rows[0], error: null }
+    }
+    if (this._maybeSingle) return { data: rows[0] ?? null, error: null }
+    return { data: this._returning ? rows : null, error: null }
   }
 
   async _run() {

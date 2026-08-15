@@ -151,11 +151,20 @@ export async function calcularPriorityScore(contasFinanceirasId, { recoveryScore
   return { score: Math.max(0, Math.min(100, score)), componentes, explicacao }
 }
 
+// 2026-08-15 — upsert por conta (não insert): este score é "estado atual",
+// não histórico — a mesma conta nunca precisa de mais de 1 linha viva por
+// vez (índice único em contas_financeiras_id, migration
+// 20260101000038_collection_shadow_rotation_retention.sql). Antes disso, um
+// insert puro a cada ciclo fazia a tabela crescer sem limite pros mesmos
+// títulos processados repetidamente.
 export async function calcularEPersistirPriorityScore(contasFinanceirasId, opts) {
   const { score, componentes, explicacao } = await calcularPriorityScore(contasFinanceirasId, opts)
   const { data, error } = await supabase
     .from('collection_priority_scores')
-    .insert({ contas_financeiras_id: contasFinanceirasId, score, formula_version: FORMULA_VERSION, componentes, explicacao })
+    .upsert(
+      { contas_financeiras_id: contasFinanceirasId, score, formula_version: FORMULA_VERSION, componentes, explicacao, calculado_em: new Date().toISOString() },
+      { onConflict: 'contas_financeiras_id' }
+    )
     .select()
     .single()
   if (error) throw error

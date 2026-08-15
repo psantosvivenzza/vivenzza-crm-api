@@ -153,11 +153,17 @@ export async function calcularRecoveryScore(contasFinanceirasId) {
   return { score: Math.max(0, Math.min(100, score)), componentes, explicacao }
 }
 
+// 2026-08-15 — upsert por conta (não insert), mesmo racional de
+// priorityScore.js:calcularEPersistirPriorityScore — score "atual", não
+// histórico, índice único em contas_financeiras_id.
 export async function calcularEPersistirRecoveryScore(contasFinanceirasId) {
   const { score, componentes, explicacao } = await calcularRecoveryScore(contasFinanceirasId)
   const { data, error } = await supabase
     .from('collection_recovery_scores')
-    .insert({ contas_financeiras_id: contasFinanceirasId, score, formula_version: FORMULA_VERSION, componentes, explicacao })
+    .upsert(
+      { contas_financeiras_id: contasFinanceirasId, score, formula_version: FORMULA_VERSION, componentes, explicacao, calculado_em: new Date().toISOString() },
+      { onConflict: 'contas_financeiras_id' }
+    )
     .select()
     .single()
   if (error) throw error
