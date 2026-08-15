@@ -63,6 +63,20 @@ function faixaScore(score) {
   return '76-100'
 }
 
+// Rótulo de risco em português pro priority_score (não recovery_score — priority
+// já incorpora recovery como um dos 5 componentes, ver priorityScore.js:1-2, então
+// é a medida mais próxima de "risco de cobrança" que já existe). Mesmos cortes de
+// faixaScore() acima, só com nome pra gente que lê o painel — nenhum cálculo novo,
+// nenhuma tabela nova (achado do mapeamento do backlog "SCORE/RÉGUA": pedido de
+// nomenclatura de faixa era a única lacuna real sobre score já pronto e testado).
+function faixaRisco(priorityScore) {
+  if (priorityScore == null) return null
+  if (priorityScore <= 25) return 'BAIXO RISCO'
+  if (priorityScore <= 50) return 'ATENÇÃO'
+  if (priorityScore <= 75) return 'ALTO RISCO'
+  return 'CRÍTICO'
+}
+
 // GET /api/collection-shadow/summary
 router.get('/summary', async (req, res) => {
   try {
@@ -131,8 +145,10 @@ router.get('/customers', async (req, res) => {
         recovery_calculado_em: recovery?.calculado_em ?? null,
         priority_score: priority?.score ?? null,
         priority_calculado_em: priority?.calculado_em ?? null,
+        faixa_risco: faixaRisco(priority?.score ?? null),
         nba_suggested_action: nba?.nba_suggested_action ?? null,
         nba_reason_codes: nba?.nba_reason_codes ?? null,
+        nba_legacy_action: nba?.legacy_action ?? null,
         nba_criado_em: nba?.criado_em ?? null,
       }
     })
@@ -169,7 +185,7 @@ router.get('/customers/:id', async (req, res) => {
       vencimento: conta.vencimento,
       dias_atraso: diasAtrasoDe(conta.vencimento),
       recovery: recovery ? { score: recovery.score, componentes: recovery.componentes, explicacao: recovery.explicacao, calculado_em: recovery.calculado_em } : null,
-      priority: priority ? { score: priority.score, componentes: priority.componentes, explicacao: priority.explicacao, calculado_em: priority.calculado_em } : null,
+      priority: priority ? { score: priority.score, faixa_risco: faixaRisco(priority.score), componentes: priority.componentes, explicacao: priority.explicacao, calculado_em: priority.calculado_em } : null,
       nba: nba ? { acao: nba.nba_suggested_action, reason_codes: nba.nba_reason_codes, legacy_action: nba.legacy_action, criado_em: nba.criado_em } : null,
     })
   } catch (err) {
@@ -178,26 +194,30 @@ router.get('/customers/:id', async (req, res) => {
 })
 
 // GET /api/collection-shadow/next-actions — só os títulos que já têm uma
-// decisão de NBA shadow registrada.
+// decisão de NBA shadow registrada. Inclui priority_score/faixa_risco e a
+// régua atual (nba_legacy_action) lado a lado com a ação sugerida — antes só
+// dava pra comparar as duas olhando conta por conta em /customers/:id.
 router.get('/next-actions', async (req, res) => {
   try {
-    const { data: nbas, error } = await supabase.from('nba_shadow_log').select('*').order('criado_em', { ascending: false })
-    if (error) throw error
-    const nbaPorConta = maisRecentePorConta(nbas ?? [])
+    const { priorityPorConta, nbaPorConta } = await buscarUltimosScoresENba()
     const ids = [...nbaPorConta.keys()]
     const contas = await buscarContasFinanceiras(ids)
 
     const linhas = ids.map((id) => {
       const conta = contas.get(id)
       const nba = nbaPorConta.get(id)
+      const priority = priorityPorConta.get(id)
       const saldo = conta ? Number(conta.valor || 0) - Number(conta.valor_pago || 0) : null
       return {
         contas_financeiras_id: id,
         pessoa_nome: conta?.pessoa_nome ?? null,
         saldo_em_aberto: saldo,
         dias_atraso: conta ? diasAtrasoDe(conta.vencimento) : null,
+        priority_score: priority?.score ?? null,
+        faixa_risco: faixaRisco(priority?.score ?? null),
         nba_suggested_action: nba.nba_suggested_action,
         nba_reason_codes: nba.nba_reason_codes,
+        nba_legacy_action: nba.legacy_action ?? null,
         nba_criado_em: nba.criado_em,
       }
     })
