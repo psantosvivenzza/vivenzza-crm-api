@@ -27,16 +27,50 @@ function maisRecentePorConta(linhas) {
   return mapa
 }
 
+// 2026-08-16 — achado real em produção: sem paginação explícita, o PostgREST
+// aplica um limite padrão de 1000 linhas por requisição — silencioso, sem
+// erro. collection_priority_scores/collection_recovery_scores/nba_shadow_log
+// já passam ou já passaram disso (1165/1165/3000+ em produção hoje), então
+// /customers, /next-actions, /summary e /queue vinham lendo uma fatia
+// TRUNCADA da carteira sem ninguém perceber (quanto ao NBA log, ainda pior:
+// como a leitura é ordenada por criado_em DESC, o corte em 1000 linhas
+// pegava só as decisões mais recentes — títulos cujo último ciclo do shadow
+// foi há mais tempo simplesmente desapareciam da leitura).
+//
+// Pagina via .range() até uma página vir menor que o tamanho pedido (fim da
+// tabela) — mesmo padrão já usado em carregarDistribuicaoSaldos()
+// (priorityScore.js) e no loop de contas elegíveis (cobranca-whatsapp.js).
+// Número de requisições pequeno e fixo por leitura (não por título).
+// `.order(coluna).order('id')` — desempate determinístico por id: sem isso,
+// duas linhas com o mesmo timestamp de milissegundo (plausível num INSERT em
+// lote/mesmo ciclo) poderiam ficar em páginas diferentes de formas
+// inconsistentes entre requisições, arriscando pular ou duplicar linha
+// exatamente na fronteira da página.
+const TAMANHO_PAGINA = 1000
+
+async function buscarTodasAsLinhas(tabela, colunas, colunaOrdenacao) {
+  const todas = []
+  for (let offset = 0; ; offset += TAMANHO_PAGINA) {
+    const { data, error } = await supabase
+      .from(tabela)
+      .select(colunas)
+      .order(colunaOrdenacao, { ascending: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + TAMANHO_PAGINA - 1)
+    if (error) throw error
+    todas.push(...(data ?? []))
+    if ((data?.length ?? 0) < TAMANHO_PAGINA) break
+  }
+  return todas
+}
+
 async function buscarUltimosScoresENba() {
-  const [{ data: recoveries, error: e1 }, { data: priorities, error: e2 }, { data: nbas, error: e3 }] = await Promise.all([
-    supabase.from('collection_recovery_scores').select('contas_financeiras_id, score, componentes, explicacao, calculado_em').order('calculado_em', { ascending: false }),
-    supabase.from('collection_priority_scores').select('contas_financeiras_id, score, componentes, explicacao, calculado_em').order('calculado_em', { ascending: false }),
-    supabase.from('nba_shadow_log').select('contas_financeiras_id, nba_suggested_action, nba_reason_codes, legacy_action, effective_legacy_action, blocked_reason, criado_em').order('criado_em', { ascending: false }),
+  const [recoveries, priorities, nbas] = await Promise.all([
+    buscarTodasAsLinhas('collection_recovery_scores', 'contas_financeiras_id, score, componentes, explicacao, calculado_em', 'calculado_em'),
+    buscarTodasAsLinhas('collection_priority_scores', 'contas_financeiras_id, score, componentes, explicacao, calculado_em', 'calculado_em'),
+    buscarTodasAsLinhas('nba_shadow_log', 'contas_financeiras_id, nba_suggested_action, nba_reason_codes, legacy_action, effective_legacy_action, blocked_reason, criado_em', 'criado_em'),
   ])
-  if (e1) throw e1
-  if (e2) throw e2
-  if (e3) throw e3
-  return { recoveryPorConta: maisRecentePorConta(recoveries ?? []), priorityPorConta: maisRecentePorConta(priorities ?? []), nbaPorConta: maisRecentePorConta(nbas ?? []) }
+  return { recoveryPorConta: maisRecentePorConta(recoveries), priorityPorConta: maisRecentePorConta(priorities), nbaPorConta: maisRecentePorConta(nbas) }
 }
 
 // 2026-08-16 — achado real em produção: com a carteira inteira já coberta
