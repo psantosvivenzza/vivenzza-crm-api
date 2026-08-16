@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { executarReguaCobranca } from '../jobs/cobranca-whatsapp.js'
+import { verificarFrescorSync } from '../lib/collection/financialSyncGuard.js'
 
 const router = Router()
 
@@ -152,10 +153,26 @@ router.patch('/:id/status', async (req, res) => {
 })
 
 // GET /api/cobrancas/status — estado atual do kill-switch da régua automática
+// 2026-08-16 — sync_financeiro adicionado: distingue "régua configurada como
+// ativa" (cobranca_whatsapp_ativa) de "envio de fato permitido agora" (guard
+// de frescor do sync financeiro) — achado real, o frontend mostrava "próximo
+// disparo hoje às 08h" mesmo com financialSyncGuard.allowed=false, o que é
+// enganoso. Só LEITURA (verificarFrescorSync() já é cacheado, 45s) — não
+// muda nenhum comportamento de envio, só expõe o estado que já existe.
 router.get('/status', async (req, res) => {
   try {
     const { data } = await supabase.from('automacoes_config').select('cobranca_whatsapp_ativa').eq('id', 1).maybeSingle()
-    res.json({ cobranca_whatsapp_ativa: data?.cobranca_whatsapp_ativa === true })
+    const guardSync = await verificarFrescorSync()
+    res.json({
+      cobranca_whatsapp_ativa: data?.cobranca_whatsapp_ativa === true,
+      sync_financeiro: {
+        allowed: guardSync.allowed,
+        reason: guardSync.reason,
+        last_sync_at: guardSync.last_sync_at,
+        age_minutes: guardSync.age_minutes,
+        max_age_minutes: guardSync.max_age_minutes,
+      },
+    })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
