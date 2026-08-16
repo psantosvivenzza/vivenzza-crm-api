@@ -39,14 +39,29 @@ async function buscarUltimosScoresENba() {
   return { recoveryPorConta: maisRecentePorConta(recoveries ?? []), priorityPorConta: maisRecentePorConta(priorities ?? []), nbaPorConta: maisRecentePorConta(nbas ?? []) }
 }
 
+// 2026-08-16 — achado real em produção: com a carteira inteira já coberta
+// pelo shadow (1165+ IDs únicos entre score/NBA), um único `.in('id', ids)`
+// vira uma URL de dezenas de milhares de caracteres — o compat client local
+// (usado nos testes) aceita de boa, mas o PostgREST real do Supabase rejeita
+// com 400/"Bad Request", que a lib de cliente repassa como erro genérico.
+// Derrubava silenciosamente /customers e /next-actions (pré-existentes) e,
+// agora, também /queue. Corrigido paginando em lotes pequenos — mesmo
+// resultado final, só several requisições menores em vez de uma gigante.
+const LOTE_IDS = 200
+
 async function buscarContasFinanceiras(ids) {
   if (!ids.length) return new Map()
-  const { data, error } = await supabase
-    .from('contas_financeiras')
-    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, codigo_cliente, status, em_revisao_financeira')
-    .in('id', ids)
-  if (error) throw error
-  return new Map((data ?? []).map((c) => [c.id, c]))
+  const mapa = new Map()
+  for (let i = 0; i < ids.length; i += LOTE_IDS) {
+    const lote = ids.slice(i, i + LOTE_IDS)
+    const { data, error } = await supabase
+      .from('contas_financeiras')
+      .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, codigo_cliente, status, em_revisao_financeira')
+      .in('id', lote)
+    if (error) throw error
+    for (const c of data ?? []) mapa.set(c.id, c)
+  }
+  return mapa
 }
 
 // 2026-08-16 — fila operacional (PASSO seguinte ao baseline validado). Tabela
