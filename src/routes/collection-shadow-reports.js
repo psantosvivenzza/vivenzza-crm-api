@@ -43,10 +43,24 @@ async function buscarContasFinanceiras(ids) {
   if (!ids.length) return new Map()
   const { data, error } = await supabase
     .from('contas_financeiras')
-    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, codigo_cliente')
+    .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, codigo_cliente, status, em_revisao_financeira')
     .in('id', ids)
   if (error) throw error
   return new Map((data ?? []).map((c) => [c.id, c]))
+}
+
+// 2026-08-16 — fila operacional (PASSO seguinte ao baseline validado). Tabela
+// collection_timeline_events é pequena (154 linhas em produção hoje) — 1
+// leitura completa, reduzida em memória pra "última interação por título",
+// mesmo padrão de maisRecentePorConta() acima (sem N+1, sem função nova no
+// Postgres).
+async function buscarUltimaInteracaoPorConta() {
+  const { data, error } = await supabase
+    .from('collection_timeline_events')
+    .select('contas_financeiras_id, tipo, criado_em')
+    .order('criado_em', { ascending: false })
+  if (error) throw error
+  return maisRecentePorConta(data ?? [])
 }
 
 function percentil(arr, p) {
@@ -227,6 +241,118 @@ router.get('/next-actions', async (req, res) => {
     })
 
     res.json({ shadow_badge: 'SHADOW', data: linhas, total: linhas.length })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/collection-shadow/queue — fila operacional de triagem/revisão
+// humana. 100% leitura de dados JÁ persistidos (score/NBA/timeline) — não
+// recalcula nada, não cria dispatch/cobrança/promessa, não muda status
+// financeiro nem em_revisao_financeira. SHADOW continua sem nenhum poder de
+// execução: esta rota só organiza o que já existe pra consulta/triagem
+// humana, nada mais.
+//
+// Só títulos ATUALMENTE elegíveis (tipo=receber, status IN
+// aberta/vencida/pago_parcial) entram na fila — um score/NBA "órfão" de um
+// título já pago/cancelado (ex: resíduo de homologação anterior) nunca
+// aparece aqui, diferente de /customers (que lista qualquer título com score
+// persistido, sem checar status atual).
+const ORDENACOES = Object.freeze({
+  priority_desc: (a, b) => (b.priority_score ?? -1) - (a.priority_score ?? -1),
+  priority_asc: (a, b) => (a.priority_score ?? 999) - (b.priority_score ?? 999),
+  dias_atraso_desc: (a, b) => (b.dias_atraso ?? -Infinity) - (a.dias_atraso ?? -Infinity),
+  saldo_desc: (a, b) => (b.saldo_em_aberto ?? -Infinity) - (a.saldo_em_aberto ?? -Infinity),
+})
+
+router.get('/queue', async (req, res) => {
+  try {
+    const { recoveryPorConta, priorityPorConta, nbaPorConta } = await buscarUltimosScoresENba()
+    const idsComDado = [...new Set([...recoveryPorConta.keys(), ...priorityPorConta.keys(), ...nbaPorConta.keys()])]
+    const [contas, interacoesPorConta] = await Promise.all([
+      buscarContasFinanceiras(idsComDado),
+      buscarUltimaInteracaoPorConta(),
+    ])
+
+    const ELEGIVEIS = new Set(['aberta', 'vencida', 'pago_parcial'])
+    let linhas = idsComDado
+      .filter((id) => ELEGIVEIS.has(contas.get(id)?.status))
+      .map((id) => {
+        const conta = contas.get(id)
+        const recovery = recoveryPorConta.get(id)
+        const priority = priorityPorConta.get(id)
+        const nba = nbaPorConta.get(id)
+        const interacao = interacoesPorConta.get(id)
+        const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
+        return {
+          contas_financeiras_id: id,
+          pessoa_nome: conta.pessoa_nome,
+          telefone_cobranca: conta.telefone_cobranca,
+          telefone_disponivel: Boolean(conta.telefone_cobranca),
+          saldo_em_aberto: saldo,
+          dias_atraso: diasAtrasoDe(conta.vencimento),
+          em_revisao_financeira: conta.em_revisao_financeira === true,
+          status_financeiro: conta.status,
+          priority_score: priority?.score ?? null,
+          recovery_score: recovery?.score ?? null,
+          faixa_risco: faixaRisco(priority?.score ?? null),
+          reason_codes: nba?.nba_reason_codes ?? [],
+          legacy_action: nba?.legacy_action ?? null,
+          effective_legacy_action: nba?.effective_legacy_action ?? null,
+          blocked_reason: nba?.blocked_reason ?? null,
+          nba_suggested_action: nba?.nba_suggested_action ?? null,
+          ultima_interacao: interacao ? { tipo: interacao.tipo, criado_em: interacao.criado_em } : null,
+          calculado_em: priority?.calculado_em ?? recovery?.calculado_em ?? null,
+        }
+      })
+
+    const totalElegivelNaFila = linhas.length
+
+    // Cards/resumo — sempre sobre a base elegível INTEIRA, independente dos
+    // filtros da tabela abaixo (mesmo racional de um dashboard: os cards dão
+    // a visão geral, a tabela é o recorte que o usuário está olhando agora).
+    const resumo = {
+      total_monitorados: totalElegivelNaFila,
+      atencao: linhas.filter((l) => l.faixa_risco === 'ATENÇÃO').length,
+      alto_risco: linhas.filter((l) => l.faixa_risco === 'ALTO RISCO').length,
+      critico: linhas.filter((l) => l.faixa_risco === 'CRÍTICO').length,
+      baixo_risco: linhas.filter((l) => l.faixa_risco === 'BAIXO RISCO').length,
+      revisao_humana: linhas.filter((l) => l.nba_suggested_action === 'HUMAN_REVIEW').length,
+      bloqueados_por_guard: linhas.filter((l) => l.blocked_reason).length,
+      sem_telefone: linhas.filter((l) => !l.telefone_disponivel).length,
+    }
+
+    // Filtros — todos opcionais, combináveis (AND).
+    const { faixa, view, reason_code: reasonCode, blocked, nba_action: nbaAction, telefone } = req.query
+    if (faixa) linhas = linhas.filter((l) => l.faixa_risco === faixa)
+    if (view === 'revisao_humana') linhas = linhas.filter((l) => l.nba_suggested_action === 'HUMAN_REVIEW')
+    if (reasonCode) linhas = linhas.filter((l) => (l.reason_codes ?? []).includes(reasonCode))
+    if (blocked === 'true') linhas = linhas.filter((l) => Boolean(l.blocked_reason))
+    else if (blocked === 'false') linhas = linhas.filter((l) => !l.blocked_reason)
+    else if (blocked) linhas = linhas.filter((l) => l.blocked_reason === blocked) // valor específico, ex: EM_REVISAO_FINANCEIRA
+    if (nbaAction) linhas = linhas.filter((l) => l.nba_suggested_action === nbaAction)
+    if (telefone === 'true') linhas = linhas.filter((l) => l.telefone_disponivel)
+    else if (telefone === 'false') linhas = linhas.filter((l) => !l.telefone_disponivel)
+
+    const totalFiltrado = linhas.length
+
+    const ordenar = ORDENACOES[req.query.sort] ?? ORDENACOES.priority_desc
+    linhas.sort(ordenar)
+
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50))
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1)
+    const inicio = (page - 1) * limit
+    const pagina = linhas.slice(inicio, inicio + limit)
+
+    res.json({
+      shadow_badge: 'SHADOW — NÃO EXECUTA COBRANÇA',
+      resumo,
+      total_filtrado: totalFiltrado,
+      page,
+      limit,
+      total_paginas: Math.max(1, Math.ceil(totalFiltrado / limit)),
+      data: pagina,
+    })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
