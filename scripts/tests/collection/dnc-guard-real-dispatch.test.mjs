@@ -51,24 +51,42 @@ async function limparDnc() {
   await supabase.from('collection_do_not_contact').delete().neq('id', '00000000-0000-0000-0000-000000000000')
 }
 
-// executarReguaCobranca() varre TODA contas_financeiras elegível — com sync
-// FRESCO (obrigatório pros testes 3/4, que precisam realmente entrar no loop
-// e alcançar o guard de DNC — diferente dos testes de financialSyncGuard, que
-// retornam antes do loop) isso rodaria contra qualquer resíduo de OUTROS
-// arquivos de teste no mesmo Postgres local, com o intervalo real de 45-90s
-// por envio — proposital em produção, inviável e arriscado num teste. Nunca
-// apaga/altera dado de outro arquivo — só mede o risco e pula com motivo
-// claro se o banco local não estiver limpo o suficiente (a lógica do guard
-// já está coberta unitariamente nos cenários 1/2/6-12 via
-// enviarCobrancaComRoteamento, a mesma função que o cron chama por dentro).
-async function contarOutrasContasElegiveis(contaId) {
-  const { data } = await supabase
+// executarReguaCobranca() varre TODA contas_financeiras elegível — sem
+// isolamento, os testes 3/4 (que precisam de sync FRESCO pra realmente
+// entrar no loop e alcançar o guard de DNC, diferente dos testes de
+// financialSyncGuard que retornam antes do loop) rodariam contra qualquer
+// resíduo de OUTROS arquivos de teste no mesmo Postgres local — não
+// determinístico (depende da ordem/estado da suíte) e lento (45-90s reais de
+// intervalo por envio, proposital em produção). Em vez de pular quando há
+// resíduo, isola de verdade: tira temporariamente da elegibilidade (status
+// 'cancelada') todo título que não seja da própria conta de teste, roda o
+// cenário, e RESTAURA o status original de cada um no finally — nunca perde
+// nem corrompe dado de outro arquivo, só neutraliza pela duração exata desta
+// chamada. Preciso capturar o status ANTES de criar a conta de teste, senão
+// ela própria entraria na lista a isolar.
+async function comCarteiraIsoladaPara(contaId, fn) {
+  const { data: outras, error } = await supabase
     .from('contas_financeiras')
-    .select('id')
+    .select('id, status')
     .eq('tipo', 'receber')
     .in('status', ['aberta', 'vencida', 'pago_parcial'])
     .neq('id', contaId)
-  return data?.length ?? 0
+  if (error) throw error
+
+  const porStatusOriginal = {}
+  for (const o of outras ?? []) (porStatusOriginal[o.status] ??= []).push(o.id)
+  const idsIsolados = (outras ?? []).map((o) => o.id)
+
+  if (idsIsolados.length) {
+    await supabase.from('contas_financeiras').update({ status: 'cancelada' }).in('id', idsIsolados)
+  }
+  try {
+    return await fn()
+  } finally {
+    for (const [statusOriginal, ids] of Object.entries(porStatusOriginal)) {
+      await supabase.from('contas_financeiras').update({ status: statusOriginal }).in('id', ids)
+    }
+  }
 }
 
 beforeEach(async () => {
@@ -105,29 +123,29 @@ test('2. DNC ativo: envio bloqueado (motor legado, multi_whatsapp=false)', async
   assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
 })
 
-test('3. DNC ativo + disparo automático (cron/executarReguaCobranca): bloqueado, zero envio', async (t) => {
+test('3. DNC ativo + disparo automático (cron/executarReguaCobranca): bloqueado, zero envio', { timeout: 120_000 }, async (t) => {
   const horaBrt = (new Date().getUTCHours() - 3 + 24) % 24
   if (!(horaBrt >= 8 && horaBrt < 17)) { t.skip('fora da janela 08h-17h BRT — dentroDoHorarioPermitido() bloquearia antes, não mede o guard de DNC'); return }
 
   const conta = await criarContaDeTeste(supabase, { vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10) })
   await registrarDnc(conta.telefone_cobranca)
 
-  // Limiar 0, não "poucas": qualquer outra conta elegível pode genuinamente
-  // enviar durante este loop real (não está em DNC) e inflar resumo.enviadas
-  // de forma não determinística — só roda o cron de ponta a ponta quando o
-  // Postgres local está 100% livre de resíduo de outros arquivos.
-  const outras = await contarOutrasContasElegiveis(conta.id)
-  if (outras > 0) { t.skip(`Postgres local tem ${outras} outra(s) conta(s) elegível(is) (resíduo de outro arquivo de teste) — rodar a régua completa aqui seria lento/não-determinístico; guard já coberto unitariamente nos cenários 1/2/6-12`); return }
+  // Isola a carteira (ver comCarteiraIsoladaPara) — com sync fresco o loop
+  // real do cron entra de verdade; sem isolamento ele processaria qualquer
+  // resíduo de outro arquivo também, de forma não determinística. Espera
+  // real de 45-90s (aguardarIntervaloAleatorio, ANTES até de alcançar o
+  // guard) — proposital, por isso o timeout de 120s neste teste.
+  await comCarteiraIsoladaPara(conta.id, async () => {
+    const resumo = await executarReguaCobranca()
+    assert.equal(resumo.enviadas, 0)
 
-  const resumo = await executarReguaCobranca()
-  assert.equal(resumo.enviadas, 0)
-
-  const { data: cobrancas } = await supabase.from('cobrancas_whatsapp').select('id').eq('contas_financeiras_id', conta.id)
-  assert.equal(cobrancas.length, 0, 'DNC não pode gerar linha de cobrança enviada')
-  assert.equal(fakeEvolution.mensagensEnviadas.some((m) => m.numero === conta.telefone_cobranca), false)
+    const { data: cobrancas } = await supabase.from('cobrancas_whatsapp').select('id').eq('contas_financeiras_id', conta.id)
+    assert.equal(cobrancas.length, 0, 'DNC não pode gerar linha de cobrança enviada')
+    assert.equal(fakeEvolution.mensagensEnviadas.some((m) => m.numero === conta.telefone_cobranca), false)
+  })
 })
 
-test('4. DNC ativo + POST /api/cobrancas/disparar: bloqueado (mesma executarReguaCobranca do cenário 3)', async (t) => {
+test('4. DNC ativo + POST /api/cobrancas/disparar: bloqueado (mesma executarReguaCobranca do cenário 3)', { timeout: 120_000 }, async (t) => {
   const horaBrt = (new Date().getUTCHours() - 3 + 24) % 24
   if (!(horaBrt >= 8 && horaBrt < 17)) { t.skip('fora da janela 08h-17h BRT'); return }
 
@@ -144,31 +162,29 @@ test('4. DNC ativo + POST /api/cobrancas/disparar: bloqueado (mesma executarRegu
   const conta = await criarContaDeTeste(supabase, { vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10) })
   await registrarDnc(conta.telefone_cobranca)
 
-  const outras = await contarOutrasContasElegiveis(conta.id)
-  if (outras > 0) {
-    server.close()
-    t.skip(`Postgres local tem ${outras} outra(s) conta(s) elegível(is) — mesmo risco do cenário 3`)
-    return
-  }
+  try {
+    await comCarteiraIsoladaPara(conta.id, async () => {
+      const resultado = await new Promise((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1', port: porta, method: 'POST', path: '/api/cobrancas/disparar',
+          headers: { authorization: 'Bearer chave-teste-dnc-guard' },
+        }, (res) => {
+          let chunks = ''
+          res.on('data', (c) => { chunks += c })
+          res.on('end', () => resolve({ status: res.statusCode, body: chunks ? JSON.parse(chunks) : null }))
+        })
+        req.on('error', reject)
+        req.end()
+      })
 
-  const resultado = await new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1', port: porta, method: 'POST', path: '/api/cobrancas/disparar',
-      headers: { authorization: 'Bearer chave-teste-dnc-guard' },
-    }, (res) => {
-      let chunks = ''
-      res.on('data', (c) => { chunks += c })
-      res.on('end', () => resolve({ status: res.statusCode, body: chunks ? JSON.parse(chunks) : null }))
+      assert.equal(resultado.status, 200)
+      assert.equal(resultado.body.enviadas, 0)
+      const { data: cobrancas } = await supabase.from('cobrancas_whatsapp').select('id').eq('contas_financeiras_id', conta.id)
+      assert.equal(cobrancas.length, 0)
     })
-    req.on('error', reject)
-    req.end()
-  })
-  server.close()
-
-  assert.equal(resultado.status, 200)
-  assert.equal(resultado.body.enviadas, 0)
-  const { data: cobrancas } = await supabase.from('cobrancas_whatsapp').select('id').eq('contas_financeiras_id', conta.id)
-  assert.equal(cobrancas.length, 0)
+  } finally {
+    server.close()
+  }
 })
 
 test('5. DNC ativo + POST /api/cobrancas/disparar-individual/:pessoaNome: bloqueado', async () => {
