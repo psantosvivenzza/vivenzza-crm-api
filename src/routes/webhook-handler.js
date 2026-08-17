@@ -9,6 +9,7 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 // o roteamento de IA financeira (inboundMessageHandler.js) — fora de escopo
 // desta PR, que é só infraestrutura/homologação, não IA.
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
+import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -278,7 +279,22 @@ export async function processWhatsappEvent(payload) {
     const status = fromMe ? 'enviado' : 'recebido'
     console.log('[webhook]', direcao, '| tel:', telefone, '| tipo:', mediaTipo ?? 'texto', '|', texto.slice(0, 50))
 
+    // 2026-08-17 — bug real corrigido: instância FINANCEIRA (cobrança/atendimento
+    // financeiro) nunca deve tocar o CRM comercial — nunca casa com lead
+    // existente, nunca cria lead novo, nunca sorteia vendedor. Antes disso,
+    // qualquer mensagem financeira (inbound OU o eco da própria cobrança
+    // enviada, que a Evolution também manda como messages.upsert) casava por
+    // telefone e entrava misturada na conversa comercial de quem já tinha
+    // falado com a Vivenzza antes (achado real: 16 mensagens confirmadas por
+    // conteúdo em produção). Instância desconhecida/ausente sempre segue o
+    // caminho comercial de sempre (ver ehInstanciaFinanceira — fail-safe).
+    const instanceName = payload.instance ?? payload.instanceName ?? null
+    const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
+
     const semPrefixo = telefone.replace(/^55/, '')
+    let lead = null
+
+    if (!ehFinanceiro) {
     // candidatosTelefone cobre as mesmas variações de 9º dígito de antes, mais as formas
     // com prefixo "55" — sem isso, um lead criado manualmente com o telefone salvo nesse
     // formato nunca era encontrado e o webhook criava um segundo lead duplicado.
@@ -290,7 +306,7 @@ export async function processWhatsappEvent(payload) {
       .in('telefone', candidatos)
       .limit(1)
 
-    let lead = leads?.[0] ?? null
+    lead = leads?.[0] ?? null
 
     if (!lead && !fromMe) {
       const vendedor = await proximoVendedor()
@@ -368,11 +384,17 @@ export async function processWhatsappEvent(payload) {
         }
       }
     }
+    } // fim do if (!ehFinanceiro) — lead permanece null pra qualquer mensagem financeira
 
     const evolutionId = msg.key?.id ?? null
 
     await supabase.from('whatsapp_mensagens').upsert({
-      lead_id: lead?.id ?? null,
+      // ehFinanceiro=true nunca chega aqui com lead preenchido (lead fica
+      // null o bloco inteiro acima nem roda) — reforçado explicitamente pra
+      // deixar impossível, por construção, gravar uma mensagem financeira
+      // com lead_id de um lead comercial, mesmo que o guard acima mude no
+      // futuro.
+      lead_id: ehFinanceiro ? null : (lead?.id ?? null),
       mensagem: texto,
       direcao,
       telefone,
@@ -380,6 +402,7 @@ export async function processWhatsappEvent(payload) {
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_data: mediaData,
+      instance_name: instanceName,
     }, { onConflict: 'evolution_id', ignoreDuplicates: true })
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.

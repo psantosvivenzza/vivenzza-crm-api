@@ -225,6 +225,61 @@ export async function atualizarStatusConexao(instanceName, connectionStatus) {
   if (error) throw error
 }
 
+// 2026-08-17 — bug real corrigido: o webhook do WhatsApp (webhook-handler.js)
+// tratava toda mensagem recebida como comercial, sem checar de qual
+// instância ela veio — mensagens do Financeiro (respostas de cliente a
+// cobrança, ou o eco da própria cobrança enviada) eram casadas por telefone
+// e gravadas dentro do lead_id de um lead comercial existente, aparecendo
+// misturadas na conversa da vendedora responsável (16 casos confirmados por
+// conteúdo em produção).
+//
+// whatsapp_instances é, por definição de schema, SÓ instâncias financeiras
+// (role só aceita 'principal'|'reserva' — CHECK constraint da migration
+// 20260101000029; não existe conceito de "comercial" nesta tabela). Por
+// isso qualquer instance_name cadastrado aqui É financeiro — fonte de
+// verdade dinâmica, não uma lista hardcoded que ficaria desatualizada se uma
+// 3ª instância financeira for cadastrada no futuro.
+//
+// Cache curto (5s, mesmo padrão de featureFlags.js) — o webhook é chamado
+// muitas vezes por minuto em produção, não faz sentido uma query nova a
+// cada mensagem pra um dado que não muda no meio de uma rajada de eventos.
+const CACHE_INSTANCIAS_FINANCEIRAS_TTL_MS = 5000
+let cacheInstanciasFinanceiras = null
+let cacheInstanciasFinanceirasEm = 0
+
+async function nomesInstanciasFinanceiras() {
+  const agora = Date.now()
+  if (cacheInstanciasFinanceiras && agora - cacheInstanciasFinanceirasEm < CACHE_INSTANCIAS_FINANCEIRAS_TTL_MS) {
+    return cacheInstanciasFinanceiras
+  }
+  const { data, error } = await supabase.from('whatsapp_instances').select('instance_name')
+  if (error) throw error
+  cacheInstanciasFinanceiras = new Set((data ?? []).map((i) => i.instance_name))
+  cacheInstanciasFinanceirasEm = agora
+  return cacheInstanciasFinanceiras
+}
+
+// Fail-safe pro lado CORRETO: se `instanceName` vier vazio/nulo (payload
+// malformado, campo ausente) ou a consulta ao banco falhar, retorna false —
+// ou seja, na dúvida a mensagem segue pelo caminho COMERCIAL de sempre
+// (comportamento 100% preservado, zero regressão). Só desvia do fluxo
+// comercial quando temos CERTEZA (match positivo contra o cadastro real).
+export async function ehInstanciaFinanceira(instanceName) {
+  if (!instanceName) return false
+  try {
+    const nomes = await nomesInstanciasFinanceiras()
+    return nomes.has(instanceName)
+  } catch {
+    return false
+  }
+}
+
+// Só pra teste — reseta o cache curto sem esperar expirar.
+export function _resetCacheInstanciasFinanceirasParaTeste() {
+  cacheInstanciasFinanceiras = null
+  cacheInstanciasFinanceirasEm = 0
+}
+
 export async function desabilitarInstancia(instanceId, motivo) {
   const { error } = await supabase
     .from('whatsapp_instances')

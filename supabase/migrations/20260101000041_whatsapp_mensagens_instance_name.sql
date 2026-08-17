@@ -1,0 +1,21 @@
+-- 2026-08-17 — bug real confirmado em produção: mensagens do WhatsApp
+-- Financeiro (instâncias vivenzza-financeiro/vivenzza-financeiro-reserva-01)
+-- estavam sendo gravadas com o lead_id de um lead COMERCIAL existente (match
+-- só por telefone, sem checar de qual instância a mensagem veio) — 16
+-- mensagens confirmadas por conteúdo (template real de cobrança) dentro de
+-- threads comerciais, com vendedor atribuído. Ver
+-- src/routes/webhook-handler.js e src/lib/collection/whatsappInstances.js
+-- (ehInstanciaFinanceira).
+--
+-- Só a coluna — nullable, sem default retroativo. Linhas antigas ficam NULL
+-- (legado/desconhecido, nunca adivinhado). Só mensagens novas, a partir desta
+-- migration, gravam a instância de origem real.
+--
+-- IF EXISTS: whatsapp_mensagens (assim como `leads`) existe em produção mas
+-- não faz parte do schema-baseline local (scripts/localdb/schema-baseline/)
+-- — mesma situação já documentada pra sincronizacoes_financeiro/
+-- baixas_financeiras em migrations anteriores. Sem o IF EXISTS, rodar esta
+-- migration no ambiente de teste local (onde a tabela não existe) quebra o
+-- `db:local:reset` inteiro pra todo mundo.
+ALTER TABLE IF EXISTS whatsapp_mensagens
+  ADD COLUMN IF NOT EXISTS instance_name text;
