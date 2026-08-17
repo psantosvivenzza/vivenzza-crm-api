@@ -49,7 +49,27 @@ export function calcularEtapa(diasAtraso) {
   return null
 }
 
-export function montarMensagem(etapa, { nome, valor, vencimento, diasAtraso }) {
+// Wrapper aditivo (2026-08-17) — a função original abaixo (montarMensagemPorEtapa)
+// não foi alterada em nenhum caractere: pra quantidadeTitulos=1 (o padrão, e o
+// único caso que existia antes), o retorno é byte-a-byte idêntico ao de sempre.
+// Quando 2+ títulos do mesmo cliente vencem na mesma data (ver
+// collection/consolidacaoParcelas.js), `valor` já vem como a SOMA dos saldos —
+// isso sozinho já resolve o requisito central. A nota abaixo é só o "opcional"
+// do pedido (deixar explícito que é uma parcela consolidada), inserida antes da
+// assinatura (sempre a última linha de toda mensagem).
+export function montarMensagem(etapa, { quantidadeTitulos = 1, ...dados }) {
+  const base = montarMensagemPorEtapa(etapa, dados)
+  if (quantidadeTitulos < 2) return base
+
+  const assinatura = `_${NOME_OPERADOR} — Financeiro Vivenzza_`
+  const nota = `Esse valor corresponde a ${quantidadeTitulos} títulos com o mesmo vencimento.`
+  if (base.endsWith(assinatura)) {
+    return `${base.slice(0, -assinatura.length)}${nota}\n${assinatura}`
+  }
+  return `${base}\n${nota}` // defensivo — não deveria acontecer, nenhuma etapa deixa de assinar
+}
+
+function montarMensagemPorEtapa(etapa, { nome, valor, vencimento, diasAtraso }) {
   const chavePix = process.env.CHAVE_PIX_VIVENZZA || '[CHAVE PIX NÃO CONFIGURADA]'
   const telefone = telefoneExibicao()
   const valorFmt = fmtBRL(valor)

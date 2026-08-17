@@ -2,6 +2,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { verificarFrescorSync, logBloqueioSyncStale } from '../lib/collection/financialSyncGuard.js'
+import { agruparParaConsolidacao } from '../lib/collection/consolidacaoParcelas.js'
 
 // CORREÇÃO URGENTE 2026-07-30: o número 5551983270024 foi suspenso temporariamente
 // por enviar ~50 mensagens em rajada (sem intervalo). Limites abaixo existem
@@ -78,7 +79,10 @@ function aguardarIntervaloAleatorio() {
 }
 
 function resumoVazio(paradoPor = null) {
-  return { ativo: true, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, jaContatadoHoje: 0, quitados: 0, erros: 0, paradoPor }
+  return {
+    ativo: true, elegiveis: 0, enviadas: 0, semTelefone: 0, jaEnviadas: 0, jaContatadoHoje: 0,
+    quitados: 0, erros: 0, paradoPor, gruposConsolidados: 0, titulosConsolidados: 0, gruposAmbiguos: 0,
+  }
 }
 
 // Trava de reentrância — o agendamento agora dispara a cada 15 min (ver index.js);
@@ -138,7 +142,7 @@ export async function executarReguaCobranca() {
       for (let offset = 0; ; offset += PAGE) {
         const { data, error } = await supabase
           .from('contas_financeiras')
-          .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca')
+          .select('id, pessoa_nome, valor, valor_pago, vencimento, telefone_cobranca, codigo_cliente, legacy_id, status, em_revisao_financeira')
           .eq('tipo', 'receber')
           .in('status', ['aberta', 'vencida', 'pago_parcial'])
           .eq('em_revisao_financeira', false)
@@ -151,7 +155,43 @@ export async function executarReguaCobranca() {
 
     const resumo = resumoVazio()
 
-    for (const conta of contas ?? []) {
+    // Cliente com 2+ títulos vencendo na MESMA data vira UMA parcela de
+    // cobrança (soma dos saldos) — nunca uma mensagem por título. Isto é só
+    // agrupamento LÓGICO pra decidir quantas mensagens mandar; contas_financeiras
+    // continua com os títulos individuais, intocada (ver consolidacaoParcelas.js).
+    const grupos = agruparParaConsolidacao(contas ?? [])
+    // Todo título que entrou na query (aberta/vencida/pago_parcial, não em
+    // revisão) mas não apareceu em NENHUM grupo (nem ambíguo) foi filtrado por
+    // agruparParaConsolidacao só por já estar quitado na prática (baixa parcial
+    // cobrindo o saldo total) — mesma semântica de "quitados" de antes.
+    const titulosNosGrupos = grupos.reduce((soma, g) => soma + g.titulos.length, 0)
+    resumo.quitados = (contas?.length ?? 0) - titulosNosGrupos
+
+    for (const grupo of grupos) {
+      if (grupo.ambiguo) {
+        // Duplicata técnica sem legacy_id pra provar que são títulos distintos,
+        // ou telefones divergentes no mesmo grupo — nunca cobra automaticamente
+        // um grupo ambíguo, só reporta pra revisão humana.
+        resumo.gruposAmbiguos++
+        console.warn(`[cobranca-whatsapp] grupo ambíguo (${grupo.motivo}) — ${grupo.titulos.length} título(s), NÃO cobrado automaticamente:`, grupo.titulos.map((t) => t.id))
+        continue
+      }
+
+      const conta = {
+        id: grupo.tituloRepresentante.id,
+        pessoa_nome: grupo.nome,
+        vencimento: grupo.vencimento,
+        telefone_cobranca: grupo.telefone,
+        // saldo já vem somado pelo agrupamento — daqui pra baixo o resto do
+        // loop trata o grupo exatamente como tratava um título único antes.
+        saldoConsolidado: grupo.valorTotal,
+        quantidadeTitulos: grupo.quantidadeTitulos,
+      }
+
+      if (grupo.quantidadeTitulos >= 2) {
+        resumo.gruposConsolidados++
+        resumo.titulosConsolidados += grupo.quantidadeTitulos
+      }
       // Reavalia janela/limites a cada iteração — cada envio espera 45-90s de
       // verdade, então uma execução longa pode cruzar a virada da hora ou o
       // fim da janela no meio do caminho.
@@ -176,13 +216,11 @@ export async function executarReguaCobranca() {
       const etapa = calcularEtapa(diasAtraso)
       if (etapa === null) continue
 
-      // Baixa parcial pode já ter quitado o título inteiro mesmo com status
-      // ainda 'aberta/vencida' no legado (status não é atualizado em tempo real).
-      const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
-      if (saldo <= 0) {
-        resumo.quitados++
-        continue
-      }
+      // Elegibilidade (saldo>0, não cancelada, não em revisão) já foi decidida
+      // por agruparParaConsolidacao ANTES de montar o grupo — chegando aqui, o
+      // grupo já é elegível de verdade (baixa parcial que quitou o título é
+      // contabilizada em resumo.quitados logo após a chamada de agrupamento).
+      const saldo = conta.saldoConsolidado
       resumo.elegiveis++
 
       if (!conta.telefone_cobranca) {
@@ -212,6 +250,7 @@ export async function executarReguaCobranca() {
 
       const mensagem = montarMensagem(etapa, {
         nome: conta.pessoa_nome, valor: saldo, vencimento: conta.vencimento, diasAtraso,
+        quantidadeTitulos: conta.quantidadeTitulos,
       })
 
       // Intervalo ANTES de cada envio (inclusive o primeiro da execução) — nunca
