@@ -1,0 +1,66 @@
+; Voice AI — prontidão de trunk SIP EXTERNO (Nvoip). TEMPLATE, não config
+; real — nenhum valor aqui é um dado real da Nvoip (ainda não recebemos
+; credenciais). NÃO copiar isto direto pra pjsip.conf sem primeiro:
+;   1. receber servidor/porta/usuário/senha/proxy da Nvoip;
+;   2. confirmar codec(s) suportado(s) pela Nvoip (ulaw/alaw abaixo é um
+;      palpite razoável pra PSTN BR, não confirmado);
+;   3. confirmar se a Nvoip exige registration (registro ativo, seção
+;      [nvoip-registration] abaixo) ou usa IP-based auth (nesse caso a
+;      seção de registration nem seria necessária — não sabemos ainda).
+;
+; ADITIVO, nunca substitui: as seções [7001]/[auth7001]/[transport-udp] do
+; ramal interno (ver pjsip.conf.example, já homologado) continuam
+; INTOCADAS — este arquivo só ACRESCENTA um endpoint/trunk novo, com nomes
+; de seção diferentes, pra nunca colidir com o que já funciona.
+;
+; Nomes de placeholder abaixo (${NVOIP_SIP_SERVER} etc.) correspondem
+; diretamente às env vars documentadas em .env.example — mas o Asterisk NÃO
+; lê .env do Node: um operador humano precisa substituir cada placeholder
+; pelo valor real, manualmente, no pjsip.conf de verdade (nunca commitado).
+
+; Transport separado do interno (transport-udp, 127.0.0.1:5060, loopback) —
+; um trunk externo real provavelmente precisa de um transport vinculado a
+; interface roteável, não loopback. Porta/protocolo exatos dependem do que
+; a Nvoip exigir (UDP 5060 é o mais comum pra troncos SIP BR, mas não
+; confirmado).
+[transport-nvoip]
+type=transport
+protocol=udp
+bind=0.0.0.0:${NVOIP_SIP_PORT}  ; NUNCA copiar sem confirmar se a Nvoip exige bind público — risco de segurança se exposto sem necessidade
+
+[nvoip-endpoint]
+type=endpoint
+context=voice-ai-external-nvoip  ; dialplan SEPARADO do interno (voice-ai-internal) — nunca reusar o mesmo contexto
+disallow=all
+allow=ulaw
+allow=alaw
+outbound_auth=nvoip-auth
+aors=nvoip-aor
+from_user=${NVOIP_SIP_USERNAME}
+; caller ID de exibição — se a Nvoip exigir um número específico homologado,
+; usar aqui (NVOIP_CALLER_ID), nunca um número inventado.
+callerid=${NVOIP_CALLER_ID}
+
+[nvoip-auth]
+type=auth
+auth_type=userpass
+username=${NVOIP_SIP_USERNAME}
+password=${NVOIP_SIP_PASSWORD}  ; NUNCA commitar o pjsip.conf real com isto preenchido
+
+[nvoip-aor]
+type=aor
+contact=sip:${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
+; outbound_proxy só se a Nvoip exigir um proxy de saída distinto do
+; servidor de registro (nem toda operadora exige) — deixar comentado até
+; confirmar:
+; outbound_proxy=sip:${NVOIP_SIP_OUTBOUND_PROXY}
+
+; Só necessário SE a Nvoip exigir registration ativo (nem todo provedor de
+; troncos exige — alguns autenticam por IP fixo). Não sabemos ainda qual é
+; o caso da Nvoip — confirmar antes de habilitar esta seção.
+; [nvoip-registration]
+; type=registration
+; outbound_auth=nvoip-auth
+; server_uri=sip:${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
+; client_uri=sip:${NVOIP_SIP_USERNAME}@${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
+; retry_interval=60

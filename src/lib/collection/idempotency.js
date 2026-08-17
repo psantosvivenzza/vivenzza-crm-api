@@ -60,3 +60,15 @@ export function idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt }) {
 export function idempotencyKeyInternalTest(testKey) {
   return `internal_test:${testKey}`
 }
+
+// 2026-08-16 — prontidão SIP trunk externo (Nvoip): mesma (título, dia) nunca
+// pode gerar duas decisões de ligar simultâneas — retry de SIP/origination
+// não pode duplicar. Mesmo padrão de idempotencyKeyDispatch() (1 por dia,
+// não por etapa — uma ligação não tem "etapa" como o WhatsApp). Só a chave;
+// quem aplica (voice_calls.idempotency_key UNIQUE, já existe na migration
+// collection_v2_calls_operators/voice_calls_audit) e o guard puro que a usa
+// (externalPilotGuardrails.js/avaliarIdempotencia) já existem — isto só
+// fecha a lacuna de COMO gerar a chave de forma determinística.
+export function idempotencyKeyLigacaoExterna({ contasFinanceirasId, diaBrt }) {
+  return `ligacao_externa:${contasFinanceirasId}:${diaBrt}`
+}

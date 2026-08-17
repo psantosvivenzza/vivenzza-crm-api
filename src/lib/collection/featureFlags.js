@@ -22,6 +22,11 @@ const DEFAULTS = {
   next_best_action: false,
   ai_voice_calls: false,
   human_call_alerts: false,
+  // 2026-08-16 — prontidão SIP trunk externo (Nvoip). Kill switch absoluto
+  // (ver src/lib/voice/externalConfig.js) — mesmo com trunk/credenciais
+  // válidas, nenhuma chamada PSTN pode sair com isto false. Sem PATCH route
+  // de propósito (mesmo padrão de ai_voice_calls: só SQL direto).
+  voice_external_enabled: false,
   // FASE B.5 (homologação, 2026-08-11) — threshold de priority_score pra
   // nextBestAction.js recomendar HUMAN_CALL. Calibrado com a carteira
   // elegível completa real (1.108 contas, priority máximo real = 69) — o
