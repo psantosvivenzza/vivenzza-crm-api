@@ -388,7 +388,7 @@ export async function processWhatsappEvent(payload) {
 
     const evolutionId = msg.key?.id ?? null
 
-    await supabase.from('whatsapp_mensagens').upsert({
+    const payloadMensagem = {
       // ehFinanceiro=true nunca chega aqui com lead preenchido (lead fica
       // null o bloco inteiro acima nem roda) — reforçado explicitamente pra
       // deixar impossível, por construção, gravar uma mensagem financeira
@@ -402,8 +402,30 @@ export async function processWhatsappEvent(payload) {
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_data: mediaData,
-      instance_name: instanceName,
-    }, { onConflict: 'evolution_id', ignoreDuplicates: true })
+    }
+
+    // 2026-08-17 — hotfix de emergência: a migration 20260101000041 (coluna
+    // instance_name) pode ainda não ter sido aplicada em produção quando
+    // este código já estiver no ar (deploy de código e migration são passos
+    // SEPARADOS neste projeto — nenhum script de start roda migration).
+    // Sem isto, PostgREST rejeita o upsert INTEIRO com PGRST204 ("coluna não
+    // encontrada") — TODA mensagem (financeira e comercial) deixava de ser
+    // gravada, silenciosamente (o catch geral do fim da função só loga).
+    // Fallback automático: se falhar especificamente por causa da coluna
+    // ausente, regrava sem ela — nunca perde a mensagem. Assim que a
+    // migration for aplicada, a chamada normal (com instance_name) volta a
+    // funcionar sozinha, sem precisar de outro deploy.
+    const { error: erroUpsertMensagem } = await supabase.from('whatsapp_mensagens')
+      .upsert({ ...payloadMensagem, instance_name: instanceName }, { onConflict: 'evolution_id', ignoreDuplicates: true })
+
+    if (erroUpsertMensagem?.code === 'PGRST204') {
+      console.warn('[webhook] coluna instance_name ainda não existe (aplicar migration 20260101000041) — gravando mensagem sem ela')
+      const { error: erroFallback } = await supabase.from('whatsapp_mensagens')
+        .upsert(payloadMensagem, { onConflict: 'evolution_id', ignoreDuplicates: true })
+      if (erroFallback) console.error('[webhook] erro ao gravar mensagem (fallback sem instance_name):', erroFallback.message)
+    } else if (erroUpsertMensagem) {
+      console.error('[webhook] erro ao gravar mensagem:', erroUpsertMensagem.message)
+    }
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.
     // Inclui fromMe=true (mensagens da Ana enviadas do celular) — a função já verifica
