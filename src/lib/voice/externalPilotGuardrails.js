@@ -46,6 +46,26 @@ export function avaliarLimiteDiarioPorTelefone(numero, chamadasHoje, limiteDiari
   return contagem < limiteDiario
 }
 
+// 2026-08-16 — prontidão SIP trunk externo (Nvoip): teto GLOBAL (soma de
+// TODAS as chamadas externas, não só por telefone) — item 7 do pedido
+// ("trocar provider/trunk nunca pode resetar limite global lógico").
+// Deliberadamente NÃO adicionados a avaliarAutorizacaoChamadaExterna() acima
+// (função já testada e composta; estender a assinatura dela arriscaria
+// quebrar chamadores existentes) — quem orquestra uma futura chamada real
+// deve chamar estas duas funções TAMBÉM, além daquela. Mesmo fail-closed:
+// limite<=0 nunca autoriza.
+export function avaliarLimiteGlobalPorHora(chamadasUltimaHora, limitePorHora) {
+  if (!(limitePorHora > 0)) return false
+  const contagem = Array.isArray(chamadasUltimaHora) ? chamadasUltimaHora.length : 0
+  return contagem < limitePorHora
+}
+
+export function avaliarLimiteGlobalPorDia(chamadasHojeGlobal, limitePorDia) {
+  if (!(limitePorDia > 0)) return false
+  const contagem = Array.isArray(chamadasHojeGlobal) ? chamadasHojeGlobal.length : 0
+  return contagem < limitePorDia
+}
+
 // Ponto de entrada único — combina TODOS os guards. Retorna
 // {permitido, motivo} — motivo sempre preenchido quando permitido=false,
 // pra auditoria (item 11: "motivo/origem da chamada").

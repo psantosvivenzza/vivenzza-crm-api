@@ -18,23 +18,29 @@ import { hojeBrtISO } from './collectionContactPolicy.js'
 // abaixo) e por nextBestAction.js/estaEmOptOut() (shadow, fail-open,
 // comportamento preservado 100%) — single source of truth sobre "o que conta
 // como opt-out", pra shadow e caminho real nunca divergirem sobre isso.
-export async function buscarRegistroDoNotContact(clienteTelefone) {
+//
+// `canais` (2026-08-16) — parametrizado pra reuso pelo guard de voz
+// (collection_do_not_contact.canal já suporta 'ligacao', ver migration
+// collection_v2_calls_operators — só nunca tinha sido consultado). Default
+// preserva EXATAMENTE o comportamento anterior pra todo chamador existente
+// (WhatsApp) — nenhum comportamento muda pra quem não passar o parâmetro.
+export async function buscarRegistroDoNotContact(clienteTelefone, canais = ['todos', 'whatsapp']) {
   if (!clienteTelefone) return { data: [], error: null }
   return supabase
     .from('collection_do_not_contact')
     .select('id')
     .eq('cliente_telefone', clienteTelefone)
-    .in('canal', ['todos', 'whatsapp'])
+    .in('canal', canais)
     .limit(1)
 }
 
 // Guard fail-closed: diferente do shadow (informativo, nunca guarda envio
 // real), aqui um erro de consulta ao banco BLOQUEIA o envio — nunca deixa
 // passar por causa de uma falha técnica do próprio guard.
-export async function estaEmDoNotContact(clienteTelefone) {
+export async function estaEmDoNotContact(clienteTelefone, canais = ['todos', 'whatsapp']) {
   if (!clienteTelefone) return { blocked: false, reason: null }
 
-  const { data, error } = await buscarRegistroDoNotContact(clienteTelefone)
+  const { data, error } = await buscarRegistroDoNotContact(clienteTelefone, canais)
   if (error) {
     return { blocked: true, reason: 'DNC_GUARD_ERROR', erro: error.message }
   }
