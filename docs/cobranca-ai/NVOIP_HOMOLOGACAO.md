@@ -7,7 +7,7 @@ existirem, seguir um roteiro conhecido em vez de improvisar.
 
 ## Arquitetura alvo
 
-```
+```text
 Vivenzza → ARI → Asterisk → PJSIP → SIP Trunk Nvoip → PSTN Brasil → cliente
 ```
 
@@ -16,14 +16,34 @@ continua sendo nossa — a Nvoip é **só transporte SIP/PSTN**, nunca o
 Voicebot da Nvoip. Isso já é verdade hoje pro ramal interno homologado
 (`PJSIP/7001`) e não muda com um trunk externo — só troca o destino final.
 
+## Parâmetros oficiais Nvoip (CONFIRMADOS, 2026-08-17)
+
+Confirmado pela documentação oficial da Nvoip — não são mais palpite:
+
+| Parâmetro | Valor |
+|---|---|
+| Servidor SIP remoto | `app.nvoip.com.br` |
+| Porta SIP remota | `5060` |
+| Autenticação | usuário/senha + SIP registration ativo |
+| Codecs | `ulaw`, `alaw` |
+
+**Ainda não confirmado/decidido:** a porta do **transport LOCAL** do nosso
+Asterisk pro trunk Nvoip. Verificado em leitura real do Asterisk/WSL
+(2026-08-17, `ss -tulnp`, somente leitura): a porta UDP **5060 local já está
+ocupada** pelo transport interno existente (usado por `PJSIP/7001`/ARI) — um
+segundo transport também em `0.0.0.0:5060/udp` local **conflitaria**. A
+porta remota da Nvoip (5060) e a porta do nosso bind local são conceitos
+diferentes; ver `NVOIP_SIP_LOCAL_BIND` em `.env.example` e o comentário
+grande em `config/asterisk/pjsip-nvoip.conf.example`. Esse valor só será
+decidido na hora da homologação real (porta local livre no servidor
+naquele momento).
+
 ## Pré-requisitos (o que precisa existir ANTES do passo 1)
 
-- [ ] Credenciais Nvoip completas: servidor SIP, porta, usuário, senha,
-      outbound proxy (se aplicável), número de caller ID homologado.
-- [ ] Confirmação da Nvoip sobre codec suportado (`ulaw`/`alaw` é um
-      palpite razoável, não confirmado — ver `config/asterisk/pjsip-nvoip.conf.example`).
-- [ ] Confirmação se a Nvoip exige `registration` ativo ou autentica por IP
-      fixo (muda a config do PJSIP).
+- [ ] Usuário e senha Nvoip (servidor/porta/codec já confirmados acima).
+- [ ] Escolher a porta do transport LOCAL (`NVOIP_SIP_LOCAL_BIND`) — uma
+      porta UDP livre no servidor, diferente de 5060 (já ocupada
+      localmente).
 - [ ] `destinoResolver.js` (`TRUNK_EXTERNO_CONFIGURADO`) alterado pra `true`
       **e** um adapter de trunk real implementado — hoje o segundo `throw`
       documentado nesse arquivo garante que isso nunca é "só flipar uma
@@ -33,11 +53,14 @@ Voicebot da Nvoip. Isso já é verdade hoje pro ramal interno homologado
 
 ## Procedimento (16 passos, NENHUM executado ainda)
 
-1. Receber credenciais Nvoip (servidor, porta, usuário, senha, caller ID).
+1. Receber credenciais Nvoip (usuário, senha, caller ID homologado —
+   servidor `app.nvoip.com.br`/porta `5060` já confirmados) e escolher a
+   porta do transport local (`NVOIP_SIP_LOCAL_BIND`, livre, ≠ 5060).
 2. Inserir os segredos **localmente/ambiente seguro** — nunca no Git, nunca
    em log, nunca em relatório (`.env` real, nunca `.env.example`).
-3. Validar SIP registration (se aplicável) — confirmar que o Asterisk
-   consegue se registrar no trunk Nvoip, sem originar nenhuma chamada.
+3. Validar SIP registration (obrigatório — Nvoip exige usuário/senha + SIP
+   registration ativo, confirmado) — confirmar que o Asterisk consegue se
+   registrar no trunk Nvoip, sem originar nenhuma chamada.
 4. Validar o trunk **sem chamada** — ex. `pjsip show endpoint nvoip-endpoint`
    no console do Asterisk, confirmar `Avail`/`Not in use`.
 5. Colocar **UM** número de homologação em `VOICE_EXTERNAL_ALLOWLIST` —

@@ -20,7 +20,7 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
   const { obterConfigCobranca, invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
   const { TIPO_DESTINO, resolverDestino } = await import('../../../src/lib/voice/destinoResolver.js')
   const { avaliarAutorizacaoChamadaExterna, avaliarLimiteGlobalPorHora, avaliarLimiteGlobalPorDia } = await import('../../../src/lib/voice/externalPilotGuardrails.js')
-  const { lerConfigNvoip, descreverConfigNvoipSemSegredo, lerAllowlistExterna, numeroNaAllowlistExterna, lerLimitesVoz } = await import('../../../src/lib/voice/externalConfig.js')
+  const { lerConfigNvoip, descreverConfigNvoipSemSegredo, lerAllowlistExterna, numeroNaAllowlistExterna, lerLimitesVoz, avaliarLocalBindDiferenteDoRemoto } = await import('../../../src/lib/voice/externalConfig.js')
   const { idempotencyKeyLigacaoExterna } = await import('../../../src/lib/collection/idempotency.js')
   const { construirPayloadOriginateExterno } = await import('../../../src/lib/voice/outboundExternalTest.js')
   const { avaliarGuardsTituloParaLigacao, avaliarGuardGlobalParaLigacao, avaliarGuardsCobrancaParaLigacao } = await import('../../../src/lib/voice/collectionGuardsForVoice.js')
@@ -234,6 +234,42 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
       const conteudo = fs.readFileSync(arquivo, 'utf8')
       assert.equal(conteudo.includes('collectionGuardsForVoice'), false, `${arquivo} não deveria importar collectionGuardsForVoice.js ainda — régua não ligada à voz nesta rodada`)
     }
+  })
+
+  await t.test('22. externalConfig: bind local nunca pode ser igual à porta remota da Nvoip (evita repetir o erro de usar a porta remota como bind local)', () => {
+    assert.equal(avaliarLocalBindDiferenteDoRemoto(null, '5060'), true, 'bind ainda não escolhido não é, por si só, um conflito')
+    assert.equal(avaliarLocalBindDiferenteDoRemoto('5060', '5060'), false, 'bind local igual à porta remota deveria ser reprovado')
+    assert.equal(avaliarLocalBindDiferenteDoRemoto('5061', '5060'), true, 'bind local diferente da porta remota é seguro')
+  })
+
+  await t.test('23. template PJSIP Nvoip: parâmetros oficiais confirmados, porta remota nunca usada como bind local, registration presente, secrets vazios', () => {
+    const template = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'config', 'asterisk', 'pjsip-nvoip.conf.example'), 'utf8')
+
+    // servidor/porta/codec oficiais confirmados
+    assert.match(template, /app\.nvoip\.com\.br/, 'servidor oficial da Nvoip deveria estar documentado')
+    assert.match(template, /allow=ulaw/)
+    assert.match(template, /allow=alaw/)
+
+    // registration presente e ATIVA (não comentada) — Nvoip exige registration confirmado
+    assert.match(template, /^\[nvoip-registration\]/m, 'seção de registration deveria estar ativa, não comentada — Nvoip exige registration confirmado')
+    assert.match(template, /server_uri=sip:app\.nvoip\.com\.br:5060/)
+
+    // a linha de bind do transport NUNCA referencia NVOIP_SIP_PORT (porta remota) — só NVOIP_SIP_LOCAL_BIND
+    const linhaBind = template.split('\n').find((l) => l.trim().startsWith('bind='))
+    assert.ok(linhaBind, 'deveria existir uma linha de bind no transport')
+    const valorBind = linhaBind.split(';')[0] // só o valor real, sem o comentário à direita
+    assert.match(valorBind, /NVOIP_SIP_LOCAL_BIND/, 'bind local deveria usar NVOIP_SIP_LOCAL_BIND, não a porta remota')
+    assert.equal(valorBind.includes('NVOIP_SIP_PORT'), false, 'bind local NUNCA deveria reusar a porta remota (NVOIP_SIP_PORT)')
+
+    // nenhuma credencial real (senha/usuário) hardcoded — só placeholder ${...}
+    assert.equal(/password=(?!\$\{)[^\s;]+/.test(template), false, 'senha nunca deveria estar preenchida com valor real no template')
+    assert.equal(/username=(?!\$\{)[^\s;]+/.test(template), false, 'usuário nunca deveria estar preenchido com valor real no template')
+  })
+
+  await t.test('24. dupla trava (voice_external_enabled + TRUNK_EXTERNO_CONFIGURADO) permanece intacta após a atualização dos parâmetros oficiais', async () => {
+    const config = await obterConfigCobranca()
+    assert.equal(config.voice_external_enabled, false)
+    assert.throws(() => resolverDestino(TIPO_DESTINO.EXTERNAL), /TRUNK_EXTERNO_CONFIGURADO|não configurado|trunk/i)
   })
 
   await pararAmbienteDeTeste()

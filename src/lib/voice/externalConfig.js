@@ -19,6 +19,11 @@ export function lerConfigNvoip() {
     sipPassword: process.env.NVOIP_SIP_PASSWORD || null,
     outboundProxy: process.env.NVOIP_SIP_OUTBOUND_PROXY || null,
     callerId: process.env.NVOIP_CALLER_ID || null,
+    // Porta do TRANSPORT LOCAL do nosso Asterisk — nunca a mesma coisa que
+    // sipPort (essa é remota, da Nvoip). Ver comentário grande em
+    // config/asterisk/pjsip-nvoip.conf.example — porta 5060 local já está
+    // ocupada pelo transport interno existente (verificado 2026-08-17).
+    sipLocalBind: process.env.NVOIP_SIP_LOCAL_BIND || null,
   }
 }
 
@@ -33,7 +38,19 @@ export function descreverConfigNvoipSemSegredo() {
     sip_password_configurado: Boolean(cfg.sipPassword),
     outbound_proxy_configurado: Boolean(cfg.outboundProxy),
     caller_id_configurado: Boolean(cfg.callerId),
+    sip_local_bind_configurado: Boolean(cfg.sipLocalBind),
   }
+}
+
+// Guard puro (sem I/O): a porta do transport LOCAL nunca pode ser igual à
+// porta REMOTA da Nvoip — evita repetir, numa config real futura, o erro de
+// usar bind=0.0.0.0:${NVOIP_SIP_PORT} (a porta 5060 local já está ocupada
+// pelo transport interno, confirmado em leitura real do Asterisk/WSL).
+// Retorna true quando a combinação é segura (bind local ainda não escolhido,
+// ou escolhido e diferente do remoto); false quando colidem.
+export function avaliarLocalBindDiferenteDoRemoto(sipLocalBind, sipPortRemoto) {
+  if (!sipLocalBind) return true // ainda não escolhido — nada pra conflitar ainda
+  return String(sipLocalBind) !== String(sipPortRemoto)
 }
 
 // Allowlist da primeira homologação pública — formato canônico E.164/BR

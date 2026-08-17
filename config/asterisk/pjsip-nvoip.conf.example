@@ -1,12 +1,17 @@
 ; Voice AI — prontidão de trunk SIP EXTERNO (Nvoip). TEMPLATE, não config
-; real — nenhum valor aqui é um dado real da Nvoip (ainda não recebemos
-; credenciais). NÃO copiar isto direto pra pjsip.conf sem primeiro:
-;   1. receber servidor/porta/usuário/senha/proxy da Nvoip;
-;   2. confirmar codec(s) suportado(s) pela Nvoip (ulaw/alaw abaixo é um
-;      palpite razoável pra PSTN BR, não confirmado);
-;   3. confirmar se a Nvoip exige registration (registro ativo, seção
-;      [nvoip-registration] abaixo) ou usa IP-based auth (nesse caso a
-;      seção de registration nem seria necessária — não sabemos ainda).
+; real — NÃO copiar isto direto pra pjsip.conf sem primeiro:
+;   1. receber usuário/senha da Nvoip (servidor/porta/codec já CONFIRMADOS
+;      pela documentação oficial da Nvoip, ver abaixo — só falta a
+;      credencial de autenticação);
+;   2. escolher a porta/interface do TRANSPORT LOCAL (NVOIP_SIP_LOCAL_BIND) —
+;      NUNCA a porta remota da Nvoip. Ver nota grande abaixo, é o erro mais
+;      fácil de cometer aqui.
+;
+; Parâmetros CONFIRMADOS pela documentação oficial da Nvoip (2026-08-17):
+;   servidor SIP remoto: app.nvoip.com.br
+;   porta SIP remota:    5060
+;   autenticação:        usuário/senha (user/password) + SIP registration
+;   codecs:               ulaw, alaw
 ;
 ; ADITIVO, nunca substitui: as seções [7001]/[auth7001]/[transport-udp] do
 ; ramal interno (ver pjsip.conf.example, já homologado) continuam
@@ -18,15 +23,30 @@
 ; lê .env do Node: um operador humano precisa substituir cada placeholder
 ; pelo valor real, manualmente, no pjsip.conf de verdade (nunca commitado).
 
-; Transport separado do interno (transport-udp, 127.0.0.1:5060, loopback) —
-; um trunk externo real provavelmente precisa de um transport vinculado a
-; interface roteável, não loopback. Porta/protocolo exatos dependem do que
-; a Nvoip exigir (UDP 5060 é o mais comum pra troncos SIP BR, mas não
-; confirmado).
+; ============================================================================
+; ATENÇÃO — PORTA REMOTA (Nvoip) != PORTA/BIND LOCAL (nosso Asterisk)
+; ============================================================================
+; NVOIP_SIP_PORT (5060) é a porta REMOTA — onde a Nvoip escuta. NÃO é
+; automaticamente a porta que o NOSSO transport local deve usar pra bind.
+;
+; Verificado em modo SOMENTE LEITURA no Asterisk/WSL real (2026-08-17, via
+; `ss -tulnp`, sem sudo/sem tocar config): a porta UDP 5060 local JÁ ESTÁ
+; OCUPADA (bind 0.0.0.0:5060) pelo transport interno existente
+; (transport-udp, usado por PJSIP/7001/ARI). Um segundo transport PJSIP
+; tentando bind também em 0.0.0.0:5060/udp vai CONFLITAR — Asterisk não
+; sobe dois transports UDP no mesmo bind:porta.
+;
+; Por isso este template usa NVOIP_SIP_LOCAL_BIND (nova env var, valor por
+; definir pelo operador — ex. uma porta UDP local livre diferente de 5060,
+; tipicamente >=5061) para o BIND local, e NUNCA reusa NVOIP_SIP_PORT (5060,
+; que é só o destino remoto) nessa posição. Não presumir aqui qual porta
+; local livre existe — isso depende do estado real do servidor no momento
+; da homologação, não deve ser hardcoded.
+; ============================================================================
 [transport-nvoip]
 type=transport
 protocol=udp
-bind=0.0.0.0:${NVOIP_SIP_PORT}  ; NUNCA copiar sem confirmar se a Nvoip exige bind público — risco de segurança se exposto sem necessidade
+bind=0.0.0.0:${NVOIP_SIP_LOCAL_BIND}  ; NUNCA usar ${NVOIP_SIP_PORT} (5060) aqui — é a porta REMOTA da Nvoip, não a local. Ver nota acima.
 
 [nvoip-endpoint]
 type=endpoint
@@ -49,18 +69,21 @@ password=${NVOIP_SIP_PASSWORD}  ; NUNCA commitar o pjsip.conf real com isto pree
 
 [nvoip-aor]
 type=aor
+; Contato REMOTO (servidor Nvoip) — aqui SIM é a porta remota (5060), correto.
 contact=sip:${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
-; outbound_proxy só se a Nvoip exigir um proxy de saída distinto do
-; servidor de registro (nem toda operadora exige) — deixar comentado até
-; confirmar:
+; outbound_proxy: sem exigência documental de proxy de saída separado do
+; servidor de registro — deixar comentado/vazio a menos que a Nvoip informe
+; um proxy distinto:
 ; outbound_proxy=sip:${NVOIP_SIP_OUTBOUND_PROXY}
 
-; Só necessário SE a Nvoip exigir registration ativo (nem todo provedor de
-; troncos exige — alguns autenticam por IP fixo). Não sabemos ainda qual é
-; o caso da Nvoip — confirmar antes de habilitar esta seção.
-; [nvoip-registration]
-; type=registration
-; outbound_auth=nvoip-auth
-; server_uri=sip:${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
-; client_uri=sip:${NVOIP_SIP_USERNAME}@${NVOIP_SIP_SERVER}:${NVOIP_SIP_PORT}
-; retry_interval=60
+; Confirmado pela documentação oficial da Nvoip: autenticação é
+; usuário/senha + SIP registration ativo (não é IP-based auth). Seção
+; preparada, senha NUNCA preenchida aqui — registration real só acontece na
+; homologação (passo 3 de docs/cobranca-ai/NVOIP_HOMOLOGACAO.md), não nesta
+; tarefa.
+[nvoip-registration]
+type=registration
+outbound_auth=nvoip-auth
+server_uri=sip:app.nvoip.com.br:5060
+client_uri=sip:${NVOIP_SIP_USERNAME}@app.nvoip.com.br
+retry_interval=60
