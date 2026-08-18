@@ -16,7 +16,7 @@ import { enviarComFailover } from './dispatchEngine.js'
 import { obterConfigCobranca } from './featureFlags.js'
 import { verificarFrescorSync, logBloqueioSyncStale } from './financialSyncGuard.js'
 import { verificarLimiteGlobalEnvio } from './globalSendLimit.js'
-import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario } from './doNotContactGuard.js'
+import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqueioNumeroInvalidoHoje } from './doNotContactGuard.js'
 
 // Ponto único de verdade pra TODO envio real de cobrança (cron, /disparar,
 // /disparar-individual — todos chegam aqui) — por isso é o lugar certo pro
@@ -56,6 +56,20 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
   // attempt chega a existir pra esta cobrança).
   const dnc = await estaEmDoNotContact(clienteTelefone)
   if (dnc.blocked) {
+    // 2026-08-18 — bloqueio TEMPORÁRIO de telefone inválido (mesma
+    // tabela/guard, ver doNotContactGuard.js) precisa de reason PRÓPRIO —
+    // nunca 'opt_out' (contrato preservado 100% pra quem já checa esse
+    // valor exato, ver dnc-guard-real-dispatch.test.mjs) — quem for auditar
+    // depois (resumo da régua, resposta de /disparar-individual) precisa
+    // distinguir "cliente pediu pra parar" de "telefone rejeitado pelo
+    // WhatsApp hoje". Nenhum evento de timeline aqui: o próprio registro em
+    // collection_do_not_contact já é o rastro auditável.
+    if (dnc.reason === 'NUMERO_INVALIDO_HOJE') {
+      return {
+        status: 'blocked', motor: null, reason: 'numero_invalido_hoje',
+        motivo: 'Telefone bloqueado hoje (NUMERO_INVALIDO_HOJE) — falha definitiva anterior (número não registrado no WhatsApp) no mesmo dia',
+      }
+    }
     await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId, clienteTelefone, reason: dnc.reason })
     return { status: 'blocked', motor: null, reason: 'opt_out', motivo: `Cliente em opt-out/DNC (${dnc.reason})` }
   }
@@ -63,7 +77,18 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
   const config = await obterConfigCobranca()
 
   if (config.multi_whatsapp !== true) {
-    await enviarTextoFinanceiro(clienteTelefone, mensagem)
+    // CORREÇÃO DE SEGURANÇA 2026-08-18 — mesmo bloqueio de telefone+dia do
+    // motor v2 (dispatchEngine.js), aplicado aqui pro motor legado: só
+    // número não registrado no WhatsApp (erro.numeroInvalido) aciona o
+    // bloqueio — falha técnica/HTTP continua propagando sem tocar em DNC.
+    try {
+      await enviarTextoFinanceiro(clienteTelefone, mensagem)
+    } catch (erro) {
+      if (erro.numeroInvalido) {
+        await registrarBloqueioNumeroInvalidoHoje(clienteTelefone)
+      }
+      throw erro
+    }
     return { status: 'sent', motor: 'legado' }
   }
 

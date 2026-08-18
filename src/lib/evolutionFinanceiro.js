@@ -44,7 +44,9 @@ export async function enviarTextoFinanceiro(numero, texto) {
   }
 
   if (!jidValido) {
-    throw new Error(`Número ${numero} não está registrado no WhatsApp`)
+    const erro = new Error(`Número ${numero} não está registrado no WhatsApp`)
+    erro.numeroInvalido = true
+    throw erro
   }
 
   const { data } = await evolutionFinanceiroApi.post(`/message/sendText/${INSTANCE}`, {

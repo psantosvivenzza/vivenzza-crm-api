@@ -14,7 +14,7 @@ import { promessaAtivaPara } from './promises.js'
 import { ultimoRecoveryScore } from './recoveryScore.js'
 import { ultimoPriorityScore } from './priorityScore.js'
 import { obterConfigCobranca } from './featureFlags.js'
-import { buscarRegistroDoNotContact } from './doNotContactGuard.js'
+import { buscarRegistroDoNotContact, registroAindaValido, MOTIVO_NUMERO_INVALIDO_HOJE } from './doNotContactGuard.js'
 
 export const ACAO = Object.freeze({
   NO_ACTION: 'NO_ACTION',
@@ -73,10 +73,15 @@ export function derivarAcao(channel, handler) {
 // "não está em opt-out" (fail-open), igual a antes. O guard real usa a MESMA
 // função de leitura mas fail-closed (bloqueia em caso de erro) — ver
 // doNotContactGuard.js/estaEmDoNotContact.
+// 2026-08-18 — bloqueio TEMPORÁRIO de telefone inválido (mesma tabela, ver
+// doNotContactGuard.js/registrarBloqueioNumeroInvalidoHoje) não é opt-out
+// de verdade — não pode aparecer como reason_code OPT_OUT no shadow, senão
+// mistura "cliente pediu pra parar" com "telefone rejeitado pelo WhatsApp
+// hoje", que têm causas e resoluções completamente diferentes.
 async function estaEmOptOut(clienteTelefone) {
   if (!clienteTelefone) return false
   const { data } = await buscarRegistroDoNotContact(clienteTelefone)
-  return (data?.length ?? 0) > 0
+  return (data ?? []).some((registro) => registroAindaValido(registro) && registro.motivo !== MOTIVO_NUMERO_INVALIDO_HOJE)
 }
 
 async function houvePromessaQuebrada(contasFinanceirasId) {

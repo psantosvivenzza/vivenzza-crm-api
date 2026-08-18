@@ -74,8 +74,15 @@ CREATE TABLE IF NOT EXISTS public.collection_do_not_contact (
   motivo text,
   canal text NOT NULL CHECK (canal IN ('todos', 'whatsapp', 'ligacao')),
   solicitado_em timestamptz NOT NULL DEFAULT now(),
-  registrado_por uuid REFERENCES public.usuarios(id)
+  registrado_por uuid REFERENCES public.usuarios(id),
+  expira_em timestamptz
 );
+-- Índice real de produção (migrations/collection_shadow_minimal.sql,
+-- FASE B.1 — já aplicado, fora do pipeline supabase/migrations/) — SEM
+-- motivo: só 1 linha por (telefone, canal), qualquer que seja o motivo.
+-- Baseline local precisa reproduzir isto pra testar o comportamento real de
+-- conflito (ver doNotContactGuard.js/registrarBloqueioNumeroInvalidoHoje).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_dnc_telefone_canal ON public.collection_do_not_contact (cliente_telefone, canal);
 
 CREATE TABLE IF NOT EXISTS public.evolution_health (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
