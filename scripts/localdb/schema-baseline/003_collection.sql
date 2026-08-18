@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS public.collection_do_not_contact (
   motivo text,
   canal text NOT NULL CHECK (canal IN ('todos', 'whatsapp', 'ligacao')),
   solicitado_em timestamptz NOT NULL DEFAULT now(),
-  registrado_por uuid REFERENCES public.usuarios(id)
+  registrado_por uuid REFERENCES public.usuarios(id),
+  expira_em timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS public.evolution_health (

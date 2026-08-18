@@ -20,7 +20,7 @@ import { selecionarProximaInstancia, registrarSucessoEnvio, registrarFalhaEnvio 
 import { enviarTexto, classifyEvolutionFailure, normalizarStatusAck } from './evolutionAdapter.js'
 import { tituloEstaQuitado } from './paymentGuard.js'
 import { promessaAtivaPara } from './promises.js'
-import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario } from './doNotContactGuard.js'
+import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqueioNumeroInvalidoHoje } from './doNotContactGuard.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
 import { telefonesEquivalentes, mascararTelefone } from '../telefone.js'
@@ -160,6 +160,15 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
       // limitação/bloqueio).
       const podeTentarOutra = classificado.failoverEligible && !instanciaUnicaLegado && config.whatsapp_failover === true && numero < MAX_TENTATIVAS
       if (!podeTentarOutra) {
+        // CORREÇÃO DE SEGURANÇA 2026-08-18 — só PERMANENT_RECIPIENT (número
+        // não registrado no WhatsApp) bloqueia o telefone pelo resto do dia.
+        // Falha técnica/timeout/429/401/403 NUNCA aciona isto — o problema
+        // pode ser passageiro (instância, provedor), não o número em si; o
+        // próximo título do mesmo telefone deve continuar tentando
+        // normalmente. Ver doNotContactGuard.js/registrarBloqueioNumeroInvalidoHoje.
+        if (classificado.category === 'PERMANENT_RECIPIENT') {
+          await registrarBloqueioNumeroInvalidoHoje(clienteTelefone)
+        }
         await atualizarDispatch(dispatch.id, { status: 'failed' })
         await registrarEvento({
           contasFinanceirasId, clienteTelefone, tipo: 'MENSAGEM_FALHOU', origem: ORIGEM.SYSTEM,
