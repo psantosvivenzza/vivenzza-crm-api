@@ -5,7 +5,7 @@ import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
 
-const SELECT_FIELDS = 'id, nome, email, role, ativo, criado_em, meta_mensal, comissao_sem_meta, comissao_com_meta'
+const SELECT_FIELDS = 'id, nome, email, role, ativo, recebe_leads, criado_em, meta_mensal, comissao_sem_meta, comissao_com_meta'
 
 // GET /api/usuarios — listar (só admin)
 router.get('/', adminOnly, async (req, res) => {
@@ -42,13 +42,13 @@ router.get('/:id', adminOnly, async (req, res) => {
 // POST /api/usuarios — criar (só admin)
 router.post('/', adminOnly, async (req, res) => {
   try {
-    const { nome, email, senha, role = 'vendedor', ativo = true, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
+    const { nome, email, senha, role = 'vendedor', ativo = true, recebe_leads = true, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
     if (!nome || !email || !senha) {
       return res.status(400).json({ erro: 'nome, email e senha são obrigatórios' })
     }
 
     const senha_hash = await bcrypt.hash(senha, 12)
-    const insertData = { nome, email: email.toLowerCase().trim(), senha_hash, role, ativo }
+    const insertData = { nome, email: email.toLowerCase().trim(), senha_hash, role, ativo, recebe_leads }
     if (meta_mensal !== undefined) insertData.meta_mensal = meta_mensal
     if (comissao_sem_meta !== undefined) insertData.comissao_sem_meta = comissao_sem_meta
     if (comissao_com_meta !== undefined) insertData.comissao_com_meta = comissao_com_meta
@@ -66,15 +66,16 @@ router.post('/', adminOnly, async (req, res) => {
   }
 })
 
-// PATCH /api/usuarios/:id — atualizar nome, email, senha, role, ativo (só admin)
+// PATCH /api/usuarios/:id — atualizar nome, email, senha, role, ativo, recebe_leads (só admin)
 router.patch('/:id', adminOnly, async (req, res) => {
   try {
-    const { nome, email, senha, role, ativo, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
+    const { nome, email, senha, role, ativo, recebe_leads, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
     const updates = {}
     if (nome !== undefined) updates.nome = nome
     if (email !== undefined) updates.email = email.toLowerCase().trim()
     if (role !== undefined) updates.role = role
     if (ativo !== undefined) updates.ativo = ativo
+    if (recebe_leads !== undefined) updates.recebe_leads = recebe_leads
     if (senha) updates.senha_hash = await bcrypt.hash(senha, 12)
     if (meta_mensal !== undefined) updates.meta_mensal = meta_mensal
     if (comissao_sem_meta !== undefined) updates.comissao_sem_meta = comissao_sem_meta
