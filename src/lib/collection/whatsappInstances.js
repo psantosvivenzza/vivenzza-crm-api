@@ -37,10 +37,20 @@ function inicioDoDiaBrtISO() {
 // colateral do próximo dispatch — se um dia passar sem nenhum envio, o
 // contador fica travado no valor do último dia que teve envio, em vez de
 // reflitir "0 hoje"). Pra qualquer decisão de LIMITE (instanciaApta), a
-// fonte canônica agora é o envio real persistido — não o contador
+// fonte canônica agora é o registro real persistido — não o contador
 // incremental. 2 queries (nunca N+1 por instância): pega os dispatches
-// reais de hoje, depois as tentativas bem-sucedidas de hoje que apontam
-// pra eles, agrupadas por instância.
+// reais de hoje, depois as tentativas de hoje que apontam pra eles,
+// agrupadas por instância.
+//
+// CORREÇÃO 2026-08-18 — gap comprovado (auditoria da correção "telefone
+// inválido com múltiplos títulos"): até aqui só contava tentativas
+// bem-SUCEDIDAS (status sent/delivered/read via enviado_em) — uma rajada de
+// falhas reais contra UMA instância (número inválido, timeout, 429...)
+// nunca consumia daily_limit, mesmo cada falha sendo o exato risco de
+// anti-ban que este limite existe pra conter. Agora conta TODA tentativa
+// real (qualquer status — sending/sent/delivered/read/failed/expired/
+// cancelled), via criado_em (sempre populado no INSERT, diferente de
+// enviado_em/falhou_em que ficam NULL até o desfecho final).
 export async function contarEnviosReaisHojePorInstancia() {
   const inicioDia = inicioDoDiaBrtISO()
 
@@ -55,9 +65,8 @@ export async function contarEnviosReaisHojePorInstancia() {
 
   const { data: tentativas, error: erroTentativas } = await supabase
     .from('collection_dispatch_attempts')
-    .select('whatsapp_instance_id, status, dispatch_id, enviado_em')
-    .in('status', ['sent', 'delivered', 'read'])
-    .gte('enviado_em', inicioDia)
+    .select('whatsapp_instance_id, dispatch_id')
+    .gte('criado_em', inicioDia)
   if (erroTentativas) throw erroTentativas
 
   const contagem = new Map()

@@ -117,21 +117,36 @@ test('Teto global de envio (globalSendLimit.js)', async (t) => {
     await criarInstancia(supabase, 'wa01-grl-6', { priority: 1 })
     await criarInstancia(supabase, 'wa02-grl-6', { priority: 2, role: 'reserva' })
     await setLimitesGlobais(supabase, invalidarCacheFlags, { diario: 1, horario: 100 })
-    await inserirEnvioSimulado(supabase, { minutosAtras: 1 }) // já consumiu o único slot diário, "pela instância 1"
-
     await supabase.from('automacoes_config').update({ multi_whatsapp: true }).eq('id', 1)
     invalidarCacheFlags()
     fakeEvolution.controlarInstancia('wa01-grl-6', { comportamento: 'ok' })
     fakeEvolution.controlarInstancia('wa02-grl-6', { comportamento: 'ok' })
 
-    const conta = await criarContaDeTeste(supabase)
+    // 2026-08-18 — 1º envio REAL (via wa01) consome o único slot diário
+    // global. Antes desta correção o teste simulava esse consumo inserindo
+    // direto em cobrancas_whatsapp com multi_whatsapp=false e só depois
+    // ligava a flag — isso parou de funcionar quando o teto global passou a
+    // contar tentativas reais (collection_dispatch_attempts) sob
+    // multi_whatsapp=true: a linha simulada nunca aparecia nessa fonte. Um
+    // envio real de verdade prova o mesmo comportamento sem depender de
+    // simulação incompatível com a nova fonte de contagem.
+    const contaA = await criarContaDeTeste(supabase)
+    const r1 = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: contaA.id, etapa: 3, clienteNome: contaA.pessoa_nome,
+      clienteTelefone: contaA.telefone_cobranca, valor: contaA.valor, mensagem: 'Teste 6a', origem: 'cron',
+    })
+    assert.equal(r1.status, 'sent')
+
+    // 2º título (conta diferente) — mesmo com wa02 saudável e disponível, o
+    // teto é GLOBAL (soma de todas as instâncias), não por instância.
+    const contaB = await criarContaDeTeste(supabase)
     const resultado = await enviarCobrancaComRoteamento({
-      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
-      clienteTelefone: conta.telefone_cobranca, valor: conta.valor, mensagem: 'Teste 6', origem: 'cron',
+      contasFinanceirasId: contaB.id, etapa: 3, clienteNome: contaB.pessoa_nome,
+      clienteTelefone: contaB.telefone_cobranca, valor: contaB.valor, mensagem: 'Teste 6b', origem: 'cron',
     })
     assert.equal(resultado.status, 'blocked')
     assert.equal(resultado.reason, 'limite_global_diario', 'trocar de instância (wa01 -> wa02 disponível) não deveria abrir um novo teto')
-    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1, 'só o 1º envio real deveria ter acontecido — wa02 nunca deveria ter sido tentada pro 2º título')
   })
 
   await t.test('8. failover técnico (whatsapp_failover=true, 1ª falha, 2ª tentativa) não burla o teto global — checado 1x antes de qualquer tentativa', async () => {
@@ -154,7 +169,7 @@ test('Teto global de envio (globalSendLimit.js)', async (t) => {
     assert.equal(fakeEvolution.mensagensEnviadas.length, 0, 'nem a instância principal nem a reserva deveriam ter sido tentadas — bloqueado antes de qualquer tentativa')
   })
 
-  await t.test('7. retry/failover bem-sucedido conta como 1 envio só (não duplica) quando o caller registra o resultado', async () => {
+  await t.test('7. failover conta cada tentativa REAL ao provider (1 falha técnica + 1 sucesso = 2), nunca a mesma tentativa 2x', async () => {
     await resetar()
     await criarInstancia(supabase, 'wa01-grl-7', { priority: 1 })
     await criarInstancia(supabase, 'wa02-grl-7', { priority: 2, role: 'reserva' })
@@ -170,12 +185,19 @@ test('Teto global de envio (globalSendLimit.js)', async (t) => {
       clienteTelefone: conta.telefone_cobranca, valor: conta.valor, mensagem: 'Teste 7', origem: 'cron',
     })
     assert.equal(resultado.status, 'sent', '2ª instância (reserva) deveria ter assumido via failover')
-    assert.equal(fakeEvolution.mensagensEnviadas.length, 1, 'só 1 envio real, mesmo com 2 tentativas (1 falha técnica + 1 sucesso)')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1, 'só 1 mensagem de fato ENTREGUE, mesmo com 2 tentativas (1 falha técnica + 1 sucesso)')
 
-    // Só agora o caller (como cobranca-whatsapp.js faria de verdade) registra o resultado.
-    await inserirEnvioSimulado(supabase, { minutosAtras: 0 })
+    // CORREÇÃO 2026-08-18 (gap de rate limit): o teto global agora conta
+    // TENTATIVAS reais ao provider, não só entregas confirmadas — a
+    // primeira chamada (wa01, falha técnica) e a segunda (wa02, sucesso)
+    // foram 2 chamadas HTTP reais distintas contra a infraestrutura do
+    // provedor, então contam 2 pro anti-ban. Isto é intencional: o
+    // comportamento antigo (só contar sucesso) é exatamente o gap
+    // comprovado que esta correção fecha — nunca dobra a MESMA tentativa,
+    // mas também nunca finge que uma tentativa que realmente aconteceu não
+    // aconteceu.
     const r = await verificarLimiteGlobalEnvio()
-    assert.equal(r.contagem_dia, 1, 'o retry interno não deveria ter incrementado o contador 2x')
+    assert.equal(r.contagem_dia, 2, '2 chamadas reais ao provider (1 falha + 1 sucesso) — nenhuma tentativa real fica invisível, nenhuma é contada 2x')
   })
 
   await t.test('9. limite individual (por instância) continua funcionando mesmo com o global longe do teto', async () => {
