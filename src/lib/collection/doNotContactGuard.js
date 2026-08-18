@@ -103,31 +103,65 @@ function fimDoDiaBrtISO() {
 // decide quando isto se aplica; esta função em si não classifica nada.
 //
 // Idempotente por telefone+dia: um segundo título com o mesmo telefone
-// falhando no mesmo dia não cria uma segunda linha (nem re-escreve
-// expira_em, que já cobre o resto do dia). Best-effort — uma falha ao
-// gravar este bloqueio nunca pode derrubar o fluxo de envio que já
+// falhando no mesmo dia não cria uma segunda linha. Best-effort — uma falha
+// ao gravar este bloqueio nunca pode derrubar o fluxo de envio que já
 // terminou (mesmo racional de registrarBloqueioOptOutSeNecessario abaixo).
+//
+// SEGURANÇA 2026-08-18 (revisão pós-PR) — collection_do_not_contact tem uma
+// UNIQUE INDEX real de produção em (cliente_telefone, canal), SEM motivo
+// (idx_collection_dnc_telefone_canal, migrations/collection_shadow_minimal.sql
+// — já aplicada, fora do pipeline supabase/migrations/): só pode existir 1
+// linha por telefone+canal, qualquer que seja o motivo. Por isso:
+// - NUNCA faz INSERT às cegas: sempre consulta a linha existente pra
+//   (telefone, 'whatsapp') primeiro (no máx 1, garantido pela constraint).
+// - expira_em NULL = permanente, DE QUALQUER MOTIVO (opt-out real ou
+//   qualquer outra origem futura) — nunca é tocado, nunca vira UPDATE nem é
+//   sobrescrito por um INSERT concorrente. Retorna imediatamente.
+// - Só a PRÓPRIA linha (motivo === MOTIVO_NUMERO_INVALIDO_HOJE) pode ser
+//   atualizada, e só pra ESTENDER expira_em (nunca pra criar, nunca pra
+//   mudar motivo) — cobre o caso de um bloqueio de um dia anterior já
+//   expirado ocupando o slot único.
+// - INSERT só acontece quando NÃO existe nenhuma linha pra este
+//   telefone+canal — nesse caso é estruturalmente impossível conflitar com
+//   um opt-out permanente (ele ocuparia o slot e teria sido encontrado
+//   acima). 23505 remanescente (corrida entre 2 títulos do mesmo telefone
+//   falhando quase ao mesmo tempo) é esperado e não é erro real.
 export async function registrarBloqueioNumeroInvalidoHoje(clienteTelefone) {
   if (!clienteTelefone) return
-  const agoraISO = new Date().toISOString()
   try {
-    const { data: jaBloqueadoHoje, error: erroConsulta } = await supabase
+    const { data: existente, error: erroConsulta } = await supabase
       .from('collection_do_not_contact')
-      .select('id')
+      .select('id, motivo, expira_em')
       .eq('cliente_telefone', clienteTelefone)
       .eq('canal', 'whatsapp')
-      .eq('motivo', MOTIVO_NUMERO_INVALIDO_HOJE)
-      .gt('expira_em', agoraISO)
-      .limit(1)
-    if (erroConsulta) return
-    if ((jaBloqueadoHoje?.length ?? 0) > 0) return
+      .maybeSingle()
+    if (erroConsulta) {
+      console.error('[doNotContactGuard] falha ao consultar bloqueio existente (best-effort, não afeta o envio já concluído):', erroConsulta.message)
+      return
+    }
 
-    await supabase.from('collection_do_not_contact').insert({
+    if (existente) {
+      if (!existente.expira_em) return // permanente (qualquer motivo) — nunca toca
+      if (existente.motivo === MOTIVO_NUMERO_INVALIDO_HOJE && new Date(existente.expira_em) > new Date()) return // já bloqueado hoje — idempotente
+      // Só resta: linha própria (numero_invalido_whatsapp) expirada de outro
+      // dia — estende pra hoje, nunca muda motivo/telefone/canal.
+      const { error: erroUpdate } = await supabase
+        .from('collection_do_not_contact')
+        .update({ expira_em: fimDoDiaBrtISO() })
+        .eq('id', existente.id)
+      if (erroUpdate) console.error('[doNotContactGuard] falha ao renovar bloqueio de número inválido (best-effort):', erroUpdate.message)
+      return
+    }
+
+    const { error: erroInsert } = await supabase.from('collection_do_not_contact').insert({
       cliente_telefone: clienteTelefone,
       canal: 'whatsapp',
       motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
       expira_em: fimDoDiaBrtISO(),
     })
+    if (erroInsert && erroInsert.code !== '23505') {
+      console.error('[doNotContactGuard] falha ao registrar bloqueio de número inválido (best-effort, não afeta o envio já concluído):', erroInsert.message)
+    }
   } catch (erro) {
     console.error('[doNotContactGuard] falha ao registrar bloqueio de número inválido (best-effort, não afeta o envio já concluído):', erro.message)
   }

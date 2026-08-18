@@ -496,3 +496,126 @@ test('19. bloqueio é por (telefone, dia), não por (telefone, título): 2 títu
   assert.equal(dispatchesC?.length ?? 0, 0, 'título C nunca deveria ter sido tentado')
   assert.equal(dispatchesD?.length ?? 0, 0, 'título D nunca deveria ter sido tentado')
 })
+
+// 2026-08-18 — revisão pós-PR #48: collection_do_not_contact tem uma UNIQUE
+// INDEX real de produção em (cliente_telefone, canal), SEM motivo
+// (idx_collection_dnc_telefone_canal, migrations/collection_shadow_minimal.sql
+// — já aplicada, fora do pipeline supabase/migrations/, reproduzida no
+// baseline local em 003_collection.sql). Só pode existir 1 linha por
+// telefone+canal — os 5 cenários abaixo (A-E do pedido) provam que o
+// bloqueio temporário de número inválido NUNCA sobrescreve/expira/converte
+// um opt-out permanente pré-existente, mesmo com essa restrição real.
+
+test('A. opt-out permanente existente + falha número inválido no mesmo telefone: opt-out permanente permanece intacto', async () => {
+  await criarInstancia('wa01-tA', { priority: 1 })
+  const telefone = telefoneInvalidoDeTeste()
+
+  const { data: optOutOriginal } = await supabase.from('collection_do_not_contact').insert({
+    cliente_telefone: telefone, canal: 'whatsapp', motivo: 'pedido do cliente',
+  }).select().single()
+  assert.equal(optOutOriginal.expira_em, null)
+
+  const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+  const resultado = await enviarCobrancaComRoteamento({
+    contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+    clienteTelefone: telefone, valor: 500, mensagem: 'A', origem: 'cron',
+  })
+  // bloqueado pelo opt-out real (nem chega a tentar o provider e descobrir
+  // que o número também seria inválido)
+  assert.equal(resultado.status, 'blocked')
+  assert.equal(resultado.reason, 'opt_out')
+  assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+
+  const { data: linhas } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone)
+  assert.equal(linhas.length, 1, 'nenhuma segunda linha foi criada — UNIQUE INDEX (telefone, canal) permite só 1')
+  assert.equal(linhas[0].id, optOutOriginal.id)
+  assert.equal(linhas[0].motivo, 'pedido do cliente', 'motivo original nunca foi sobrescrito')
+  assert.equal(linhas[0].expira_em, null, 'opt-out permanece permanente — nunca ganhou expira_em')
+})
+
+test('B. bloqueio de número inválido (sem opt-out prévio): registrado com expira_em = fim do dia BRT', async () => {
+  const telefone = telefoneDeTeste()
+  await registrarBloqueioNumeroInvalidoHoje(telefone)
+
+  const { data: linha } = await supabase.from('collection_do_not_contact').select('*')
+    .eq('cliente_telefone', telefone).eq('canal', 'whatsapp').single()
+  assert.equal(linha.motivo, MOTIVO_NUMERO_INVALIDO_HOJE)
+  assert.notEqual(linha.expira_em, null)
+
+  const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const amanha = new Date(linha.expira_em).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const horaBrtDoExpira = new Date(linha.expira_em).toLocaleString('en-CA', { timeZone: 'America/Sao_Paulo', hour12: false }).split(', ')[1]
+  assert.ok(new Date(linha.expira_em) > new Date(), 'expira no futuro (ainda hoje)')
+  // meia-noite BRT do dia seguinte à data de hoje BRT, com precisão de minuto
+  assert.equal(horaBrtDoExpira.slice(0, 5), '00:00')
+  assert.ok(amanha > hojeBrt, 'expira_em cai no dia seguinte ao de hoje (BRT)')
+})
+
+test('C. opt-out permanente nunca recebe expira_em, mesmo registrado DEPOIS de um bloqueio temporário no mesmo telefone', async () => {
+  const telefone = telefoneDeTeste()
+  await registrarBloqueioNumeroInvalidoHoje(telefone)
+  const { data: antes } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone).single()
+  assert.equal(antes.motivo, MOTIVO_NUMERO_INVALIDO_HOJE)
+  assert.notEqual(antes.expira_em, null)
+
+  // Um operador registrando opt-out real pro MESMO telefone bate na mesma
+  // UNIQUE INDEX — precisa de upsert/update explícito (não é o app que faz
+  // isso hoje, é SQL manual), mas o ponto crítico é que registrarBloqueioNumeroInvalidoHoje
+  // NUNCA reverte esse cenário: uma vez que a linha vire permanente
+  // (expira_em NULL), nenhuma chamada seguinte da função pode reintroduzir
+  // um expira_em.
+  await supabase.from('collection_do_not_contact').update({ motivo: 'pedido do cliente', expira_em: null }).eq('id', antes.id)
+
+  await registrarBloqueioNumeroInvalidoHoje(telefone) // nova falha de número inválido no mesmo dia
+  const { data: depois } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone).single()
+  assert.equal(depois.id, antes.id, 'continua sendo a mesma linha (UNIQUE INDEX)')
+  assert.equal(depois.expira_em, null, 'permanece permanente — nunca ganhou expira_em de volta')
+  assert.equal(depois.motivo, 'pedido do cliente', 'motivo permanente nunca foi trocado de volta pro temporário')
+})
+
+test('D. nenhum bloqueio permanente é convertido em temporário por chamadas repetidas', async () => {
+  const telefone = telefoneDeTeste()
+  await supabase.from('collection_do_not_contact').insert({ cliente_telefone: telefone, canal: 'whatsapp', motivo: 'pedido do cliente' })
+
+  for (let i = 0; i < 3; i++) await registrarBloqueioNumeroInvalidoHoje(telefone)
+
+  const { data: linhas } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone)
+  assert.equal(linhas.length, 1)
+  assert.equal(linhas[0].expira_em, null)
+  assert.equal(linhas[0].motivo, 'pedido do cliente')
+})
+
+test('E. falha técnica/timeout/429/401/403 não cria linha em collection_do_not_contact', async () => {
+  await criarInstancia('wa01-tE', { priority: 1, role: 'principal' })
+  const cenarios = ['unavailable', 'rate_limited', 'unauthorized', 'forbidden']
+  for (const comportamento of cenarios) {
+    fakeEvolution.controlarInstancia('wa01-tE', { comportamento })
+    const telefone = telefoneDeTeste()
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+    await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: comportamento, origem: 'cron',
+    })
+    const { data: linhas } = await supabase.from('collection_do_not_contact').select('id').eq('cliente_telefone', telefone)
+    assert.equal(linhas?.length ?? 0, 0, `${comportamento} não pode criar linha em collection_do_not_contact`)
+  }
+})
+
+test('F. renovação: bloqueio de número inválido EXPIRADO (dia anterior) é estendido pro fim de hoje, sem criar 2ª linha (mesma UNIQUE INDEX)', async () => {
+  const telefone = telefoneDeTeste()
+  const { data: antigo } = await supabase.from('collection_do_not_contact').insert({
+    cliente_telefone: telefone, canal: 'whatsapp', motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
+    expira_em: new Date(Date.now() - 25 * 3600_000).toISOString(), // expirou ontem
+  }).select().single()
+
+  await registrarBloqueioNumeroInvalidoHoje(telefone)
+
+  const { data: linhas } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone)
+  assert.equal(linhas.length, 1, 'renovou a mesma linha, não criou uma segunda')
+  assert.equal(linhas[0].id, antigo.id)
+  assert.ok(new Date(linhas[0].expira_em) > new Date(), 'expira_em renovado pro futuro')
+
+  const dnc = await estaEmDoNotContact(telefone)
+  assert.equal(dnc.blocked, true)
+  assert.equal(dnc.reason, 'NUMERO_INVALIDO_HOJE')
+})
