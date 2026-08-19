@@ -77,7 +77,17 @@ $def.Settings.DisallowStartIfOnBatteries = $false
 $def.Settings.StopIfGoingOnBatteries = $false
 $def.Settings.AllowHardTerminate = $true
 $def.Settings.StartWhenAvailable = $true
-$def.Settings.ExecutionTimeLimit = ""   # "" = sem limite (sentinela documentada da API COM - confirma sem <ExecutionTimeLimit> no XML)
+# CAUSA RAIZ 7 (comprovada empiricamente na instalacao real): "" (string
+# vazia) faz o elemento <ExecutionTimeLimit> ficar OMITIDO do XML - o que
+# NAO significa "sem limite" pro Windows, e sim "usa o default do schema",
+# que e PT72H (72 horas)! Confirmado lendo de volta a tarefa ja registrada
+# (Get-ScheduledTask mostrava ExecutionTimeLimit=PT72H mesmo com "" no XML
+# de origem) - o supervisor seria morto pelo proprio Task Scheduler depois
+# de 72h rodando, mesmo saudavel. O sentinela DOCUMENTADO e correto pra
+# "sem limite" e a string explicita "PT0S" (zero segundos), nao a ausencia
+# do elemento - corrigido, confirmado que agora o elemento aparece no XML
+# com o valor certo.
+$def.Settings.ExecutionTimeLimit = "PT0S"
 $def.Settings.Enabled = $true
 $def.Settings.Hidden = $false
 
@@ -129,6 +139,9 @@ if ($xmlFinal -match '<RestartOnFailure>') {
 }
 if ($xmlFinal -match '<Count\s*/>|<Count>\s*</Count>|<Interval>\s*</Interval>|<Duration>\s*</Duration>') {
   throw "XML final contem um elemento obrigatorio vazio - abortando sem registrar."
+}
+if ($xmlFinal -notmatch '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>') {
+  throw "XML final nao tem ExecutionTimeLimit=PT0S explicito (ausente = Windows aplica default de 72h, mataria o supervisor depois de 3 dias) - abortando sem registrar."
 }
 if ($xmlFinal -notmatch [regex]::Escape($supervisor)) {
   throw "XML final nao referencia o caminho do supervisor esperado - abortando sem registrar."
