@@ -3,6 +3,7 @@ import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { verificarFrescorSync, logBloqueioSyncStale } from '../lib/collection/financialSyncGuard.js'
 import { agruparParaConsolidacao } from '../lib/collection/consolidacaoParcelas.js'
+import { contarTentativasReaisDesde } from '../lib/collection/providerAttemptCounter.js'
 
 // CORREÇÃO URGENTE 2026-07-30: o número 5551983270024 foi suspenso temporariamente
 // por enviar ~50 mensagens em rajada (sem intervalo). Limites abaixo existem
@@ -53,14 +54,17 @@ function inicioDaHoraAtualISO() {
   return agora.toISOString()
 }
 
+// CORREÇÃO 2026-08-18 — este é O contador histórico mais crítico (existe
+// desde a suspensão real do número, comentário acima) e até aqui só contava
+// SUCESSO — uma rajada de falhas reais (número inválido, timeout, 429...)
+// nunca consumia LIMITE_DIARIO/LIMITE_POR_HORA, mesmo protegendo
+// especificamente contra rajada. Delega pra providerAttemptCounter.js
+// (fonte canônica de tentativa real, engine-aware) — nome mantido
+// (contarEnviadasCronDesde) pra não mexer nos 2 call sites deste arquivo,
+// mas a partir de agora conta TENTATIVAS reais de origem='cron', não só as
+// que terminaram em sucesso.
 async function contarEnviadasCronDesde(isoDesde) {
-  const { count, error } = await supabase
-    .from('cobrancas_whatsapp')
-    .select('id', { count: 'exact', head: true })
-    .eq('origem', 'cron')
-    .gte('data_envio', isoDesde)
-  if (error) throw error
-  return count ?? 0
+  return contarTentativasReaisDesde({ desde: isoDesde, origem: 'cron' })
 }
 
 async function telefonesJaContatadosHoje(isoInicioDia) {

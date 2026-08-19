@@ -26,8 +26,16 @@
 // checado aqui, antes de qualquer seleção de instância) já implementa
 // "global AND instância" por curto-circuito, sem precisar combinar as duas
 // checagens numa função só.
-import { supabase } from '../supabase-admin.server.js'
+//
+// CORREÇÃO 2026-08-18 — gap comprovado: contarEnviosDesde() só contava
+// SUCESSO (cobrancas_whatsapp), então uma rajada de falhas reais (número
+// inválido, timeout, 429...) nunca consumia o teto, mesmo cada uma sendo
+// uma chamada HTTP real contra o provedor. Delega pra
+// providerAttemptCounter.js (fonte canônica de tentativa real, engine-aware
+// — ver comentário lá pro racional completo e o gap conhecido/não fechado
+// do motor legado).
 import { obterConfigCobranca } from './featureFlags.js'
+import { contarTentativasReaisDesde } from './providerAttemptCounter.js'
 
 function inicioDoDiaBrtISO() {
   const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
@@ -40,16 +48,11 @@ function inicioDaHoraAtualISO() {
   return agora.toISOString()
 }
 
+// TODA origem (cron + manual) — é isso que torna o teto verdadeiramente
+// global, ao contrário do contador só-cron que já existia em
+// cobranca-whatsapp.js (contarEnviadasCronDesde, .eq('origem','cron')).
 async function contarEnviosDesde(isoDesde) {
-  // TODA origem (cron + manual) — é isso que torna o teto verdadeiramente
-  // global, ao contrário do contador só-cron que já existia em
-  // cobranca-whatsapp.js (contarEnviadasCronDesde, .eq('origem','cron')).
-  const { count, error } = await supabase
-    .from('cobrancas_whatsapp')
-    .select('id', { count: 'exact', head: true })
-    .gte('data_envio', isoDesde)
-  if (error) throw error
-  return count ?? 0
+  return contarTentativasReaisDesde({ desde: isoDesde })
 }
 
 /**

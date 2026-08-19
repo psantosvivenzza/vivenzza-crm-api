@@ -413,7 +413,14 @@ test('15. registrarBloqueioNumeroInvalidoHoje é idempotente — 2 chamadas mesm
   assert.equal(data?.length ?? 0, 1)
 })
 
-test('16. GAP CONFIRMADO (não corrigido nesta PR): falha de número inválido não consome nem o teto global nem o teto por instância', async () => {
+// 2026-08-18 — GAP FECHADO na correção "rate limit de tentativas reais ao
+// provider" (fix/count-provider-attempts-in-rate-limit, ver
+// providerAttemptCounter.js): este teste documentava o gap como
+// deliberadamente NÃO corrigido nesta PR (#48) — agora que a correção
+// seguinte fechou o gap, a asserção se inverte: a falha de número inválido
+// PASSA a consumir tanto o teto global quanto o teto por instância (cada
+// falha real é 1 chamada HTTP real contra o provider).
+test('16. falha de número inválido CONSOME o teto global e o teto por instância (gap fechado por fix/count-provider-attempts-in-rate-limit)', async () => {
   const instancia = await criarInstancia('wa01-t16', { priority: 1 })
   const telefone = telefoneInvalidoDeTeste()
   const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
@@ -429,8 +436,8 @@ test('16. GAP CONFIRMADO (não corrigido nesta PR): falha de número inválido n
   const depoisGlobal = await verificarLimiteGlobalEnvio()
   const depoisPorInstancia = await contarEnviosReaisHojePorInstancia()
 
-  assert.equal(depoisGlobal.contagem_dia, antesGlobal.contagem_dia, 'teto global não conta a falha — gap confirmado, fora do escopo desta correção')
-  assert.equal(depoisPorInstancia.get(instancia.id) ?? 0, antesPorInstancia.get(instancia.id) ?? 0, 'teto por instância também não conta a falha')
+  assert.equal(depoisGlobal.contagem_dia, antesGlobal.contagem_dia + 1, 'teto global agora conta a falha real — checagem de existência do número é uma chamada real ao provider')
+  assert.equal((depoisPorInstancia.get(instancia.id) ?? 0), (antesPorInstancia.get(instancia.id) ?? 0) + 1, 'teto por instância também passa a contar a falha')
 })
 
 test('17. falha técnica com failover elegível: não bloqueia telefone, 2ª instância ainda é tentada normalmente', async () => {

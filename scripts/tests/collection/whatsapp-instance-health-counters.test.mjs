@@ -94,9 +94,15 @@ test('WhatsApp: contadores canônicos + cooldown respeitado pelo healthcheck', a
       status: 'sent', origem: 'cron', mensagem: 'x', cliente_nome: conta.pessoa_nome, cliente_telefone: conta.telefone_cobranca, valor: 100,
       criado_em: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
     }).select().single()
+    // 2026-08-18 — criado_em (não só enviado_em) precisa ser backdatado: a
+    // fonte canônica agora filtra por criado_em (sempre populado no INSERT
+    // real, diferente de enviado_em/falhou_em que ficam NULL até o
+    // desfecho) — sem isso, o INSERT abaixo assumiria criado_em=agora
+    // (default now()) e o teste pararia de provar o que se propõe a provar.
     await supabase.from('collection_dispatch_attempts').insert({
       dispatch_id: dispatch.id, attempt_number: 1, whatsapp_instance_id: instancia.id, status: 'sent',
       enviado_em: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
+      criado_em: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
     })
     const contagem = await contarEnviosReaisHojePorInstancia()
     assert.equal(contagem.get(instancia.id) ?? 0, 0, 'envio de mais de 26h atrás (ontem) não deveria contar como "hoje"')
@@ -115,7 +121,7 @@ test('WhatsApp: contadores canônicos + cooldown respeitado pelo healthcheck', a
     assert.equal(fakeEvolution.mensagensEnviadas.length, 1)
   })
 
-  await t.test('4. failover entre instâncias — cada instância conta só o que ELA realmente enviou, sem duplicar', async () => {
+  await t.test('4. failover entre instâncias — cada instância conta cada tentativa REAL que ela recebeu (sucesso ou falha), sem duplicar', async () => {
     await resetar()
     const principal = await criarInstancia(supabase, 'wa01-b4', { priority: 1, role: 'principal' })
     const reserva = await criarInstancia(supabase, 'wa02-b4', { priority: 2, role: 'reserva' })
@@ -128,9 +134,15 @@ test('WhatsApp: contadores canônicos + cooldown respeitado pelo healthcheck', a
     const resultado = await enviarCobrancaComRoteamento({ contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca, valor: conta.valor, mensagem: 'x', origem: 'cron' })
     assert.equal(resultado.status, 'sent')
 
+    // CORREÇÃO 2026-08-18 (gap de rate limit): a PRINCIPAL recebeu 1 chamada
+    // HTTP real (que falhou) — isso agora conta pra proteção anti-ban dela,
+    // exatamente o risco que o daily_limit por instância existe pra conter.
+    // Antes desta correção, uma falha real nunca consumia nada (gap
+    // comprovado na auditoria de 2026-08-18) — não é mais "só o que ELA
+    // enviou com sucesso", é "toda tentativa real que ela recebeu".
     const contagem = await contarEnviosReaisHojePorInstancia()
-    assert.equal(contagem.get(principal.id) ?? 0, 0, 'principal falhou — não deveria contar como enviado')
-    assert.equal(contagem.get(reserva.id), 1, 'só a reserva realmente enviou — conta 1 pra ela, não pra ambas nem 2x')
+    assert.equal(contagem.get(principal.id), 1, 'principal recebeu 1 tentativa real (que falhou) — agora conta, não fica invisível pro anti-ban')
+    assert.equal(contagem.get(reserva.id), 1, 'reserva recebeu 1 tentativa real (que teve sucesso) — conta 1 pra ela, não 2x')
   })
 
   await t.test('5. cooldown ativo + healthcheck respondendo "open" → continua bloqueado (não fura o circuit breaker)', async () => {
