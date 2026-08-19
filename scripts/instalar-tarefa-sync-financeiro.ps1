@@ -1,7 +1,7 @@
-# Cria (ou corrige, se ja existir) a tarefa agendada VivenzzaSyncFinanceiroLegado.
-# Precisa rodar como Administrador (Register-ScheduledTask/Set-ScheduledTask
-# com Principal S4U exigem elevacao neste Windows) - script unico,
-# idempotente, seguro de rodar de novo quantas vezes for preciso.
+# Cria (ou substitui, se ja existir) a tarefa agendada VivenzzaSyncFinanceiroLegado.
+# Precisa rodar como Administrador (Principal S4U exige elevacao neste
+# Windows) - script unico, idempotente, seguro de rodar de novo quantas
+# vezes for preciso.
 #
 # ARQUITETURA (corrigida 2026-08-19, ver watchdog-sync-financeiro.ps1 pro
 # racional completo): Task Scheduler NAO aponta mais pro .bat direto.
@@ -11,56 +11,40 @@
 # .bat -> cmd.exe -> node.exe - LastTaskResult ficava em codigo anomalo
 # 0xFFFFFFFF e nunca acionava o restart).
 #
-# CAUSA RAIZ 5 (comprovada empiricamente, mesmo dia, apos corrigir 1-4): o
-# proprio supervisor (ja rodando powershell.exe direto, sem .bat, com log
-# proprio e try/catch amplo) continuava morrendo sozinho a cada poucos
-# minutos, SEM excecao capturada, SEM evento de crash (Application/
-# PowerShell event log limpos), SEM deteccao do Windows Defender (checado
-# e confirmado limpo). A explicacao mais provavel: RestartCount/
-# RestartInterval do Task Scheduler foi desenhado pra tarefas que TERMINAM
-# (sucesso ou falha) e voce quer retentar - nao pra um processo residente
-# que roda pra sempre de proposito. Com o processo ainda "Running" quando
-# o RestartInterval vence, o proprio Task Scheduler parece forcar o
-# encerramento pra "reiniciar" - o oposto do que queremos aqui. Corrigido:
-# RestartCount=0 (Task Scheduler nao tenta mais "ajudar" reiniciando um
-# processo que nunca deveria terminar sozinho) - a recuperacao de verdade
-# fica 100% por conta do loop interno do supervisor (que so ele sabe
-# distinguir "o worker morreu de verdade" de "ainda estou rodando
-# normalmente"). Tambem removido -WindowStyle Hidden (nao faz sentido
-# nem tem janela pra esconder rodando via Task Scheduler sem sessao
-# interativa - suspeito adicional descartado por seguranca, sem custo).
+# CAUSA RAIZ 5 (hipotese forte, nao 100% confirmada por log fumegante):
+# mesmo depois de corrigir 1-4, o supervisor continuava morrendo sozinho
+# a cada poucos minutos, sem excecao/crash/deteccao de antivirus (tudo
+# checado e descartado). Explicacao mais provavel: RestartCount/
+# RestartInterval do Task Scheduler foi desenhado pra tarefas que
+# TERMINAM, nao pra um processo residente - com o processo ainda
+# "Running" quando o RestartInterval vence, o proprio Task Scheduler
+# parece forcar um "reinicio". Substituido por um trigger diario (00:00)
+# com repeticao a cada 5min durante 1 dia como rede de seguranca
+# (MultipleInstances=IgnoreNew garante que isso nunca duplica um
+# supervisor ja vivo; no dia seguinte o proprio trigger diario reinicia
+# o ciclo de repeticao sozinho).
 #
-# Rede de seguranca substituta: alem de AtLogOn/AtStartup, um trigger
-# DIARIO (00:00) com repeticao a cada 5min DURANTE 1 dia
-# (Duration=P1D - valor valido, dentro do limite aceito pelo Windows;
-# a 1a tentativa usou RepetitionDuration=[TimeSpan]::MaxValue pra
-# "repetir pra sempre", o que gera P99999999DT23H59M59S no XML da tarefa -
-# fora do intervalo aceito pelo Task Scheduler, HRESULT 0x80041318,
-# Set-ScheduledTask falhou e a tarefa NAO foi atualizada). Com Duration=P1D
-# a repeticao de 5min cobre o dia inteiro; no dia seguinte o proprio
-# trigger diario (00:00) reinicia o ciclo de repeticao sozinho - padrao
-# oficialmente suportado, sem duracao artificial/infinita.
+# CAUSA RAIZ 6 (comprovada empiricamente, 2 tentativas de instalacao
+# reais): tanto -RepetitionDuration=[TimeSpan]::MaxValue (Duration fora
+# do intervalo aceito, HRESULT 0x80041318) quanto -RestartCount 0 sem
+# -RestartInterval (RestartOnFailure/Count vazio no XML gerado, HRESULT
+# 0x80041319) mostraram que o cmdlet New-ScheduledTaskSettingsSet/
+# Set-ScheduledTask traduz certas combinacoes de parametros pra XML
+# ambiguo ou incompleto, mesmo com valores aparentemente corretos nos
+# objetos PowerShell intermediarios (confirmado inspecionando os objetos
+# antes de registrar - RestartCount=0 aparecia certinho no objeto
+# Settings, mas a serializacao final pro XML da tarefa ainda incluia uma
+# secao RestartOnFailure incompleta).
 #
-# New-ScheduledTaskTrigger -Daily nao aceita -RepetitionInterval/
-# -RepetitionDuration diretamente (limitacao conhecida do cmdlet, testada
-# e confirmada aqui) - contorno padrao: cria um trigger -Once soh pra
-# gerar o objeto Repetition corretamente preenchido, copia pro trigger
-# diario de verdade.
-#
-# Com MultipleInstances=IgnoreNew, se o supervisor ja estiver rodando
-# cada tick e um no-op (Task Scheduler ignora a tentativa) - mas se ele
-# tiver morrido por qualquer motivo, o proximo tick (no maximo 5min
-# depois) traz ele de volta sozinho, sem depender do mecanismo de
-# restart-on-failure (RestartCount/RestartInterval), que a evidencia
-# disponivel (nenhum evento de termino/erro no log do Task Scheduler pras
-# geracoes que morreram sozinhas, quando toda outra causa possivel foi
-# descartada - excecao .NET, crash, Windows Defender) aponta como a causa
-# mais provavel de mortes periodicas nao explicadas do supervisor. Isto
-# e uma HIPOTESE forte, nao um fato 100% confirmado por um log
-# fumegante - mas desligar RestartCount pra um processo residente e uma
-# mudanca correta e segura de qualquer forma (o loop interno do
-# supervisor + este heartbeat cobrem a mesma necessidade de forma mais
-# previsivel e observavel).
+# Corrigido definitivamente: constroi a definicao INTEIRA via COM direto
+# (Schedule.Service/ITaskDefinition, a mesma API que o Windows usa por
+# baixo dos cmdlets) e IMPRIME o XML final gerado antes de registrar -
+# nunca toca na propriedade RestartOnFailure (deixando-a intocada, o
+# elemento correspondente simplesmente nao aparece no XML, comprovado
+# lendo o .XmlText resultante). Registra via Register-ScheduledTask -Xml
+# (aceita a string XML diretamente, sem outra camada de traducao
+# ambigua) com -Force (substitui a definicao anterior se ja existir,
+# mesmo comportamento idempotente de sempre).
 #
 # So mexe na tarefa VivenzzaSyncFinanceiroLegado. Nunca toca em
 # VivenzzaSyncPedidosLegado.
@@ -73,46 +57,97 @@ if (-not (Test-Path $supervisor)) {
   throw "Nao encontrei $supervisor - rode este script a partir do checkout do vivenzza-crm-api."
 }
 
+$svc = New-Object -ComObject "Schedule.Service"
+$svc.Connect()
+$def = $svc.NewTask(0)
+
+$def.RegistrationInfo.Description = 'Sincronizacao continua NetVision -> CRM (financeiro), vivenzza-crm-api. Task Scheduler vigia o supervisor PowerShell (watchdog-sync-financeiro.ps1), que por sua vez vigia o worker Node e reinicia sozinho se ele morrer.'
+
+# Principal - S4U (2), sem senha gravada em lugar nenhum. RunLevel 0 =
+# Limited (LUA) - mesmo padrao ja comprovado da tarefa de pedidos.
+$def.Principal.UserId = $env:USERNAME
+$def.Principal.LogonType = 2
+$def.Principal.RunLevel = 0
+
+# Settings - RestartOnFailure NUNCA e tocado (nem pra desligar
+# explicitamente) - deixa o elemento inteiro fora do XML, unica forma
+# comprovada de nao gerar Count/Interval vazio.
+$def.Settings.MultipleInstances = 2   # TASK_INSTANCES_IGNORE_NEW
+$def.Settings.DisallowStartIfOnBatteries = $false
+$def.Settings.StopIfGoingOnBatteries = $false
+$def.Settings.AllowHardTerminate = $true
+$def.Settings.StartWhenAvailable = $true
+$def.Settings.ExecutionTimeLimit = ""   # "" = sem limite (sentinela documentada da API COM - confirma sem <ExecutionTimeLimit> no XML)
+$def.Settings.Enabled = $true
+$def.Settings.Hidden = $false
+
+# Triggers: boot + logon (inicio imediato) + diario com repeticao de
+# 5min por 1 dia (rede de seguranca continua, ver CAUSA RAIZ 5/6 acima).
+$triggers = $def.Triggers
+
+$bootTrigger = $triggers.Create(8)   # TASK_TRIGGER_BOOT
+$bootTrigger.Enabled = $true
+
+$logonTrigger = $triggers.Create(9)  # TASK_TRIGGER_LOGON
+$logonTrigger.UserId = $env:USERNAME
+$logonTrigger.Enabled = $true
+
+$dailyTrigger = $triggers.Create(2)  # TASK_TRIGGER_DAILY
+$meiaNoite = Get-Date -Hour 0 -Minute 0 -Second 0
+$dailyTrigger.StartBoundary = $meiaNoite.ToString("yyyy-MM-ddTHH:mm:ss")
+$dailyTrigger.DaysInterval = 1
+$dailyTrigger.Repetition.Interval = "PT5M"
+$dailyTrigger.Repetition.Duration = "P1D"
+$dailyTrigger.Enabled = $true
+
+# Action - supervisor PowerShell direto, sem .bat/cmd no meio (ver CAUSA
+# RAIZ 1). Sem -WindowStyle Hidden (nao ha janela pra esconder rodando
+# via Task Scheduler sem sessao interativa - suspeito descartado por
+# seguranca, sem custo).
 $powershellExe = (Get-Command powershell.exe).Source
 $argumentos = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$supervisor`""
-$action = New-ScheduledTaskAction -Execute $powershellExe -Argument $argumentos -WorkingDirectory $raiz
 
-$triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$triggerBoot = New-ScheduledTaskTrigger -AtStartup
-$triggerHeartbeat = New-ScheduledTaskTrigger -Daily -At "00:00"
-$repeticaoTemplate = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)
-$triggerHeartbeat.Repetition = $repeticaoTemplate.Repetition
+$actions = $def.Actions
+$action = $actions.Create(0)  # TASK_ACTION_EXEC
+$action.Path = $powershellExe
+$action.Arguments = $argumentos
+$action.WorkingDirectory = $raiz
 
-$settings = New-ScheduledTaskSettingsSet `
-  -MultipleInstances IgnoreNew `
-  -ExecutionTimeLimit ([TimeSpan]::Zero) `
-  -RestartCount 0 `
-  -DontStopIfGoingOnBatteries `
-  -AllowStartIfOnBatteries `
-  -StartWhenAvailable
+# Valida e MOSTRA o XML final antes de registrar - nunca regista as
+# cegas. Se o XML nao tiver Triggers/Actions/Principals preenchidos (por
+# algum erro acima), aborta sem tentar registrar nada.
+$xmlFinal = $def.XmlText
+Write-Output "=== XML final que sera registrado ==="
+Write-Output $xmlFinal
+Write-Output "======================================"
 
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
-
-$existe = Get-ScheduledTask -TaskName $nomeTarefa -ErrorAction SilentlyContinue
-if ($existe) {
-  # Para qualquer execucao em andamento antes de trocar a definicao -
-  # senao a instancia antiga (apontando pro .bat velho) fica orfa rodando
-  # em paralelo com a nova.
-  Stop-ScheduledTask -TaskName $nomeTarefa -ErrorAction SilentlyContinue
-  Set-ScheduledTask -TaskName $nomeTarefa -Action $action -Trigger @($triggerLogon, $triggerBoot, $triggerHeartbeat) -Settings $settings -Principal $principal | Out-Null
-  Write-Output "[instalar-tarefa] tarefa $nomeTarefa ja existia - definicao corrigida (agora aponta pro supervisor)"
-} else {
-  $definicao = New-ScheduledTask -Action $action -Trigger @($triggerLogon, $triggerBoot, $triggerHeartbeat) -Settings $settings -Principal $principal `
-    -Description 'Sincronizacao continua NetVision -> CRM (financeiro), vivenzza-crm-api. Task Scheduler vigia o supervisor PowerShell (watchdog-sync-financeiro.ps1), que por sua vez vigia o worker Node e reinicia sozinho se ele morrer.'
-  Register-ScheduledTask -TaskName $nomeTarefa -InputObject $definicao | Out-Null
-  Write-Output "[instalar-tarefa] tarefa $nomeTarefa criada"
+if ($xmlFinal -notmatch '<BootTrigger>' -or $xmlFinal -notmatch '<LogonTrigger>' -or $xmlFinal -notmatch '<CalendarTrigger>') {
+  throw "XML final nao contem os 3 triggers esperados - abortando sem registrar."
 }
+if ($xmlFinal -match '<RestartOnFailure>') {
+  throw "XML final contem RestartOnFailure, que nao deveria existir - abortando sem registrar."
+}
+if ($xmlFinal -match '<Count\s*/>|<Count>\s*</Count>|<Interval>\s*</Interval>|<Duration>\s*</Duration>') {
+  throw "XML final contem um elemento obrigatorio vazio - abortando sem registrar."
+}
+if ($xmlFinal -notmatch [regex]::Escape($supervisor)) {
+  throw "XML final nao referencia o caminho do supervisor esperado - abortando sem registrar."
+}
+Write-Output "[instalar-tarefa] validacoes basicas do XML passaram"
+
+# Para qualquer execucao em andamento antes de trocar a definicao - senao
+# uma instancia anterior (apontando pra config velha) fica orfa rodando
+# em paralelo com a nova.
+Stop-ScheduledTask -TaskName $nomeTarefa -ErrorAction SilentlyContinue
+
+Register-ScheduledTask -TaskName $nomeTarefa -Xml $xmlFinal -Force | Out-Null
+Write-Output "[instalar-tarefa] tarefa $nomeTarefa registrada via XML validado"
 
 Enable-ScheduledTask -TaskName $nomeTarefa | Out-Null
 
-# Limpa qualquer worker/supervisor orfao de uma execucao anterior antes de
-# iniciar do zero - nunca deixa 2 instancias concorrentes durante a troca
-# de arquitetura (.bat antigo -> supervisor novo).
+# Limpa qualquer worker/supervisor orfao de uma execucao anterior antes
+# de iniciar do zero - nunca deixa 2 instancias concorrentes durante a
+# troca de arquitetura/configuracao.
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -match 'sync-financeiro-legado\.mjs' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
