@@ -23,15 +23,16 @@ export const EMITENTE = {
   // em produção (Railway) o certificado vem de CERT_BASE64, não deste caminho.
   // Senha nunca vai pro código — vem de NFE_CERT_SENHA (Railway → Variables, secret).
   //
-  // AÇÃO PENDENTE (higiene, não bloqueante): o nome do arquivo original tem a
-  // senha do certificado de homologação escrita literalmente (".../LL_SANTOS_
-  // COSMETICOS_LTDA13602526000193 senha 123456.pfx"), o que expõe a senha em
-  // texto aberto neste arquivo versionado no git. Mantive o valor original aqui
-  // pra não quebrar o fallback local (não posso confirmar o nome real do
-  // arquivo na rede sem acesso a ela). Ação recomendada: renomear o arquivo na
-  // pasta de rede removendo a senha do nome, e então setar NFE_CERT_PATH com o
-  // novo caminho (a env var abaixo já tem prioridade sobre este fallback).
-  CERT_PATH: process.env.NFE_CERT_PATH || String.raw`\\DESKTOP-Q6O54R1\NetMdb\Certificado\LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx`,
+  // CORRIGIDO (higiene) — o default anterior aqui era o nome real do arquivo de
+  // homologação, que tinha a senha do certificado escrita literalmente
+  // (".../LL_SANTOS_COSMETICOS_LTDA13602526000193 senha 123456.pfx"), expondo a
+  // senha em texto aberto neste arquivo versionado no git. Sem fallback com
+  // segredo embutido agora — quem quiser usar o caminho de rede em dev PRECISA
+  // setar NFE_CERT_PATH explicitamente (getCertBuffer() abaixo lança erro claro
+  // se nem CERT_BASE64 nem NFE_CERT_PATH estiverem setados, em vez de herdar um
+  // caminho com senha). Renomear o arquivo real na pasta de rede (removendo a
+  // senha do nome) continua recomendado, mas não é mais uma dependência do código.
+  CERT_PATH: process.env.NFE_CERT_PATH || null,
   CERT_SENHA: process.env.NFE_CERT_SENHA,
 }
 
@@ -39,10 +40,14 @@ export const EMITENTE = {
 // Railway acessar o certificado já que CERT_PATH é um caminho de rede local
 // inatingível da nuvem. Só cai para o arquivo local se CERT_BASE64 não estiver
 // setada, o que mantém isso funcionando em desenvolvimento local na mesma LAN do
-// DESKTOP-Q6O54R1 sem precisar de nenhuma env var.
+// DESKTOP-Q6O54R1 — desde que NFE_CERT_PATH esteja setada explicitamente (sem
+// fallback com segredo embutido no código, ver comentário em CERT_PATH acima).
 export function getCertBuffer() {
   if (process.env.CERT_BASE64) {
     return Buffer.from(process.env.CERT_BASE64, 'base64')
+  }
+  if (!EMITENTE.CERT_PATH) {
+    throw new Error('Certificado não configurado: defina CERT_BASE64 (produção/Railway) ou NFE_CERT_PATH (dev local, caminho do .pfx na rede) — nenhum caminho padrão é assumido.')
   }
   return readFileSync(EMITENTE.CERT_PATH)
 }
