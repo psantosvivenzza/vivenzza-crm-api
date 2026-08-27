@@ -113,14 +113,41 @@ async function lerClientesErp() {
   return porCodigo
 }
 
-const TIPOS_TELEFONE = ['celular', 'fone', 'telefone', 'contato']
+// CORREÇÃO 2026-08-27 — achado da auditoria de prioridade de telefones: a
+// regra antiga pegava o 1º contato do array cujo tipo estivesse neste
+// conjunto, sem prioridade real entre eles — a ORDEM do array vindo do
+// NetVision decidia, não o tipo. Auditoria real (248 clientes elegíveis)
+// achou 9 casos usando fixo com celular disponível no mesmo cadastro (4
+// deles com número efetivamente diferente, não só categoria). Isso é
+// higiene de dado, não a causa principal de PERMANENT_RECIPIENT (38/40
+// clientes com essa falha não tinham NENHUMA alternativa cadastrada) — mas
+// não há razão pra escolher deliberadamente um fixo quando existe celular
+// no mesmo cadastro, pra um canal que é WhatsApp.
+//
+// PRIORIDADE_TIPO_TELEFONE: celular > fone/telefone > contato genérico.
+// Dentro do MESMO grupo, preserva a primeira ocorrência do array original
+// (comportamento antigo, intacto ali). Comparação de tipo é case-insensitive
+// e com trim. Não inventa DDD, não infere WhatsApp, não concatena contatos —
+// só decide QUAL contato existente vira telefone_cobranca.
+const PRIORIDADE_TIPO_TELEFONE = [
+  ['celular'],
+  ['fone', 'telefone'],
+  ['contato'],
+]
 
-function telefoneDoCliente(cliente) {
+function contatoTemValorUtilizavel(contato) {
+  return typeof contato?.valor === 'string' && contato.valor.trim().length > 0
+}
+
+export function telefoneDoCliente(cliente) {
   if (!Array.isArray(cliente?.contatos)) return null
-  const achado = cliente.contatos.find(
-    (c) => TIPOS_TELEFONE.includes(String(c?.tipo || '').toLowerCase()) && c?.valor
-  )
-  return achado?.valor ?? null
+  for (const grupo of PRIORIDADE_TIPO_TELEFONE) {
+    const achado = cliente.contatos.find(
+      (c) => grupo.includes(String(c?.tipo || '').trim().toLowerCase()) && contatoTemValorUtilizavel(c)
+    )
+    if (achado) return achado.valor
+  }
+  return null
 }
 
 /**
