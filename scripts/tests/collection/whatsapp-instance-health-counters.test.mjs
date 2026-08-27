@@ -231,5 +231,72 @@ test('WhatsApp: contadores canônicos + cooldown respeitado pelo healthcheck', a
     assert.equal(fakeEvolution.mensagensEnviadas.length, 1)
   })
 
+  // 2026-08-27 — preparação da 3ª instância financeira (reserva-02): prova
+  // concreta de que o pool já é N-instância por desenho (listarInstancias/
+  // selecionarProximaInstancia nunca hardcodam "2") — nenhuma mudança de
+  // código foi necessária, só cadastro. Testado localmente com 3 linhas
+  // reais em whatsapp_instances, nunca contra WhatsApp de verdade.
+  await t.test('11. pool com 3 instâncias — seleciona por prioridade, cai pra 3ª quando as 2 primeiras estão indisponíveis', async () => {
+    await resetar()
+    const principal = await criarInstancia(supabase, 'wa01-b11', { priority: 1, role: 'principal' })
+    const reserva01 = await criarInstancia(supabase, 'wa02-b11', { priority: 2, role: 'reserva' })
+    const reserva02 = await criarInstancia(supabase, 'wa03-b11', { priority: 3, role: 'reserva' })
+
+    // todas saudaveis -> sempre escolhe a de maior prioridade (menor numero)
+    let escolhida = await selecionarProximaInstancia({})
+    assert.equal(escolhida.id, principal.id, 'com as 3 saudaveis, principal (priority=1) deveria ser escolhida')
+
+    // principal em cooldown -> cai pra reserva-01
+    await supabase.from('whatsapp_instances').update({
+      health_status: 'cooldown', cooldown_until: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    }).eq('id', principal.id)
+    escolhida = await selecionarProximaInstancia({})
+    assert.equal(escolhida.id, reserva01.id, 'com a principal em cooldown, reserva-01 (priority=2) deveria ser a proxima escolhida')
+
+    // principal E reserva-01 em cooldown -> cai pra reserva-02 (a 3a instancia)
+    await supabase.from('whatsapp_instances').update({
+      health_status: 'cooldown', cooldown_until: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    }).eq('id', reserva01.id)
+    escolhida = await selecionarProximaInstancia({})
+    assert.equal(escolhida.id, reserva02.id, 'com as 2 primeiras em cooldown, a 3a instancia deveria ser a candidata restante')
+
+    // as 3 em cooldown -> nenhuma candidata (nunca inventa uma 4a nem ignora o circuit breaker)
+    await supabase.from('whatsapp_instances').update({
+      health_status: 'cooldown', cooldown_until: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    }).eq('id', reserva02.id)
+    escolhida = await selecionarProximaInstancia({})
+    assert.equal(escolhida, null, 'com as 3 em cooldown, nao deveria sobrar nenhuma candidata')
+  })
+
+  await t.test('12. 3ª instância nunca recebe 2ª tentativa da MESMA cobrança (idempotência global preservada com N=3)', async () => {
+    await resetar()
+    await criarInstancia(supabase, 'wa01-b12', { priority: 1, role: 'principal' })
+    await criarInstancia(supabase, 'wa02-b12', { priority: 2, role: 'reserva' })
+    await criarInstancia(supabase, 'wa03-b12', { priority: 3, role: 'reserva' })
+    fakeEvolution.controlarInstancia('wa01-b12', { comportamento: 'ok' })
+
+    const conta = await criarContaDeTeste(supabase)
+    const args = { contasFinanceirasId: conta.id, etapa: 1, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca, valor: conta.valor, mensagem: 'x' }
+    const r1 = await enviarCobrancaComRoteamento({ ...args, origem: 'cron' })
+    const r2 = await enviarCobrancaComRoteamento({ ...args, origem: 'manual' })
+    assert.equal(r1.status, 'sent')
+    assert.equal(r2.motivo, 'idempotencia_existente', 'com 3 instancias cadastradas, a mesma cobranca logica continua sendo reconhecida uma unica vez')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1, 'no maximo 1 envio real, independente de quantas instancias existem no pool')
+  })
+
+  await t.test('13. instância comercial nunca é selecionada, mesmo com 3 instâncias financeiras reais cadastradas', async () => {
+    await resetar()
+    await criarInstancia(supabase, 'wa01-b13', { priority: 1, role: 'principal' })
+    await criarInstancia(supabase, 'wa02-b13', { priority: 2, role: 'reserva' })
+    await criarInstancia(supabase, 'wa03-b13', { priority: 3, role: 'reserva' })
+    // Mesmo que alguem cadastre por engano uma instancia comercial com prioridade mais alta
+    // (numero menor) que todas as financeiras, ela nunca deveria ser escolhida.
+    await criarInstancia(supabase, 'vivenzza', { priority: 0, role: 'reserva' })
+
+    const escolhida = await selecionarProximaInstancia({})
+    assert.notEqual(escolhida?.instance_name, 'vivenzza', 'instancia comercial (denylist INSTANCIAS_COMERCIAIS_PROIBIDAS) nunca deveria ser selecionavel, mesmo com prioridade mais alta')
+    assert.equal(escolhida?.instance_name, 'wa01-b13', 'a melhor candidata financeira real deveria ser escolhida, pulando a comercial')
+  })
+
   await pararAmbienteDeTeste()
 })
