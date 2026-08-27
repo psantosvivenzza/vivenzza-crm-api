@@ -1,0 +1,4 @@
+# Scripts que rodam dentro do Linux/WSL precisam de LF sempre, independente
+# do core.autocrlf de quem commita/clona no Windows - CRLF num shebang
+# quebra a execucao ("bad interpreter").
+scripts/voice-server/*.sh text eol=lf

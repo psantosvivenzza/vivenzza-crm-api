@@ -1,0 +1,29 @@
+; Voice AI — camada PLUGÁVEL de Bluetooth/celular (chan_mobile). TEMPLATE,
+; não config real — nenhum aparelho é pareado por este arquivo sozinho.
+;
+; NÃO copiar isto direto pra mobile.conf sem primeiro seguir o procedimento
+; em scripts/voice-server/preparar-bluetooth-celular.md (dongle → parear →
+; descobrir endereço real do aparelho → só então preencher os placeholders
+; abaixo). Nenhum MAC/PIN de aparelho real deve ser commitado neste arquivo
+; nem em nenhum outro rastreado pelo Git.
+;
+; Nomes de placeholder correspondem às env vars de voice-server.env.example
+; (VOICE_MOBILE_ADAPTER/VOICE_MOBILE_DEVICE/VOICE_MOBILE_PIN) — mas, assim
+; como no trunk Nvoip (ver pjsip-nvoip.conf.example), o Asterisk não lê .env
+; do Node: um operador humano preenche os valores reais manualmente no
+; mobile.conf de verdade (nunca commitado).
+
+[general]
+interval = 30 ; segundos entre tentativas de reconexão do adapter
+
+[${VOICE_MOBILE_DEVICE}]
+type = mobile
+address = ${VOICE_MOBILE_DEVICE}   ; endereço MAC Bluetooth do celular pareado
+adapter = ${VOICE_MOBILE_ADAPTER}  ; endereço do dongle/adapter Bluetooth local (hci0, hci1...)
+context = voice-ai-mobile-inbound  ; dialplan SEPARADO do interno (voice-ai-internal) e do trunk Nvoip
+group = 1
+rxgain = 0
+txgain = 0
+; PIN de pareamento NUNCA fica neste arquivo em texto plano em produção real —
+; usar o par via bluetoothctl (ver procedimento) e deixar já confiado
+; (trusted) no SO, não reautenticar via config a cada boot.
