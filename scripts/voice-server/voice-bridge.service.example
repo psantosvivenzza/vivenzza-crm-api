@@ -1,0 +1,31 @@
+# Unit systemd para o serviço Node/ARI (scripts/voice/run-voice-service.mjs)
+# que faz a ponte StasisStart -> STT -> IA -> TTS. O Asterisk em si já vem
+# com unit systemd própria do pacote (asterisk.service, "systemctl enable
+# asterisk" já cobre isso — ver instalar-asterisk.sh). Este arquivo cobre a
+# OUTRA metade: o processo Node de longa duração que fica escutando o app
+# Stasis, que também precisa sobreviver a reboot/crash sozinho.
+#
+# TEMPLATE — copiar para /etc/systemd/system/vivenzza-voice-bridge.service e
+# preencher os placeholders (User, WorkingDirectory) com os valores reais da
+# máquina de destino. Nunca commitar a versão preenchida.
+[Unit]
+Description=Vivenzza Voice AI - ponte ARI/STT/TTS
+After=asterisk.service network-online.target
+Wants=asterisk.service network-online.target
+
+[Service]
+Type=simple
+User=SUBSTITUA_PELO_USUARIO_DO_SERVICO
+WorkingDirectory=SUBSTITUA_PELO_CAMINHO_DO_REPO
+EnvironmentFile=SUBSTITUA_PELO_CAMINHO_DO_REPO/voice-server.env
+ExecStart=/usr/bin/npm run voice:service
+Restart=on-failure
+RestartSec=5
+# Nunca reinicia infinitamente em loop rápido se algo estiver
+# fundamentalmente quebrado (ex: credencial ARI errada) — evita mascarar um
+# erro de config como "está rodando" no systemctl status.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

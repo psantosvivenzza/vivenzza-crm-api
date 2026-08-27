@@ -9,3 +9,9 @@ supabase/.temp/
 
 # Amostras de áudio de benchmark de voz (só pra ouvir localmente, nunca commitar binário)
 scripts/voice/benchmark-output/
+
+# Servidor de voz portátil — arquivo real de config (segredos: senha ARI/SIP,
+# credenciais Bluetooth), nunca commitado. Só voice-server.env.example é
+# versionado. Backups do Asterisk (scripts/voice-server/backup-asterisk.sh)
+# são gravados FORA do repo de propósito — nunca aparecem aqui por acidente.
+voice-server.env
