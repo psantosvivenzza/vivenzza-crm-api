@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { verificarStatusSyncFiscal } from '../lib/vendaFiscalSyncStatus.js'
+import { verificarStatusSyncGerencial } from '../lib/vendaGerencialSyncStatus.js'
 
 const router = Router()
 
@@ -60,7 +61,7 @@ router.get('/', async (req, res) => {
   // travava em 1000 leads mesmo com a tabela tendo mais.
   const ETAPAS = ['novo', 'contato', 'proposta', 'negociacao', 'fechado', 'perdido']
 
-  const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10] = await Promise.all([
+  const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11] = await Promise.all([
     safe(
       (async () => {
         const porEtapa = {}
@@ -267,6 +268,46 @@ router.get('/', async (req, res) => {
       // R$0,00 como se fosse dado fiscal confirmado.
       { disponivel: false, motivo: 'erro_inesperado', quantidade: 0, valor: 0, por_representante: {} }
     ),
+    // vendas_gerenciais_mes — indicador GERENCIAL/COMERCIAL, fonte
+    // EN_NotasRepres (vendas_gerenciais_netvision), a mesma tabela que o
+    // relatório oficial NetVision "Consulta Vendas por Representante" usa —
+    // comprovado por reconciliação exata (ver
+    // VENDAS_DO_MES_RECONCILIACAO.md). Domínio DIFERENTE de
+    // vendas_fiscais_mes acima: aqui Série 99 NUNCA é excluída (é
+    // exatamente o que o NetVision já faz), porque este indicador responde
+    // "quanto vendemos de verdade", não "quantos documentos fiscais válidos
+    // existem". Mesmo padrão fail-closed de disponibilidade do bloco
+    // fiscal — nunca confunde "nunca sincronizou"/"desatualizado" com "zero
+    // vendas real".
+    safe(
+      verificarStatusSyncGerencial().then((statusSync) => {
+        if (!statusSync.disponivel) {
+          return { disponivel: false, motivo: statusSync.reason, ultima_sincronizacao: statusSync.last_sync_at, quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0, por_representante: {} }
+        }
+        return supabase.from('vendas_gerenciais_netvision')
+          .select('valor_documento, pagamento_a_vista, representante_codigo, representante_nome')
+          .eq('codigo_filial', '001')
+          .gte('data_emissao', inicioMes.slice(0, 10))
+          .lte('data_emissao', fimMes.slice(0, 10))
+          .then(({ data, error }) => {
+            if (error) throw error
+            const porRepresentante = {}
+            let valorTotal = 0, aVista = 0, aPrazo = 0
+            for (const n of data ?? []) {
+              const chave = n.representante_nome || n.representante_codigo || 'Sem representante'
+              const valor = Number(n.valor_documento) || 0
+              if (!porRepresentante[chave]) porRepresentante[chave] = { codigo: n.representante_codigo, quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0 }
+              porRepresentante[chave].quantidade++
+              porRepresentante[chave].valor += valor
+              valorTotal += valor
+              if (n.pagamento_a_vista) { porRepresentante[chave].a_vista += valor; aVista += valor }
+              else { porRepresentante[chave].a_prazo += valor; aPrazo += valor }
+            }
+            return { disponivel: true, ultima_sincronizacao: statusSync.last_sync_at, quantidade: (data ?? []).length, valor: valorTotal, a_vista: aVista, a_prazo: aPrazo, por_representante: porRepresentante }
+          })
+      }),
+      { disponivel: false, motivo: 'erro_inesperado', quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0, por_representante: {} }
+    ),
   ])
 
   const porEtapa = r1.value
@@ -283,6 +324,7 @@ router.get('/', async (req, res) => {
     leads_manuais:  r7.value,
     ligacoes:       { hoje: r8.value, total: r9.value },
     vendas_fiscais_mes: r10.value,
+    vendas_gerenciais_mes: r11.value,
     gerado_em:      new Date().toISOString(),
   })
 })
