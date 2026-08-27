@@ -22,6 +22,14 @@ executarSincronizacaoVendasGerenciais({ dryRun })
     console.log(`  Erros: ${r.total_com_erro || 0}`)
     if (r.amostra_criar?.length) { console.log('\n  Amostra a criar:'); for (const a of r.amostra_criar) console.log('   ', JSON.stringify({ legacy_id: a.legacy_id, representante_nome: a.representante_nome, serie: a.serie, valor: a.valor_documento, data: a.data_emissao })) }
     if (r.erros?.length) { console.log('\n  Erros:'); for (const e of r.erros) console.log('   ', JSON.stringify(e)) }
-    process.exit((r.total_com_erro || 0) > 0 ? 1 : 0)
+    // process.exitCode (não process.exit()) — deixa o event loop esvaziar
+    // sozinho antes de sair. Achado real: process.exit() aqui, logo após o
+    // pg Pool fechar (finally do job), disparava "Assertion failed:
+    // !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c" no Windows —
+    // reproduzido 2/2 vezes, sempre DEPOIS do trabalho real já ter
+    // terminado certo (dados corretos impressos), mas com exit code não-zero
+    // mesmo assim, o que faria o Task Scheduler marcar a execução como
+    // falha por engano.
+    process.exitCode = (r.total_com_erro || 0) > 0 ? 1 : 0
   })
-  .catch((err) => { console.error(`[sync-vendas-gerenciais-legado] ERRO: ${err.message}`); process.exit(1) })
+  .catch((err) => { console.error(`[sync-vendas-gerenciais-legado] ERRO: ${err.message}`); process.exitCode = 1 })
