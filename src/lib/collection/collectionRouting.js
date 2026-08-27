@@ -67,7 +67,11 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
     if (dnc.reason === 'NUMERO_INVALIDO_HOJE') {
       return {
         status: 'blocked', motor: null, reason: 'numero_invalido_hoje',
-        motivo: 'Telefone bloqueado hoje (NUMERO_INVALIDO_HOJE) — falha definitiva anterior (número não registrado no WhatsApp) no mesmo dia',
+        // 2026-08-27 — texto atualizado pra refletir a quarentena de 30 dias
+        // (ver doNotContactGuard.js); o `reason` código ('numero_invalido_hoje')
+        // e o `dnc.reason` ('NUMERO_INVALIDO_HOJE') continuam com o mesmo
+        // valor exato — contrato preservado, só a mensagem humana mudou.
+        motivo: 'Telefone em quarentena (NUMERO_INVALIDO_HOJE) — falha definitiva anterior (número não registrado no WhatsApp), bloqueado por até 30 dias',
       }
     }
     await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId, clienteTelefone, reason: dnc.reason })
