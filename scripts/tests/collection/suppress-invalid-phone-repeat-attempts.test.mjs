@@ -8,8 +8,17 @@
 // whatsappInstances.js só contam sucesso — ver cenário 16).
 //
 // Fix: reusa collection_do_not_contact (canal='whatsapp', expira_em=fim do
-// dia BRT) — nenhuma tabela/campo novo. Contra CÓDIGO REAL, Postgres local e
-// Fake Evolution — nenhum WhatsApp de verdade em nenhum cenário.
+// dia BRT originalmente) — nenhuma tabela/campo novo. Contra CÓDIGO REAL,
+// Postgres local e Fake Evolution — nenhum WhatsApp de verdade em nenhum
+// cenário.
+//
+// AMPLIAÇÃO 2026-08-27 — auditoria de qualidade de telefones achou 183
+// permanent_recipient em 30 dias mas só 39 telefones únicos, 36 reincidentes
+// (um chegou a 28 tentativas), 100% dependendo do provider pra falhar de
+// novo. A janela de "até meia-noite BRT" virou quarentena de 30 dias
+// (doNotContactGuard.js: expiracaoQuarentenaDeHoje/proximaExpiracaoQuarentena)
+// — testes B/F atualizados, bloco 'Quarentena de 30 dias' no fim do arquivo
+// cobre os cenários novos. Nunca vira bloqueio permanente automático.
 import { test, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'http'
@@ -17,7 +26,7 @@ import { iniciarAmbienteDeTeste, pararAmbienteDeTeste, criarContaDeTeste, limpar
 
 let supabase, fakeEvolution
 let enviarCobrancaComRoteamento, enviarComFailover, executarReguaCobranca, invalidarCacheFlags
-let estaEmDoNotContact, registrarBloqueioNumeroInvalidoHoje, MOTIVO_NUMERO_INVALIDO_HOJE
+let estaEmDoNotContact, registrarBloqueioNumeroInvalidoHoje, MOTIVO_NUMERO_INVALIDO_HOJE, proximaExpiracaoQuarentena
 let tituloEstaQuitado
 let decidirProximaAcao
 let avaliarGuardsTituloParaLigacao
@@ -30,7 +39,7 @@ before(async () => {
   ;({ enviarComFailover } = await import('../../../src/lib/collection/dispatchEngine.js'))
   ;({ executarReguaCobranca } = await import('../../../src/jobs/cobranca-whatsapp.js'))
   ;({ invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js'))
-  ;({ estaEmDoNotContact, registrarBloqueioNumeroInvalidoHoje, MOTIVO_NUMERO_INVALIDO_HOJE } = await import('../../../src/lib/collection/doNotContactGuard.js'))
+  ;({ estaEmDoNotContact, registrarBloqueioNumeroInvalidoHoje, MOTIVO_NUMERO_INVALIDO_HOJE, proximaExpiracaoQuarentena } = await import('../../../src/lib/collection/doNotContactGuard.js'))
   ;({ tituloEstaQuitado } = await import('../../../src/lib/collection/paymentGuard.js'))
   ;({ decidirProximaAcao } = await import('../../../src/lib/collection/nextBestAction.js'))
   ;({ avaliarGuardsTituloParaLigacao } = await import('../../../src/lib/voice/collectionGuardsForVoice.js'))
@@ -540,7 +549,7 @@ test('A. opt-out permanente existente + falha número inválido no mesmo telefon
   assert.equal(linhas[0].expira_em, null, 'opt-out permanece permanente — nunca ganhou expira_em')
 })
 
-test('B. bloqueio de número inválido (sem opt-out prévio): registrado com expira_em = fim do dia BRT', async () => {
+test('B. bloqueio de número inválido (sem opt-out prévio): registrado com expira_em ~30 dias à frente (quarentena, 2026-08-27)', async () => {
   const telefone = telefoneDeTeste()
   await registrarBloqueioNumeroInvalidoHoje(telefone)
 
@@ -549,13 +558,8 @@ test('B. bloqueio de número inválido (sem opt-out prévio): registrado com exp
   assert.equal(linha.motivo, MOTIVO_NUMERO_INVALIDO_HOJE)
   assert.notEqual(linha.expira_em, null)
 
-  const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
-  const amanha = new Date(linha.expira_em).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
-  const horaBrtDoExpira = new Date(linha.expira_em).toLocaleString('en-CA', { timeZone: 'America/Sao_Paulo', hour12: false }).split(', ')[1]
-  assert.ok(new Date(linha.expira_em) > new Date(), 'expira no futuro (ainda hoje)')
-  // meia-noite BRT do dia seguinte à data de hoje BRT, com precisão de minuto
-  assert.equal(horaBrtDoExpira.slice(0, 5), '00:00')
-  assert.ok(amanha > hojeBrt, 'expira_em cai no dia seguinte ao de hoje (BRT)')
+  const diasAteExpirar = (new Date(linha.expira_em) - Date.now()) / (24 * 3600_000)
+  assert.ok(diasAteExpirar > 29 && diasAteExpirar <= 30, `expira_em deveria ser ~30 dias à frente, foi ${diasAteExpirar.toFixed(2)} dias`)
 })
 
 test('C. opt-out permanente nunca recebe expira_em, mesmo registrado DEPOIS de um bloqueio temporário no mesmo telefone', async () => {
@@ -608,11 +612,11 @@ test('E. falha técnica/timeout/429/401/403 não cria linha em collection_do_not
   }
 })
 
-test('F. renovação: bloqueio de número inválido EXPIRADO (dia anterior) é estendido pro fim de hoje, sem criar 2ª linha (mesma UNIQUE INDEX)', async () => {
+test('F. renovação: quarentena EXPIRADA (30 dias atrás) é renovada por mais ~30 dias, sem criar 2ª linha (mesma UNIQUE INDEX)', async () => {
   const telefone = telefoneDeTeste()
   const { data: antigo } = await supabase.from('collection_do_not_contact').insert({
     cliente_telefone: telefone, canal: 'whatsapp', motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
-    expira_em: new Date(Date.now() - 25 * 3600_000).toISOString(), // expirou ontem
+    expira_em: new Date(Date.now() - 60_000).toISOString(), // quarentena anterior já expirou
   }).select().single()
 
   await registrarBloqueioNumeroInvalidoHoje(telefone)
@@ -620,9 +624,177 @@ test('F. renovação: bloqueio de número inválido EXPIRADO (dia anterior) é e
   const { data: linhas } = await supabase.from('collection_do_not_contact').select('*').eq('cliente_telefone', telefone)
   assert.equal(linhas.length, 1, 'renovou a mesma linha, não criou uma segunda')
   assert.equal(linhas[0].id, antigo.id)
-  assert.ok(new Date(linhas[0].expira_em) > new Date(), 'expira_em renovado pro futuro')
+  const diasAteExpirar = (new Date(linhas[0].expira_em) - Date.now()) / (24 * 3600_000)
+  assert.ok(diasAteExpirar > 29 && diasAteExpirar <= 30, `renovação deveria ser ~30 dias à frente, foi ${diasAteExpirar.toFixed(2)} dias`)
 
   const dnc = await estaEmDoNotContact(telefone)
   assert.equal(dnc.blocked, true)
   assert.equal(dnc.reason, 'NUMERO_INVALIDO_HOJE')
+})
+
+// 2026-08-27 — QUARENTENA DE 30 DIAS: cenários pedidos explicitamente pela
+// tarefa "REDUZIR REINCIDÊNCIA DE PERMANENT_RECIPIENT", além do que os
+// testes A-F (acima) já cobrem sobre opt-out permanente nunca ser tocado.
+test('Quarentena de 30 dias para PERMANENT_RECIPIENT (2026-08-27)', async (t) => {
+  await t.test('1. primeira confirmação: provider chamado 1 vez, quarentena de ~30 dias criada', async () => {
+    await criarInstancia('wa01-q1', { priority: 1 })
+    const telefone = telefoneInvalidoDeTeste()
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+
+    const resultado = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q1', origem: 'cron',
+    })
+    assert.equal(resultado.motivo, 'permanent_recipient')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0, 'checagem de existência é a chamada real ao provider — nunca chega a /message/sendText')
+
+    const { data: linha } = await supabase.from('collection_do_not_contact').select('*')
+      .eq('cliente_telefone', telefone).eq('canal', 'whatsapp').single()
+    const diasAteExpirar = (new Date(linha.expira_em) - Date.now()) / (24 * 3600_000)
+    assert.ok(diasAteExpirar > 29 && diasAteExpirar <= 30, `quarentena deveria ser ~30 dias, foi ${diasAteExpirar.toFixed(2)}`)
+  })
+
+  await t.test('2/3. dentro da quarentena (simulando "amanhã" e "dia 29"): bloqueada pré-provider, provider attempts=0', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia('wa01-q23', { priority: 1 })
+    const telefone = telefoneDeTeste()
+
+    // Simula quarentena já criada ontem (expira daqui a 29 dias) — mesmo
+    // efeito de "chegou uma nova tentativa no dia seguinte" e "no dia 29",
+    // sem depender de esperar tempo real passar.
+    await supabase.from('collection_do_not_contact').insert({
+      cliente_telefone: telefone, canal: 'whatsapp', motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
+      expira_em: new Date(Date.now() + 29 * 24 * 3600_000).toISOString(),
+    })
+
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+    const resultado = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q23', origem: 'cron',
+    })
+    assert.equal(resultado.status, 'blocked')
+    assert.equal(resultado.reason, 'numero_invalido_hoje')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0, 'nenhuma chamada real — nem checagem de existência, nem envio')
+
+    const { data: dispatches } = await supabase.from('collection_dispatches').select('id').eq('contas_financeiras_id', conta.id)
+    assert.equal(dispatches?.length ?? 0, 0, 'bloqueado ANTES de criar qualquer dispatch/tentativa')
+  })
+
+  await t.test('4. após expiração (30+ dias): provider permitido de novo, resultado real (não mock de bloqueio)', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia('wa01-q4', { priority: 1 })
+    const telefone = telefoneDeTeste()
+
+    await supabase.from('collection_do_not_contact').insert({
+      cliente_telefone: telefone, canal: 'whatsapp', motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
+      expira_em: new Date(Date.now() - 60_000).toISOString(), // quarentena de 30 dias já expirou
+    })
+
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+    const resultado = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q4', origem: 'cron',
+    })
+    assert.equal(resultado.status, 'sent', 'quarentena expirada — número bom, provider chamado e envio real acontece')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 1)
+  })
+
+  await t.test('6. telefone corrigido no ERP: novo número não herda a quarentena do antigo', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia('wa01-q6', { priority: 1 })
+    const telefoneAntigo = telefoneInvalidoDeTeste()
+    const telefoneNovo = telefoneDeTeste()
+
+    const contaAntiga = await criarContaDeTeste(supabase, { telefone_cobranca: telefoneAntigo })
+    await enviarCobrancaComRoteamento({
+      contasFinanceirasId: contaAntiga.id, etapa: 3, clienteNome: contaAntiga.pessoa_nome,
+      clienteTelefone: telefoneAntigo, valor: 500, mensagem: 'q6-antigo', origem: 'cron',
+    })
+    const dncAntigo = await estaEmDoNotContact(telefoneAntigo)
+    assert.equal(dncAntigo.blocked, true, 'telefone antigo em quarentena')
+
+    // ERP corrigiu o cadastro — mesmo cliente, título novo, telefone NOVO.
+    const contaCorrigida = await criarContaDeTeste(supabase, { telefone_cobranca: telefoneNovo, codigo_cliente: `CORRIGIDO-${Date.now()}` })
+    const dncNovo = await estaEmDoNotContact(telefoneNovo)
+    assert.equal(dncNovo.blocked, false, 'telefone novo/corrigido nunca herda a quarentena do telefone antigo')
+
+    const resultado = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: contaCorrigida.id, etapa: 3, clienteNome: contaCorrigida.pessoa_nome,
+      clienteTelefone: telefoneNovo, valor: 500, mensagem: 'q6-novo', origem: 'cron',
+    })
+    assert.equal(resultado.status, 'sent', 'telefone corrigido segue normalmente pelas proteções da régua')
+  })
+
+  await t.test('8. proximaExpiracaoQuarentena nunca encurta uma quarentena existente mais longa (função pura)', () => {
+    const daqui60dias = new Date(Date.now() + 60 * 24 * 3600_000).toISOString()
+    const resultado = proximaExpiracaoQuarentena(daqui60dias)
+    assert.equal(resultado, daqui60dias, 'quarentena já mais longa que 30 dias não pode ser encurtada')
+
+    const jaExpirou = new Date(Date.now() - 60_000).toISOString()
+    const resultado2 = proximaExpiracaoQuarentena(jaExpirou)
+    const dias2 = (new Date(resultado2) - Date.now()) / (24 * 3600_000)
+    assert.ok(dias2 > 29 && dias2 <= 30, 'quarentena expirada é renovada pra ~30 dias')
+
+    const resultado3 = proximaExpiracaoQuarentena(null)
+    const dias3 = (new Date(resultado3) - Date.now()) / (24 * 3600_000)
+    assert.ok(dias3 > 29 && dias3 <= 30, 'sem valor anterior, usa ~30 dias')
+  })
+
+  await t.test('9/10/11. bloqueio pré-provider preserva saúde da instância (PR #55), nunca tenta 2ª instância, e não consome o teto global', async () => {
+    await limparInstanciasDeTeste(supabase)
+    const principal = await criarInstancia('wa01-q911', { priority: 1, role: 'principal' })
+    await criarInstancia('wa02-q911-reserva', { priority: 2, role: 'reserva' })
+    await supabase.from('automacoes_config').update({ whatsapp_failover: true }).eq('id', 1)
+    invalidarCacheFlags()
+    const telefone = telefoneDeTeste()
+
+    await supabase.from('collection_do_not_contact').insert({
+      cliente_telefone: telefone, canal: 'whatsapp', motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
+      expira_em: new Date(Date.now() + 15 * 24 * 3600_000).toISOString(),
+    })
+
+    const antesGlobal = await verificarLimiteGlobalEnvio()
+    const { data: instanciaAntes } = await supabase.from('whatsapp_instances').select('consecutive_failures, health_status').eq('id', principal.id).single()
+
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+    const resultado = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q911', origem: 'cron',
+    })
+    assert.equal(resultado.status, 'blocked')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0, 'nenhuma instância (principal ou reserva) foi chamada de verdade — whatsapp_failover=true não muda isso, o bloqueio é ANTES da seleção de instância')
+
+    const { data: instanciaDepois } = await supabase.from('whatsapp_instances').select('consecutive_failures, health_status').eq('id', principal.id).single()
+    assert.equal(instanciaDepois.consecutive_failures, instanciaAntes.consecutive_failures, 'bloqueio pré-provider não toca no circuit breaker (PR #55 continua intacta)')
+    assert.equal(instanciaDepois.health_status, instanciaAntes.health_status)
+
+    const depoisGlobal = await verificarLimiteGlobalEnvio()
+    assert.equal(depoisGlobal.contagem_dia, antesGlobal.contagem_dia, 'tentativa bloqueada pré-provider NÃO consome o teto global — nenhuma linha nova em collection_dispatch_attempts')
+
+    await supabase.from('automacoes_config').update({ whatsapp_failover: false }).eq('id', 1)
+    invalidarCacheFlags()
+  })
+
+  await t.test('12. idempotência preservada: reenvio do mesmo título durante a quarentena não chama o provider nem duplica dispatch', async () => {
+    await limparInstanciasDeTeste(supabase)
+    await criarInstancia('wa01-q12', { priority: 1 })
+    const telefone = telefoneInvalidoDeTeste()
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone })
+
+    const r1 = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q12', origem: 'cron',
+    })
+    assert.equal(r1.motivo, 'permanent_recipient')
+
+    const r2 = await enviarCobrancaComRoteamento({
+      contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome,
+      clienteTelefone: telefone, valor: 500, mensagem: 'q12 retry', origem: 'cron',
+    })
+    assert.equal(r2.status, 'blocked')
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+
+    const { data: dispatches } = await supabase.from('collection_dispatches').select('id').eq('contas_financeiras_id', conta.id)
+    assert.equal(dispatches?.length ?? 0, 1, 'só o 1º dispatch (que gerou o permanent_recipient) existe — o retry bloqueado nem chega a criar um novo')
+  })
 })

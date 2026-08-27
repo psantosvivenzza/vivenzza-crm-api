@@ -76,35 +76,63 @@ export async function estaEmDoNotContact(clienteTelefone, canais = ['todos', 'wh
   return { blocked: false, reason: null }
 }
 
-// Meia-noite BRT do dia seguinte = 03:00 UTC do dia seguinte (BRT fixo
-// UTC-3, Brasil não observa DST desde 2019) — mesmo padrão de
-// inicioDoDiaBrtISO() em cobranca-whatsapp.js/globalSendLimit.js, só que
-// marcando o FIM do dia corrente em vez do início.
-function fimDoDiaBrtISO() {
-  const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
-  const [ano, mes, dia] = hojeBrt.split('-').map(Number)
-  return new Date(Date.UTC(ano, mes - 1, dia + 1, 3, 0, 0, 0)).toISOString()
+// CORREÇÃO 2026-08-27 — achado real da auditoria de qualidade de telefones:
+// 183 permanent_recipient em 30 dias, mas só 39 telefones únicos — 36
+// reincidiram, um chegou a 28 tentativas no mesmo mês. O bloqueio de "até
+// meia-noite BRT" (fimDoDiaBrtISO, usado até aqui) deixava o MESMO telefone
+// já confirmado pelo provider como não registrado voltar a ser tentado todo
+// dia seguinte — 100% dessas tentativas dependiam do provider pra falhar de
+// novo (nenhuma validação estrutural local teria evitado nenhuma delas, ver
+// auditoria), então o único jeito de reduzir volume é parar de reconsultar
+// um número que JÁ foi confirmado. Troca a janela de "hoje" para 30 dias —
+// nunca permanente automático (pedido explícito: reincidência não vira
+// bloqueio definitivo sozinha; expira e permite nova tentativa real depois).
+const QUARENTENA_NUMERO_INVALIDO_DIAS = 30
+
+export function expiracaoQuarentenaDeHoje() {
+  return new Date(Date.now() + QUARENTENA_NUMERO_INVALIDO_DIAS * 24 * 60 * 60 * 1000).toISOString()
+}
+
+// Idempotente/nunca encurta: uma linha temporária já mais longa que a nova
+// quarentena (ex: ajuste manual futuro, ou corrida entre 2 títulos do mesmo
+// telefone no mesmo instante) nunca é reduzida — só estendida ou mantida.
+// NUNCA chamada para a linha permanente (expira_em NULL) — quem chama já
+// retorna antes disso (ver registrarBloqueioNumeroInvalidoHoje).
+export function proximaExpiracaoQuarentena(expiraAtualIso) {
+  const candidata = expiracaoQuarentenaDeHoje()
+  if (!expiraAtualIso) return candidata
+  return new Date(expiraAtualIso) > new Date(candidata) ? expiraAtualIso : candidata
 }
 
 // CORREÇÃO DE SEGURANÇA 2026-08-18 — telefone com falha DEFINITIVA
 // (PERMANENT_RECIPIENT/"número não registrado no WhatsApp") não pode
 // continuar sendo tentado pelo provider pra cada título restante do mesmo
-// cliente no mesmo dia (cada tentativa é uma chamada HTTP real de checagem
-// contra a Evolution/WhatsApp, e o gap de rate-limit documentado em
+// cliente (cada tentativa é uma chamada HTTP real de checagem contra a
+// Evolution/WhatsApp, e o gap de rate-limit documentado em
 // globalSendLimit.js/whatsappInstances.js não conta tentativas falhas —
 // nada hoje protegia contra rajada de falhas repetidas pro mesmo número).
 //
-// Reusa collection_do_not_contact (canal='whatsapp', expira_em=fim do dia
-// BRT) em vez de criar tabela/campo novo — o guard real
+// AMPLIAÇÃO 2026-08-27 — janela de bloqueio de "até meia-noite BRT" (nome
+// da função/motivo preservado por compatibilidade — MOTIVO_NUMERO_INVALIDO_HOJE
+// e o `reason` 'NUMERO_INVALIDO_HOJE' continuam com esse valor exato, é
+// contrato já checado por outros callers/testes) para QUARENTENA_NUMERO_INVALIDO_DIAS
+// (30 dias). Ver expiracaoQuarentenaDeHoje()/proximaExpiracaoQuarentena()
+// acima pro racional completo.
+//
+// Reusa collection_do_not_contact (canal='whatsapp', expira_em=quarentena de
+// 30 dias) em vez de criar tabela/campo novo — o guard real
 // (estaEmDoNotContact, já chamado ANTES de qualquer seleção de instância ou
 // tentativa em collectionRouting.js) passa a bloquear automaticamente,
 // sem call site novo. Nunca chamado para falha técnica/timeout/429/401/403
 // — só o chamador (dispatchEngine.js, na categoria PERMANENT_RECIPIENT)
 // decide quando isto se aplica; esta função em si não classifica nada.
 //
-// Idempotente por telefone+dia: um segundo título com o mesmo telefone
-// falhando no mesmo dia não cria uma segunda linha. Best-effort — uma falha
-// ao gravar este bloqueio nunca pode derrubar o fluxo de envio que já
+// Idempotente por telefone+quarentena ativa: um segundo título com o mesmo
+// telefone, ainda dentro da janela de 30 dias, não cria uma segunda linha
+// nem reinicia a contagem (só reinicia quando a quarentena anterior já
+// expirou e uma NOVA falha real do provider confirma de novo — nunca vira
+// permanente só por reincidência, pedido explícito). Best-effort — uma
+// falha ao gravar este bloqueio nunca pode derrubar o fluxo de envio que já
 // terminou (mesmo racional de registrarBloqueioOptOutSeNecessario abaixo).
 //
 // SEGURANÇA 2026-08-18 (revisão pós-PR) — collection_do_not_contact tem uma
@@ -142,12 +170,14 @@ export async function registrarBloqueioNumeroInvalidoHoje(clienteTelefone) {
 
     if (existente) {
       if (!existente.expira_em) return // permanente (qualquer motivo) — nunca toca
-      if (existente.motivo === MOTIVO_NUMERO_INVALIDO_HOJE && new Date(existente.expira_em) > new Date()) return // já bloqueado hoje — idempotente
-      // Só resta: linha própria (numero_invalido_whatsapp) expirada de outro
-      // dia — estende pra hoje, nunca muda motivo/telefone/canal.
+      if (existente.motivo === MOTIVO_NUMERO_INVALIDO_HOJE && new Date(existente.expira_em) > new Date()) return // quarentena ainda ativa — idempotente, nunca reinicia a contagem
+      // Só resta: linha própria (numero_invalido_whatsapp) com quarentena já
+      // expirada — nova falha real do provider renova por mais 30 dias
+      // (nunca menos que o que já tinha, ver proximaExpiracaoQuarentena),
+      // nunca muda motivo/telefone/canal.
       const { error: erroUpdate } = await supabase
         .from('collection_do_not_contact')
-        .update({ expira_em: fimDoDiaBrtISO() })
+        .update({ expira_em: proximaExpiracaoQuarentena(existente.expira_em) })
         .eq('id', existente.id)
       if (erroUpdate) console.error('[doNotContactGuard] falha ao renovar bloqueio de número inválido (best-effort):', erroUpdate.message)
       return
@@ -157,7 +187,7 @@ export async function registrarBloqueioNumeroInvalidoHoje(clienteTelefone) {
       cliente_telefone: clienteTelefone,
       canal: 'whatsapp',
       motivo: MOTIVO_NUMERO_INVALIDO_HOJE,
-      expira_em: fimDoDiaBrtISO(),
+      expira_em: expiracaoQuarentenaDeHoje(),
     })
     if (erroInsert && erroInsert.code !== '23505') {
       console.error('[doNotContactGuard] falha ao registrar bloqueio de número inválido (best-effort, não afeta o envio já concluído):', erroInsert.message)
