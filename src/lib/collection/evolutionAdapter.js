@@ -52,37 +52,80 @@ export const FAILURE_CATEGORY = Object.freeze({
   UNKNOWN: 'UNKNOWN',                           // não reconhecido — nunca assumido como técnico
 })
 
+// CORREÇÃO 2026-08-27 — achado real em produção: `registrarFalhaEnvio()`
+// (whatsappInstances.js, incrementa consecutive_failures/aciona cooldown da
+// INSTÂNCIA) era chamado incondicionalmente pra QUALQUER falha, inclusive
+// PERMANENT_RECIPIENT ("número não registrado no WhatsApp"). Um lote de
+// destinatários com telefone ruim — problema do DADO, não da instância —
+// derrubou vivenzza-financeiro e vivenzza-financeiro-reserva-01 em cooldown
+// no mesmo dia (11 falhas seguidas de reserva-01, todas permanent_recipient,
+// nenhuma técnica), bloqueando envios pra números BONS só porque a fila
+// calhou de ter vários números ruins em sequência.
+//
+// `affectsInstanceHealth` separa explicitamente "isso prova que ESTA
+// instância está com problema" de "isso é sobre o destinatário/mensagem,
+// não sobre a instância" — só a primeira categoria deveria consumir o
+// circuit breaker por instância. Decisão categoria a categoria, documentada
+// porque nem toda escolha é óbvia pelo nome:
+//
+// - TECHNICAL_RETRYABLE/TECHNICAL_UNCERTAIN (timeout, ECONNREFUSED, 5xx):
+//   true — a instância genuinamente não respondeu ou respondeu com erro de
+//   servidor. Sinal real de saúde da instância, comportamento inalterado.
+// - RATE_LIMIT (429): true — o provedor está limitando ESTA instância
+//   especificamente; é exatamente o tipo de sinal que o cooldown existe
+//   pra conter (evita continuar martelando uma instância já sob rate
+//   limit). Comportamento inalterado.
+// - AUTH (401/403): true — decisão deliberada. Credencial é uma
+//   característica DA instância (api_key_env_var por linha em
+//   whatsapp_instances), não do destinatário — 401/403 repetido é sinal
+//   real de "esta instância específica precisa de atenção" (token
+//   revogado/expirado, desconexão exigindo novo QR), então continua
+//   contribuindo pro circuit breaker. Comportamento inalterado.
+// - PERMANENT_RECIPIENT (número não registrado): false — NOVO. Prova que o
+//   telefone é ruim, não que a instância é ruim. Continua sendo registrado
+//   como tentativa real (rate limit global, PR #49) e continua acionando o
+//   bloqueio individual do telefone (DNC, PR #48) — só para de contaminar a
+//   saúde da instância.
+// - PLATFORM_RESTRICTION (4xx não mapeado, ex: número banido/reportado):
+//   false — NOVO, mesmo raciocínio do PERMANENT_RECIPIENT: a evidência
+//   disponível aponta pro destinatário/mensagem específica, não pra
+//   instância como um todo. Continua sem failover (nunca foi elegível).
+// - UNKNOWN (não reconhecido): false — NOVO. Já era tratado como "nunca
+//   autoriza failover" pelo mesmo motivo (falso positivo custa caro); pela
+//   mesma lógica, não tem evidência suficiente pra culpar a instância
+//   também — assumir isso por padrão puniria a instância por um erro que
+//   pode não ser dela.
 const FALHA_TECNICA_RETRYABLE = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET', 'EHOSTUNREACH', 'ENOTFOUND'])
 
 export function classifyEvolutionFailure(err) {
   if (err?.numeroInvalido) {
-    return { category: FAILURE_CATEGORY.PERMANENT_RECIPIENT, failureKind: 'permanent_recipient', failoverEligible: false, mensagem: err.message }
+    return { category: FAILURE_CATEGORY.PERMANENT_RECIPIENT, failureKind: 'permanent_recipient', failoverEligible: false, affectsInstanceHealth: false, mensagem: err.message }
   }
 
   // Erro de transporte (nenhuma resposta HTTP chegou) — a instância de fato não
   // respondeu, candidato real e único a failover automático.
   if (FALHA_TECNICA_RETRYABLE.has(err.code)) {
-    return { category: FAILURE_CATEGORY.TECHNICAL_RETRYABLE, failureKind: 'instance_unavailable', failoverEligible: true, mensagem: err.message }
+    return { category: FAILURE_CATEGORY.TECHNICAL_RETRYABLE, failureKind: 'instance_unavailable', failoverEligible: true, affectsInstanceHealth: true, mensagem: err.message }
   }
 
   const status = err.response?.status
   if (status === 429) {
-    return { category: FAILURE_CATEGORY.RATE_LIMIT, failureKind: 'rate_limit', failoverEligible: false, mensagem: 'Rate limit (429) — pausar/backoff, nunca trocar de instância pra contornar' }
+    return { category: FAILURE_CATEGORY.RATE_LIMIT, failureKind: 'rate_limit', failoverEligible: false, affectsInstanceHealth: true, mensagem: 'Rate limit (429) — pausar/backoff, nunca trocar de instância pra contornar' }
   }
   if (status === 401 || status === 403) {
-    return { category: FAILURE_CATEGORY.AUTH, failureKind: 'auth', failoverEligible: false, mensagem: err.response?.data?.message || err.message }
+    return { category: FAILURE_CATEGORY.AUTH, failureKind: 'auth', failoverEligible: false, affectsInstanceHealth: true, mensagem: err.response?.data?.message || err.message }
   }
   if (status && status >= 500) {
-    return { category: FAILURE_CATEGORY.TECHNICAL_RETRYABLE, failureKind: 'instance_unavailable', failoverEligible: true, mensagem: err.message }
+    return { category: FAILURE_CATEGORY.TECHNICAL_RETRYABLE, failureKind: 'instance_unavailable', failoverEligible: true, affectsInstanceHealth: true, mensagem: err.message }
   }
   if (status && status >= 400) {
     // 4xx fora dos códigos explicitamente mapeados acima — pode ser restrição
     // de plataforma (ex: número banido/reportado). Nunca assumido como
     // "só a instância caiu" por padrão — só failover eligible explicitamente.
-    return { category: FAILURE_CATEGORY.PLATFORM_RESTRICTION, failureKind: 'platform_restriction', failoverEligible: false, mensagem: err.response?.data?.message || err.message }
+    return { category: FAILURE_CATEGORY.PLATFORM_RESTRICTION, failureKind: 'platform_restriction', failoverEligible: false, affectsInstanceHealth: false, mensagem: err.response?.data?.message || err.message }
   }
 
-  return { category: FAILURE_CATEGORY.UNKNOWN, failureKind: 'unknown', failoverEligible: false, mensagem: err.message }
+  return { category: FAILURE_CATEGORY.UNKNOWN, failureKind: 'unknown', failoverEligible: false, affectsInstanceHealth: false, mensagem: err.message }
 }
 
 // Nome antigo mantido como alias — nenhum chamador existente quebra, mas todo

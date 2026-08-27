@@ -38,50 +38,60 @@ test('classifyEvolutionFailure: taxonomia pura (sem rede, sem DB)', async (t) =>
   await iniciarAmbienteDeTeste()
   const { classifyEvolutionFailure, FAILURE_CATEGORY } = await import('../../../src/lib/collection/evolutionAdapter.js')
 
-  await t.test('erro de transporte (ECONNREFUSED/ETIMEDOUT/ECONNRESET) → TECHNICAL_RETRYABLE, failoverEligible=true', () => {
+  await t.test('erro de transporte (ECONNREFUSED/ETIMEDOUT/ECONNRESET) → TECHNICAL_RETRYABLE, failoverEligible=true, affectsInstanceHealth=true', () => {
     for (const code of ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET']) {
       const r = classifyEvolutionFailure({ code, message: `erro ${code}` })
       assert.equal(r.category, FAILURE_CATEGORY.TECHNICAL_RETRYABLE, code)
       assert.equal(r.failoverEligible, true, code)
+      assert.equal(r.affectsInstanceHealth, true, code)
     }
   })
 
-  await t.test('5xx → TECHNICAL_RETRYABLE, failoverEligible=true', () => {
+  await t.test('5xx → TECHNICAL_RETRYABLE, failoverEligible=true, affectsInstanceHealth=true', () => {
     const r = classifyEvolutionFailure({ response: { status: 500 }, message: 'erro 500' })
     assert.equal(r.category, FAILURE_CATEGORY.TECHNICAL_RETRYABLE)
     assert.equal(r.failoverEligible, true)
+    assert.equal(r.affectsInstanceHealth, true)
   })
 
-  await t.test('429 → RATE_LIMIT, failoverEligible=false', () => {
+  await t.test('429 → RATE_LIMIT, failoverEligible=false, affectsInstanceHealth=true (a instância está sendo limitada de verdade)', () => {
     const r = classifyEvolutionFailure({ response: { status: 429 }, message: 'rate limit' })
     assert.equal(r.category, FAILURE_CATEGORY.RATE_LIMIT)
     assert.equal(r.failoverEligible, false)
+    assert.equal(r.affectsInstanceHealth, true)
   })
 
-  await t.test('401/403 → AUTH, failoverEligible=false', () => {
+  await t.test('401/403 → AUTH, failoverEligible=false, affectsInstanceHealth=true (credencial pertence à instância)', () => {
     for (const status of [401, 403]) {
       const r = classifyEvolutionFailure({ response: { status }, message: 'auth' })
       assert.equal(r.category, FAILURE_CATEGORY.AUTH, status)
       assert.equal(r.failoverEligible, false, status)
+      assert.equal(r.affectsInstanceHealth, true, status)
     }
   })
 
-  await t.test('numeroInvalido → PERMANENT_RECIPIENT, failoverEligible=false', () => {
+  // CORREÇÃO 2026-08-27 — achado real: número inválido derrubava o circuit
+  // breaker da instância, apesar do problema ser do DADO. affectsInstanceHealth
+  // agora separa isso explicitamente (ver evolutionAdapter.js/dispatchEngine.js).
+  await t.test('numeroInvalido → PERMANENT_RECIPIENT, failoverEligible=false, affectsInstanceHealth=false (problema do destinatário, não da instância)', () => {
     const r = classifyEvolutionFailure({ numeroInvalido: true, message: 'número não existe' })
     assert.equal(r.category, FAILURE_CATEGORY.PERMANENT_RECIPIENT)
     assert.equal(r.failoverEligible, false)
+    assert.equal(r.affectsInstanceHealth, false)
   })
 
-  await t.test('4xx não mapeado → PLATFORM_RESTRICTION, failoverEligible=false', () => {
+  await t.test('4xx não mapeado → PLATFORM_RESTRICTION, failoverEligible=false, affectsInstanceHealth=false (evidência aponta pro destinatário/mensagem)', () => {
     const r = classifyEvolutionFailure({ response: { status: 400 }, message: 'erro genérico' })
     assert.equal(r.category, FAILURE_CATEGORY.PLATFORM_RESTRICTION)
     assert.equal(r.failoverEligible, false)
+    assert.equal(r.affectsInstanceHealth, false)
   })
 
-  await t.test('sem código/status reconhecido → UNKNOWN, failoverEligible=false (nunca assume técnico por padrão)', () => {
+  await t.test('sem código/status reconhecido → UNKNOWN, failoverEligible=false, affectsInstanceHealth=false (nunca assume técnico nem culpa a instância por padrão)', () => {
     const r = classifyEvolutionFailure({ message: 'algo estranho' })
     assert.equal(r.category, FAILURE_CATEGORY.UNKNOWN)
     assert.equal(r.failoverEligible, false)
+    assert.equal(r.affectsInstanceHealth, false)
   })
 })
 
