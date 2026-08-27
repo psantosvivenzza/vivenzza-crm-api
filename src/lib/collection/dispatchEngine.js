@@ -149,7 +149,16 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
       await atualizarTentativa(tentativa.id, {
         status: 'failed', failure_kind: classificado.failureKind, erro: classificado.mensagem, falhou_em: new Date().toISOString(),
       })
-      await registrarFalhaEnvio(instancia.id)
+      // CORREÇÃO 2026-08-27 — só falhas que provam problema DA INSTÂNCIA
+      // (affectsInstanceHealth=true, ver evolutionAdapter.js pro racional
+      // categoria a categoria) consomem o circuit breaker. Um destinatário
+      // com telefone ruim (PERMANENT_RECIPIENT) já é registrado como
+      // tentativa real acima (rate limit global, PR #49) e já aciona o
+      // bloqueio individual do telefone logo abaixo (DNC, PR #48) — não
+      // precisa, e não deveria, também derrubar a instância.
+      if (classificado.affectsInstanceHealth) {
+        await registrarFalhaEnvio(instancia.id)
+      }
 
       // FASE C.1 (homologação) — só failoverEligible=true (categoria
       // TECHNICAL_RETRYABLE) autoriza tentar outra instância. Rate limit,
@@ -266,7 +275,12 @@ export async function reavaliarTimeoutsDeEntrega() {
     } catch (err) {
       const classificado = classifyEvolutionFailure(err)
       await atualizarTentativa(tentativa.id, { status: 'failed', failure_kind: classificado.failureKind, erro: classificado.mensagem, falhou_em: new Date().toISOString() })
-      await registrarFalhaEnvio(proxima.id)
+      // CORREÇÃO 2026-08-27 — mesmo racional do catch principal de
+      // enviarComFailover: só falha que prova problema DA INSTÂNCIA aciona o
+      // circuit breaker (ver evolutionAdapter.js).
+      if (classificado.affectsInstanceHealth) {
+        await registrarFalhaEnvio(proxima.id)
+      }
       await atualizarDispatch(dispatch.id, { status: 'sent' }) // volta pro estado anterior — ainda pode entregar
     }
   }
@@ -370,8 +384,11 @@ export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
     // circuit breaker REAL da instância (consecutive_failures/cooldown em
     // whatsapp_instances), senão homologar o failover empurraria o principal
     // de verdade pra cooldown por causa de uma falha que nunca aconteceu.
-    // Fora do gate, comportamento inalterado: toda falha atualiza o circuit.
-    if (!failoverHomologacaoArmado) {
+    // Fora do gate, comportamento inalterado: toda falha que afeta a saúde
+    // da instância atualiza o circuit (mesma correção 2026-08-27 do catch
+    // principal — PERMANENT_RECIPIENT/PLATFORM_RESTRICTION/UNKNOWN não
+    // contaminam mais o circuit breaker, ver evolutionAdapter.js).
+    if (!failoverHomologacaoArmado && classificado.affectsInstanceHealth) {
       await registrarFalhaEnvio(instancia.id)
     }
 
@@ -388,7 +405,9 @@ export async function enviarTesteInterno({ testKey, telefone, mensagem }) {
         } catch (err2) {
           const classificado2 = classifyEvolutionFailure(err2)
           await atualizarTentativa(tentativa2.id, { status: 'failed', failure_kind: classificado2.failureKind, erro: classificado2.mensagem, falhou_em: new Date().toISOString() })
-          await registrarFalhaEnvio(proximaInstancia.id)
+          if (classificado2.affectsInstanceHealth) {
+            await registrarFalhaEnvio(proximaInstancia.id)
+          }
           await atualizarDispatch(criado.id, { status: 'failed' })
           return { status: 'failed', motivo: classificado2.failureKind, categoria: classificado2.category, dispatchId: criado.id, erro: classificado2.mensagem, tentativas: 2 }
         }
