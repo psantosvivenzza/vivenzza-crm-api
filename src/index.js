@@ -68,6 +68,11 @@ import collectionShadowStatusRouter from './routes/collection-shadow-status.js'
 // score/executa NBA.
 import collectionShadowReportsRouter from './routes/collection-shadow-reports.js'
 import collectionWhatsappMonitorRouter from './routes/collection-whatsapp-monitor.js'
+// 2026-08-27 — fila operacional "Revisão de Contatos": clientes com telefone
+// confirmado PERMANENT_RECIPIENT pelo provider, pra o Financeiro corrigir o
+// cadastro no NetVision. Só GET, nada persistido além do que já existe
+// (collection_do_not_contact/collection_dispatch_attempts).
+import collectionContactReviewRouter from './routes/collection-contact-review.js'
 // IA WhatsApp MVP (2026-08-12) — só GET, mostra sugestões de IA (shadow,
 // nenhuma enviada de verdade) pro operador revisar. Ver src/lib/collection/ai/.
 import aiSuggestionsRouter from './routes/ai-suggestions.js'
@@ -198,6 +203,7 @@ app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 // (dispatchEngine.js) não é registrado em nenhum job aqui nesta fase — o
 // sender legado (executarReguaCobranca) continua sendo o único caminho real.
 app.use('/api/collection-whatsapp', auth, adminOnly, collectionWhatsappMonitorRouter)
+app.use('/api/collection-contact-review', auth, adminOnly, collectionContactReviewRouter)
 
 // Health check
 app.get('/health', (req, res) => {
