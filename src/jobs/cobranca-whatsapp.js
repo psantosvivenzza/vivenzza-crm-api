@@ -34,7 +34,12 @@ function horaBrtAgora() {
   return (new Date().getUTCHours() - 3 + 24) % 24
 }
 
-function dentroDoHorarioPermitido() {
+// Exportada só pra permitir testes unitários rápidos e determinísticos da
+// janela (mock.timers no Date, sem precisar rodar a régua inteira) —
+// 2026-09-01, hardening de testes dependentes de horário. Comportamento e
+// assinatura idênticos a antes; nenhuma chamada existente (linha 114/207
+// abaixo) muda.
+export function dentroDoHorarioPermitido() {
   const hora = horaBrtAgora()
   return hora >= HORA_INICIO_BRT && hora < HORA_FIM_BRT
 }
@@ -77,7 +82,21 @@ async function telefonesJaContatadosHoje(isoInicioDia) {
   return new Set((data || []).map((r) => r.cliente_telefone))
 }
 
-function aguardarIntervaloAleatorio() {
+// Exportada pelo mesmo motivo de dentroDoHorarioPermitido() — prova de teste
+// (mock.timers no setTimeout) de que o bypass é exclusivo de NODE_ENV==='test'
+// (comparação estrita — 'production'/'staging'/valor ausente/qualquer outro
+// valor caem no intervalo real), sem precisar esperar 45-90s de verdade
+// dentro da própria suíte de teste.
+export function aguardarIntervaloAleatorio() {
+  // Teste (FakeEvolution, sem risco real de rajada de provider) não precisa
+  // do intervalo real de 45-90s — isso fazia collection-consolidacao-cobranca
+  // .test.mjs levar ~150s e, por depender de tempo real decorrido, podia
+  // cruzar a janela operacional 08h-17h BRT NO MEIO da própria execução do
+  // teste (achado real, hardening de testes 2026-09-01). Qualquer ambiente
+  // que não seja NODE_ENV=test continua com o intervalo real, sem mudança.
+  if (process.env.NODE_ENV === 'test') {
+    return new Promise((resolve) => setTimeout(resolve, 10))
+  }
   const ms = 45000 + Math.random() * 45000 // 45-90s — nunca rajada
   return new Promise((resolve) => setTimeout(resolve, ms))
 }

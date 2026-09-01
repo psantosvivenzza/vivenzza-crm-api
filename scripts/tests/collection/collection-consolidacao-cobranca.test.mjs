@@ -4,13 +4,20 @@
 // existentes (DNC) continuam protegendo um grupo consolidado exatamente como
 // protegiam um título único — nenhum deles foi modificado por este trabalho.
 //
-// executarReguaCobranca() só roda dentro de 08h-17h BRT — testes pulam com
-// t.skip() fora da janela (mesmo padrão de financial-sync-guard-entrypoints.test.mjs).
-// Cada envio real espera 45-90s (aguardarIntervaloAleatorio, não alterado
-// aqui) — por isso este arquivo tem poucos testes, cada um cobrindo várias
-// asserções por execução em vez de 1 execução por asserção.
+// 2026-09-01 — hardening de testes dependentes de horário: antes este arquivo
+// dependia da hora REAL da máquina (t.skip() fora de 08h-17h BRT) e do
+// intervalo real de 45-90s entre envios (aguardarIntervaloAleatorio,
+// cobranca-whatsapp.js), o que fazia a execução levar ~150s E podia cruzar a
+// própria janela operacional NO MEIO do teste — achado real, causou falha
+// intermitente. Agora: relógio congelado em 12:00 BRT (meio da janela, longe
+// de qualquer fronteira) via mock.timers, e o intervalo entre envios é
+// pulado em NODE_ENV=test (mudança em cobranca-whatsapp.js, comportamento de
+// produção idêntico). Fronteira de horário (08h/17h exatos) tem cobertura
+// própria e rápida em cobranca-whatsapp-janela-horario.test.mjs — este
+// arquivo não precisa mais testar isso.
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { iniciarAmbienteDeTeste, pararAmbienteDeTeste, criarContaDeTeste, telefoneDeTeste } from './_setup.mjs'
 
 let supabase, executarReguaCobranca, _resetCacheParaTeste, fakeEvolution
@@ -23,10 +30,10 @@ before(async () => {
 })
 after(async () => { await pararAmbienteDeTeste() })
 
-function dentroDaJanelaAgoraBrt() {
-  const horaBrt = (new Date().getUTCHours() - 3 + 24) % 24
-  return horaBrt >= 8 && horaBrt < 17
-}
+// 12:00 BRT — meio da janela operacional 08h-17h, longe de qualquer
+// fronteira. Congelado só durante o teste principal (t.mock.timers, escopo
+// automático do TestContext — nenhuma limpeza manual necessária).
+const MEIO_DA_JANELA_BRT = new Date('2026-06-15T15:00:00Z')
 
 async function ligarCobrancaComSyncFresco() {
   await supabase.from('automacoes_config').update({ cobranca_whatsapp_ativa: true }).eq('id', 1)
@@ -95,7 +102,7 @@ beforeEach(async () => {
 })
 
 test('regra de consolidação ligada de verdade no cron: grupo de 2 títulos → 1 mensagem com valor somado; DNC continua bloqueando; ambíguo nunca é cobrado; retry não duplica', async (t) => {
-  if (!dentroDaJanelaAgoraBrt()) { t.skip('fora da janela 08h-17h BRT — executarReguaCobranca() bloquearia antes de chegar na lógica testada aqui'); return }
+  t.mock.timers.enable({ apis: ['Date'], now: MEIO_DA_JANELA_BRT })
 
   const idsSuprimidos = await suprimirOutrasContasElegiveis()
   const idsMeus = []
@@ -107,9 +114,11 @@ test('regra de consolidação ligada de verdade no cron: grupo de 2 títulos →
     const telefoneAmbiguoA = telefoneDeTeste()
     const telefoneAmbiguoB = telefoneDeTeste()
 
-    const codigoClienteNormal = `CONSOLIDA-NORMAL-${Date.now()}`
-    const codigoClienteDnc = `CONSOLIDA-DNC-${Date.now()}`
-    const codigoClienteAmbiguo = `CONSOLIDA-AMBIGUO-${Date.now()}`
+    // randomUUID(), não Date.now() — com o relógio congelado (mock.timers),
+    // Date.now() devolveria o MESMO valor em toda execução deste teste.
+    const codigoClienteNormal = `CONSOLIDA-NORMAL-${randomUUID()}`
+    const codigoClienteDnc = `CONSOLIDA-DNC-${randomUUID()}`
+    const codigoClienteAmbiguo = `CONSOLIDA-AMBIGUO-${randomUUID()}`
 
     // Grupo A — normal, deve consolidar e enviar 1 mensagem com R$700
     const a1 = await criarContaDeTeste(supabase, { codigo_cliente: codigoClienteNormal, telefone_cobranca: telefoneGrupoNormal, vencimento, valor: 400, pessoa_nome: 'Cliente Consolidação Normal' })
