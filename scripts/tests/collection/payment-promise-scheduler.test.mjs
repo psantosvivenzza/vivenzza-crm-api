@@ -42,18 +42,31 @@ test('scheduler: payment-reconciliation-sweep e promise-expiry-sweep estão regi
   })
 
   await t.test('5. cada cron chamador está dentro de try/catch (mesmo padrão dos demais crons do arquivo — erro de 1 job nunca derruba o processo)', () => {
-    const blocoSweep = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPaymentReconciliationSweep\(\)[\s\S]{0,200}?\}\)/)
+    const blocoSweep = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPaymentReconciliationSweep\(\)[\s\S]{0,400}?\}\s*,\s*\{[\s\S]{0,300}?\}\s*\)/)
     assert.ok(blocoSweep, 'bloco do cron de payment-reconciliation-sweep não encontrado')
     assert.match(blocoSweep[0], /try\s*\{/)
     assert.match(blocoSweep[0], /catch\s*\(/)
 
-    const blocoPromise = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPromiseExpirySweep\(\)[\s\S]{0,200}?\}\)/)
+    const blocoPromise = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPromiseExpirySweep\(\)[\s\S]{0,400}?\}\s*,\s*\{[\s\S]{0,300}?\}\s*\)/)
     assert.ok(blocoPromise, 'bloco do cron de promise-expiry-sweep não encontrado')
     assert.match(blocoPromise[0], /try\s*\{/)
     assert.match(blocoPromise[0], /catch\s*\(/)
   })
 
-  await t.test('6. os dois jobs em si existem e exportam a função esperada (sem subir index.js)', async () => {
+  await t.test('7. payment-reconciliation-sweep tem noOverlap:true (proteção contra 2 execuções concorrentes do mesmo job, defesa em profundidade além da idempotência a nível de dado)', () => {
+    const bloco = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPaymentReconciliationSweep\(\)[\s\S]{0,400}?\}\s*,\s*\{[\s\S]{0,300}?\}\s*\)/)
+    assert.ok(bloco)
+    assert.match(bloco[0], /noOverlap\s*:\s*true/)
+  })
+
+  await t.test('8. promise-expiry-sweep tem noOverlap:true E timezone explícito America/Sao_Paulo (promised_date < hoje BRT — o cron precisa disparar no horário de Brasília, não depender do fuso do host)', () => {
+    const bloco = codigo.match(/cron\.schedule\(\s*['"][^'"]+['"]\s*,\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?runPromiseExpirySweep\(\)[\s\S]{0,400}?\}\s*,\s*\{[\s\S]{0,300}?\}\s*\)/)
+    assert.ok(bloco)
+    assert.match(bloco[0], /noOverlap\s*:\s*true/)
+    assert.match(bloco[0], /timezone\s*:\s*['"]America\/Sao_Paulo['"]/)
+  })
+
+  await t.test('9. os dois jobs em si existem e exportam a função esperada (sem subir index.js)', async () => {
     const { runPaymentReconciliationSweep } = await import('../../../src/jobs/payment-reconciliation-sweep.js')
     const { runPromiseExpirySweep } = await import('../../../src/jobs/promise-expiry-sweep.js')
     assert.equal(typeof runPaymentReconciliationSweep, 'function')

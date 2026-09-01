@@ -313,30 +313,37 @@ cron.schedule('*/15 11-20 * * 1-5', async () => {
 // via payment-reconciliation-sweep.js). A cada 15 min, mesma cadência da régua
 // — cancela dispatch/ligação/promessa órfãos quando o título deixou de ser
 // cobrável (pago/cancelado/em revisão) depois de já ter automação pendente.
-// Idempotente (ver comentário no próprio job); roda o dia todo, não só na
-// janela 08h-17h, porque a baixa financeira pode chegar a qualquer hora.
+// Idempotente a nível de dado (transições condicionais no banco, ver
+// paymentGuard.js) E a nível de scheduler (noOverlap:true — se uma execução
+// ainda estiver rodando quando o próximo tick chegar, o tick é pulado, nunca
+// roda em paralelo consigo mesmo). Roda o dia todo, não só na janela
+// 08h-17h, porque a baixa financeira pode chegar a qualquer hora — só
+// reconciliação interna, nunca envia WhatsApp/liga.
 cron.schedule('*/15 * * * *', async () => {
   try {
     await runPaymentReconciliationSweep()
   } catch (err) {
     console.error('[cron payment-reconciliation-sweep] Erro:', err.message)
   }
-})
+}, { name: 'payment-reconciliation-sweep', noOverlap: true })
 
 // 2026-09-01 — processamento de promessas vencidas (promises.processarPromessasVencidas,
-// via promise-expiry-sweep.js). 1x/dia, antes da janela da régua (08h BRT =
-// 11h UTC) começar, pra que um título com promessa vencida ontem já esteja
-// liberado (promessaAtivaPara() volta a retornar null) no primeiro tick do
-// dia. Só marca 'quebrada' — nunca envia mensagem/liga, o próximo ciclo
-// normal da régua decide o que fazer. Horário (10:50 UTC) escolhido pra não
-// coincidir com o cron de meta-report, que já usa 0 10 * * *.
-cron.schedule('50 10 * * *', async () => {
+// via promise-expiry-sweep.js). 1x/dia, 07:50 horário de Brasília — antes da
+// janela da régua (08h BRT), pra que um título com promessa vencida ontem já
+// esteja liberado (promessaAtivaPara() volta a retornar null) no primeiro
+// tick do dia. Timezone explícito (America/Sao_Paulo) — não depende do fuso
+// do host (Railway); "hoje" pra processarPromessasVencidas() já é sempre BRT
+// (hojeBrtISO(), collectionContactPolicy.js), então o cron precisa dessa
+// mesma referência de fuso pra não disparar horas cedo/tarde. Só marca
+// 'quebrada' — nunca envia mensagem/liga, o próximo ciclo normal da régua
+// decide o que fazer. noOverlap:true pelo mesmo motivo do sweep acima.
+cron.schedule('50 7 * * *', async () => {
   try {
     await runPromiseExpirySweep()
   } catch (err) {
     console.error('[cron promise-expiry-sweep] Erro:', err.message)
   }
-})
+}, { name: 'promise-expiry-sweep', timezone: 'America/Sao_Paulo', noOverlap: true })
 
 // FASE B.1 (homologação) — CollectionShadowObserver. No-op enquanto
 // nba_shadow_mode/score_shadow_mode (automacoes_config) estiverem false

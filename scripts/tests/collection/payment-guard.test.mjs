@@ -128,6 +128,85 @@ test('paymentGuard: statusQuitacaoTitulo/tituloEstaQuitado/cancelarAutomacaoPorP
     await assert.doesNotReject(() => cancelarAutomacaoPorPagamento(conta.id))
   })
 
+  await t.test('12. em_revisao_financeira: automação pendente é cancelada, mas NUNCA emite PAGO nem marca promessa cumprida (revisão continua exigindo decisão humana)', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0, em_revisao_financeira: true })
+    await registrarPromessa({ contasFinanceirasId: conta.id, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca, valor: 500, promisedDate: '2026-12-01', origem: 'HUMAN' })
+    const { data: dispatch } = await supabase.from('collection_dispatches').insert({
+      contas_financeiras_id: conta.id, etapa: 1, canal: 'whatsapp', status: 'queued', mensagem: 'x', origem: 'manual',
+      idempotency_key: `teste-payment-guard-12-${conta.id}`, cliente_nome: conta.pessoa_nome, cliente_telefone: conta.telefone_cobranca, valor: conta.valor,
+    }).select().single()
+
+    const resultado = await cancelarAutomacaoPorPagamento(conta.id)
+    assert.equal(resultado.dispatches, 1, 'dispatch pendente É cancelado — título em revisão não pode continuar sendo tentado')
+    assert.equal(resultado.promessaCumprida, false)
+
+    const { data: dispatchApos } = await supabase.from('collection_dispatches').select('status, cancelado_motivo').eq('id', dispatch.id).single()
+    assert.equal(dispatchApos.status, 'cancelled')
+    assert.equal(dispatchApos.cancelado_motivo, 'em_revisao_financeira')
+
+    const { data: promessaApos } = await supabase.from('collection_promises').select('status').eq('contas_financeiras_id', conta.id).single()
+    assert.equal(promessaApos.status, 'ativa', 'em_revisao_financeira não é pagamento — promessa não é tocada')
+
+    const timeline = await timelineDoTitulo(conta.id)
+    assert.equal(timeline.filter((e) => e.tipo === 'PAGO').length, 0, 'em_revisao_financeira NUNCA emite PAGO')
+    assert.equal(timeline.filter((e) => e.tipo === 'PROMESSA_CUMPRIDA').length, 0)
+  })
+
+  await t.test('13. PAGO nunca é emitido para cancelado/em_revisao/titulo_inexistente, mesmo quando algo foi cancelado nesses casos', async () => {
+    for (const overrides of [{ status: 'cancelada' }, { status: 'aberta', em_revisao_financeira: true }]) {
+      const conta = await criarContaDeTeste(supabase, { valor: 500, valor_pago: 0, ...overrides })
+      await supabase.from('collection_dispatches').insert({
+        contas_financeiras_id: conta.id, etapa: 1, canal: 'whatsapp', status: 'queued', mensagem: 'x', origem: 'manual',
+        idempotency_key: `teste-payment-guard-13-${conta.id}`, cliente_nome: conta.pessoa_nome, cliente_telefone: conta.telefone_cobranca, valor: conta.valor,
+      })
+      await cancelarAutomacaoPorPagamento(conta.id)
+      const timeline = await timelineDoTitulo(conta.id)
+      assert.equal(timeline.filter((e) => e.tipo === 'PAGO').length, 0, `motivo=${overrides.status ?? 'em_revisao'} nunca deveria emitir PAGO`)
+    }
+    // título inexistente: nem tem contas_financeiras_id real pra checar timeline, mas
+    // a chamada não deve lançar nem criar nada — já coberto indiretamente pelo teste 1.
+    const resultado = await cancelarAutomacaoPorPagamento('00000000-0000-0000-0000-000000000000')
+    assert.equal(resultado.motivo, 'titulo_inexistente')
+  })
+
+  await t.test('14. tratamento de 42P01 é estrito — só ignora "relation does not exist", nunca mascara outro erro SQL', async () => {
+    // Prova negativa: um erro DIFERENTE (código arbitrário que não é 42P01)
+    // vindo da MESMA posição no fluxo (consulta a collection_calls) precisa
+    // continuar propagando. Simulado chamando a função interna do jeito que
+    // o código real chamaria — como não dá pra injetar uma falha de rede real
+    // no Postgres local, a prova é estática: o código-fonte só compara
+    // contra o literal '42P01', não contra um regex genérico de mensagem.
+    const paymentGuardSrc = await import('node:fs').then((fs) => fs.readFileSync(new URL('../../../src/lib/collection/paymentGuard.js', import.meta.url), 'utf8'))
+    assert.match(paymentGuardSrc, /errLigacoes\.code !== '42P01'/, 'a checagem precisa ser pelo código SQLSTATE exato, não por texto de mensagem')
+    assert.doesNotMatch(paymentGuardSrc, /errLigacoes\s*\)\s*\{\s*\/\//, 'não pode haver um bloco que engula errLigacoes incondicionalmente')
+  })
+
+  await t.test('15. concorrência real: duas chamadas simultâneas de cancelarAutomacaoPorPagamento pro MESMO título nunca emitem PAGO/PROMESSA_CUMPRIDA duplicados', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    await registrarPromessa({ contasFinanceirasId: conta.id, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca, valor: 500, promisedDate: '2026-12-01', origem: 'HUMAN' })
+    await supabase.from('collection_dispatches').insert({
+      contas_financeiras_id: conta.id, etapa: 1, canal: 'whatsapp', status: 'queued', mensagem: 'x', origem: 'manual',
+      idempotency_key: `teste-payment-guard-15-${conta.id}`, cliente_nome: conta.pessoa_nome, cliente_telefone: conta.telefone_cobranca, valor: conta.valor,
+    })
+    await supabase.from('contas_financeiras').update({ valor_pago: 500 }).eq('id', conta.id)
+
+    const [r1, r2] = await Promise.all([
+      cancelarAutomacaoPorPagamento(conta.id),
+      cancelarAutomacaoPorPagamento(conta.id),
+    ])
+    // Exatamente uma das duas execuções "ganha" cada transição (dispatch, promessa) —
+    // nunca as duas, nunca nenhuma.
+    assert.equal(r1.dispatches + r2.dispatches, 1, 'o dispatch só é cancelado por UMA das duas execuções concorrentes')
+    assert.equal((r1.promessaCumprida ? 1 : 0) + (r2.promessaCumprida ? 1 : 0), 1, 'a promessa só é marcada cumprida por UMA das duas execuções concorrentes')
+
+    const { data: promessaFinal } = await supabase.from('collection_promises').select('status').eq('contas_financeiras_id', conta.id).single()
+    assert.equal(promessaFinal.status, 'cumprida')
+
+    const timeline = await timelineDoTitulo(conta.id)
+    assert.equal(timeline.filter((e) => e.tipo === 'PAGO').length, 1, 'PAGO emitido exatamente 1 vez sob concorrência real, não 2')
+    assert.equal(timeline.filter((e) => e.tipo === 'PROMESSA_CUMPRIDA').length, 1, 'PROMESSA_CUMPRIDA emitido exatamente 1 vez sob concorrência real, não 2')
+  })
+
   fakeEvolution.resetar()
   await limparInstanciasDeTeste(supabase)
   await pararAmbienteDeTeste()
