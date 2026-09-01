@@ -4,9 +4,23 @@
 // (automacoes_config.global_daily_limit/global_hourly_limit) que nenhum
 // código lia — e o único teto que de fato existia (LIMITE_DIARIO/
 // LIMITE_POR_HORA em cobranca-whatsapp.js) nunca cobria /disparar-individual.
+//
+// 2026-09-01 — hardening de testes dependentes de horário: inserirEnvioSimulado
+// usa `minutosAtras` relativo a Date.now() real, e globalSendLimit.js conta
+// "hora atual" a partir do início exato da hora (inicioDaHoraAtualISO,
+// agora.setUTCMinutes(0,0,0)) — se o teste rodasse perto da virada da hora
+// real, um envio "10 minutos atrás" podia cair na hora ANTERIOR, fazendo a
+// contagem vir menor que o esperado (achado real, flakiness intermitente
+// documentada nesta sessão). Relógio agora congelado em XX:30 (meio da hora,
+// longe de qualquer virada) via mock.timers pra todo o arquivo.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { iniciarAmbienteDeTeste, pararAmbienteDeTeste, criarContaDeTeste, limparInstanciasDeTeste } from './_setup.mjs'
+
+// 14:30 UTC — qualquer dia/hora sem relação com janela operacional BRT
+// (globalSendLimit.js não olha pra 08h-17h BRT, só bucket diário/horário).
+// :30 é o meio da hora, sem risco de virada durante a execução do teste.
+const MEIO_DA_HORA = new Date('2026-06-15T14:30:00Z')
 
 async function criarInstancia(supabase, nome, overrides = {}) {
   const { data, error } = await supabase.from('whatsapp_instances').insert({
@@ -59,6 +73,7 @@ async function garantirSyncFinanceiroFresco(supabase) {
 }
 
 test('Teto global de envio (globalSendLimit.js)', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: MEIO_DA_HORA })
   const fakeEvolution = await iniciarAmbienteDeTeste()
   const { supabase } = await import('../../../src/lib/supabase-admin.server.js')
   const { verificarLimiteGlobalEnvio } = await import('../../../src/lib/collection/globalSendLimit.js')
