@@ -55,6 +55,8 @@ import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
 import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
 import { reconciliarNfePendentes } from './jobs/reconciliar-nfe.js'
 import { runSincronizacaoDistribuicaoDFe } from './jobs/nfe-distribuicao-sync.js'
+import { runPaymentReconciliationSweep } from './jobs/payment-reconciliation-sweep.js'
+import { runPromiseExpirySweep } from './jobs/promise-expiry-sweep.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
 // FASE B.1 (homologação, shadow mínimo) — SOMENTE observação read-only de
 // Recovery Score/Priority Score/Next Best Action, nunca despacha nada.
@@ -304,6 +306,35 @@ cron.schedule('*/15 11-20 * * 1-5', async () => {
     await executarReguaCobranca()
   } catch (err) {
     console.error('[cron cobranca-whatsapp] Erro:', err.message)
+  }
+})
+
+// 2026-09-01 — sweep de pagamento tardio (paymentGuard.varrerTitulosPendentesEcancelarQuitados,
+// via payment-reconciliation-sweep.js). A cada 15 min, mesma cadência da régua
+// — cancela dispatch/ligação/promessa órfãos quando o título deixou de ser
+// cobrável (pago/cancelado/em revisão) depois de já ter automação pendente.
+// Idempotente (ver comentário no próprio job); roda o dia todo, não só na
+// janela 08h-17h, porque a baixa financeira pode chegar a qualquer hora.
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    await runPaymentReconciliationSweep()
+  } catch (err) {
+    console.error('[cron payment-reconciliation-sweep] Erro:', err.message)
+  }
+})
+
+// 2026-09-01 — processamento de promessas vencidas (promises.processarPromessasVencidas,
+// via promise-expiry-sweep.js). 1x/dia, antes da janela da régua (08h BRT =
+// 11h UTC) começar, pra que um título com promessa vencida ontem já esteja
+// liberado (promessaAtivaPara() volta a retornar null) no primeiro tick do
+// dia. Só marca 'quebrada' — nunca envia mensagem/liga, o próximo ciclo
+// normal da régua decide o que fazer. Horário (10:50 UTC) escolhido pra não
+// coincidir com o cron de meta-report, que já usa 0 10 * * *.
+cron.schedule('50 10 * * *', async () => {
+  try {
+    await runPromiseExpirySweep()
+  } catch (err) {
+    console.error('[cron promise-expiry-sweep] Erro:', err.message)
   }
 })
 

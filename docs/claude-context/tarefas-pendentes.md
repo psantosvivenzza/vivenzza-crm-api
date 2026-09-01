@@ -36,6 +36,18 @@
       mergeadas (a maioria pode ser removida com segurança, mas isso é uma
       decisão separada, não automática).
 
+## Financeiro — RPC não versionada
+
+- [ ] `fn_sincronizar_baixa_legado` (chamada por `sync-financeiro-legado.js`
+      pra atualizar títulos existentes — cancelamento, encerramento,
+      resolução de `em_revisao_financeira`) não tem migration correspondente
+      em `supabase/migrations/` nem `migrations/`. Existe só no schema live
+      do Supabase, aplicada manualmente em algum momento — não auditável via
+      `git log`/`git blame`. Versionar a definição atual (via
+      `pg_get_functiondef` ou equivalente) antes de qualquer alteração
+      futura no fluxo de baixa financeira, pra não perder a única cópia
+      existente da lógica real.
+
 ## Concluído (não refazer)
 
 - [x] Sync fiscal residente e resiliente (Task Scheduler).

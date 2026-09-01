@@ -54,6 +54,11 @@ CREATE TABLE IF NOT EXISTS public.collection_promises (
   broken_at timestamptz,
   cancelled_at timestamptz
 );
+-- Faltava neste baseline local (só existia em migrations/collection_shadow_minimal.sql,
+-- nunca aplicada pelo reset local) — nunca duas promessas 'ativa' pro mesmo
+-- título, mesma garantia real de produção (2026-09-01, payment-promise-lifecycle).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_promises_unica_ativa
+  ON public.collection_promises (contas_financeiras_id) WHERE status = 'ativa';
 
 CREATE TABLE IF NOT EXISTS public.collection_timeline_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
