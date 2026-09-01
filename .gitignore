@@ -1,5 +1,6 @@
 .env
 .env.*.local
+.env.backup-*
 node_modules/
 
 # Ambiente de desenvolvimento local (Postgres) — ver
