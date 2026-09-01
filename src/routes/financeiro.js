@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { timelineDoTituloPaginada, serializarEventoTimeline } from '../lib/collection/timeline.js'
 
 const router = Router()
 
@@ -113,6 +114,38 @@ router.get('/:id', async (req, res) => {
     if (!data) return res.status(404).json({ erro: 'Conta não encontrada' })
 
     res.json(data)
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/financeiro/:id/timeline — histórico cronológico de eventos do
+// título (mensagem enviada/falhou, pagamento, promessa, etc.). Somente
+// leitura — nenhuma mutação aqui. Metadata passa por serializarEventoTimeline
+// (allowlist de campos seguros por tipo), nunca expõe `dados` bruto.
+router.get('/:id/timeline', async (req, res) => {
+  try {
+    const { data: conta, error: erroConta } = await supabase
+      .from('contas_financeiras')
+      .select('id')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroConta) throw erroConta
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+    const offset = (page - 1) * limit
+
+    const { eventos, total } = await timelineDoTituloPaginada(req.params.id, { limit, offset })
+
+    res.json({
+      titulo_id: req.params.id,
+      total,
+      page,
+      limit,
+      eventos: eventos.map(serializarEventoTimeline),
+    })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
