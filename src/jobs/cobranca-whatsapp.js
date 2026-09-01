@@ -82,7 +82,12 @@ async function telefonesJaContatadosHoje(isoInicioDia) {
   return new Set((data || []).map((r) => r.cliente_telefone))
 }
 
-function aguardarIntervaloAleatorio() {
+// Exportada pelo mesmo motivo de dentroDoHorarioPermitido() — prova de teste
+// (mock.timers no setTimeout) de que o bypass é exclusivo de NODE_ENV==='test'
+// (comparação estrita — 'production'/'staging'/valor ausente/qualquer outro
+// valor caem no intervalo real), sem precisar esperar 45-90s de verdade
+// dentro da própria suíte de teste.
+export function aguardarIntervaloAleatorio() {
   // Teste (FakeEvolution, sem risco real de rajada de provider) não precisa
   // do intervalo real de 45-90s — isso fazia collection-consolidacao-cobranca
   // .test.mjs levar ~150s e, por depender de tempo real decorrido, podia
