@@ -69,14 +69,22 @@ export async function registrarPromessa({ contasFinanceirasId, clienteNome, clie
   return data
 }
 
+// Transição condicional (WHERE status='ativa') — se duas chamadas concorrentes
+// tentarem marcar a MESMA promessa cumprida (ex: sweep de pagamento rodando 2x
+// por overlap de scheduler), só a que efetivamente mudar a linha (a outra já
+// vai encontrar status != 'ativa', 0 linhas afetadas) registra o evento.
+// Retorna null quando a transição não ocorreu (idempotência real, não só
+// "segunda chamada sequencial não encontra mais nada pendente").
 export async function marcarPromessaCumprida(promiseId, { origem = ORIGEM.SYSTEM } = {}) {
   const { data, error } = await supabase
     .from('collection_promises')
     .update({ status: 'cumprida', fulfilled_at: new Date().toISOString() })
     .eq('id', promiseId)
+    .eq('status', 'ativa')
     .select()
-    .single()
+    .maybeSingle()
   if (error) throw error
+  if (!data) return null
 
   await registrarEvento({
     contasFinanceirasId: data.contas_financeiras_id,
@@ -89,14 +97,18 @@ export async function marcarPromessaCumprida(promiseId, { origem = ORIGEM.SYSTEM
   return data
 }
 
+// Mesma transição condicional (WHERE status='ativa') que marcarPromessaCumprida
+// — protege contra processarPromessasVencidas() rodando 2x concorrentemente.
 export async function marcarPromessaQuebrada(promiseId) {
   const { data, error } = await supabase
     .from('collection_promises')
     .update({ status: 'quebrada', broken_at: new Date().toISOString() })
     .eq('id', promiseId)
+    .eq('status', 'ativa')
     .select()
-    .single()
+    .maybeSingle()
   if (error) throw error
+  if (!data) return null
 
   await registrarEvento({
     contasFinanceirasId: data.contas_financeiras_id,
@@ -110,9 +122,14 @@ export async function marcarPromessaQuebrada(promiseId) {
 }
 
 // Job: promessas vencidas (promised_date < hoje BRT) e ainda 'ativa' viram 'quebrada'.
-// Chamado por src/jobs/collection-promise-followup.js. Recalcular prioridade fica a
-// cargo do próximo cálculo de priorityScore (que já soma pontos por promessa quebrada
-// consultando esta tabela) — não há necessidade de mexer em outra tabela aqui.
+// Chamado por src/jobs/promise-expiry-sweep.js (1x/dia, timezone
+// America/Sao_Paulo explícito, noOverlap:true). Recalcular prioridade fica a
+// cargo do próximo cálculo de priorityScore (que já soma pontos por promessa
+// quebrada consultando esta tabela) — não há necessidade de mexer em outra
+// tabela aqui. marcarPromessaQuebrada() já é condicional no banco
+// (WHERE status='ativa'), então mesmo que duas execuções concorrentes
+// selecionem a mesma promessa aqui, só uma efetivamente marca — a outra
+// retorna null e é descartada abaixo (nunca emite PROMESSA_QUEBRADA 2x).
 export async function processarPromessasVencidas(hojeBrtISO) {
   const { data: vencidas, error } = await supabase
     .from('collection_promises')
@@ -123,7 +140,8 @@ export async function processarPromessasVencidas(hojeBrtISO) {
 
   const resultados = []
   for (const p of vencidas ?? []) {
-    resultados.push(await marcarPromessaQuebrada(p.id))
+    const marcada = await marcarPromessaQuebrada(p.id)
+    if (marcada) resultados.push(marcada)
   }
   return resultados
 }

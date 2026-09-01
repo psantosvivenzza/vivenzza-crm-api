@@ -18,7 +18,7 @@ import { obterConfigCobranca } from './featureFlags.js'
 import { idempotencyKeyDispatch, idempotencyKeyInternalTest, registrarEventoExterno } from './idempotency.js'
 import { selecionarProximaInstancia, registrarSucessoEnvio, registrarFalhaEnvio } from './whatsappInstances.js'
 import { enviarTexto, classifyEvolutionFailure, normalizarStatusAck } from './evolutionAdapter.js'
-import { tituloEstaQuitado } from './paymentGuard.js'
+import { statusQuitacaoTitulo } from './paymentGuard.js'
 import { promessaAtivaPara } from './promises.js'
 import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqueioNumeroInvalidoHoje } from './doNotContactGuard.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
@@ -84,8 +84,9 @@ async function atualizarTentativa(id, campos) {
 // Ponto de entrada único usado pelo job da régua (v2) e pelo disparo manual v2.
 // Retorna { status, motivo?, dispatchId?, tentativas? }.
 export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null }) {
-  if (await tituloEstaQuitado(contasFinanceirasId)) {
-    return { status: 'skipped', motivo: 'quitado' }
+  const statusQuitacao = await statusQuitacaoTitulo(contasFinanceirasId)
+  if (statusQuitacao.quitado) {
+    return { status: 'skipped', motivo: statusQuitacao.motivo }
   }
   const promessa = await promessaAtivaPara(contasFinanceirasId)
   if (promessa) {
