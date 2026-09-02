@@ -69,6 +69,37 @@ export async function registrarPromessa({ contasFinanceirasId, clienteNome, clie
   return data
 }
 
+// Cancelamento EXPLÍCITO, sem criar promessa nova (diferente da substituição
+// embutida em registrarPromessa(), que sempre vem acompanhada de uma
+// promessa nova). Transição condicional (WHERE status='ativa') — mesma
+// disciplina de concorrência das demais transições deste arquivo. Retorna
+// null se não havia promessa ativa (nada a cancelar) ou se outra chamada já
+// cancelou/resolveu primeiro.
+export async function cancelarPromessaAtiva(contasFinanceirasId, { origem = ORIGEM.HUMAN, motivo = null } = {}) {
+  const promessa = await promessaAtivaPara(contasFinanceirasId)
+  if (!promessa) return null
+
+  const { data, error } = await supabase
+    .from('collection_promises')
+    .update({ status: 'cancelada', cancelled_at: new Date().toISOString() })
+    .eq('id', promessa.id)
+    .eq('status', 'ativa')
+    .select()
+    .maybeSingle()
+  if (error) throw error
+  if (!data) return null
+
+  await registrarEvento({
+    contasFinanceirasId,
+    clienteTelefone: data.cliente_telefone,
+    tipo: 'PROMESSA_CANCELADA',
+    origem,
+    descricao: motivo ? `Promessa cancelada: ${motivo}` : 'Promessa cancelada pelo operador',
+    dados: { promise_id: data.id },
+  })
+  return data
+}
+
 // Transição condicional (WHERE status='ativa') — se duas chamadas concorrentes
 // tentarem marcar a MESMA promessa cumprida (ex: sweep de pagamento rodando 2x
 // por overlap de scheduler), só a que efetivamente mudar a linha (a outra já

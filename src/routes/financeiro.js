@@ -1,6 +1,52 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { timelineDoTituloPaginada, serializarEventoTimeline } from '../lib/collection/timeline.js'
+import { adminOnly } from '../middleware/auth.js'
+import { statusQuitacaoTitulo } from '../lib/collection/paymentGuard.js'
+import { promessaAtivaPara, registrarPromessa, cancelarPromessaAtiva } from '../lib/collection/promises.js'
+import { hojeBrtISO } from '../lib/collection/collectionContactPolicy.js'
+
+const DIAS_MAX_PROMESSA_FUTURA = 90
+const TAMANHO_MAX_OBSERVACAO = 280
+
+function adicionarDiasISO(dataISO, dias) {
+  const d = new Date(`${dataISO}T12:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + dias)
+  return d.toISOString().slice(0, 10)
+}
+
+function validarDataPrometida(valor) {
+  if (typeof valor !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
+    return { valido: false, erro: '"data_prometida" precisa estar no formato YYYY-MM-DD' }
+  }
+  const d = new Date(`${valor}T12:00:00Z`)
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== valor) {
+    return { valido: false, erro: '"data_prometida" não é uma data válida' }
+  }
+  const hoje = hojeBrtISO()
+  if (valor < hoje) {
+    return { valido: false, erro: '"data_prometida" não pode ser uma data passada' }
+  }
+  const limite = adicionarDiasISO(hoje, DIAS_MAX_PROMESSA_FUTURA)
+  if (valor > limite) {
+    return { valido: false, erro: `"data_prometida" não pode ser mais de ${DIAS_MAX_PROMESSA_FUTURA} dias no futuro` }
+  }
+  return { valido: true }
+}
+
+function validarObservacao(valor) {
+  if (valor === undefined || valor === null || valor === '') return { valido: true, valorLimpo: null }
+  if (typeof valor !== 'string') return { valido: false, erro: '"observacao" precisa ser texto' }
+  const limpo = valor.trim()
+  if (limpo.length === 0) return { valido: true, valorLimpo: null }
+  if (limpo.length > TAMANHO_MAX_OBSERVACAO) {
+    return { valido: false, erro: `"observacao" excede o limite de ${TAMANHO_MAX_OBSERVACAO} caracteres` }
+  }
+  if (/[<>]/.test(limpo)) {
+    return { valido: false, erro: '"observacao" não pode conter os caracteres < ou >' }
+  }
+  return { valido: true, valorLimpo: limpo }
+}
 
 const router = Router()
 
@@ -146,6 +192,107 @@ router.get('/:id/timeline', async (req, res) => {
       limit,
       eventos: eventos.map(serializarEventoTimeline),
     })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// GET /api/financeiro/:id/promessa — promessa ativa atual do título, ou null.
+// Somente leitura.
+router.get('/:id/promessa', async (req, res) => {
+  try {
+    const { data: conta, error: erroConta } = await supabase
+      .from('contas_financeiras')
+      .select('id')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroConta) throw erroConta
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+
+    const promessa = await promessaAtivaPara(req.params.id)
+    res.json({ promessa })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// POST /api/financeiro/:id/promessa — registra promessa de pagamento pro
+// título (data + observação opcional, sem valor parcial — sempre o saldo
+// devedor atual do título). adminOnly: é mutation financeira/operacional,
+// mesmo padrão de restrição de POST/estorno já usado neste arquivo.
+//
+// Se já existir promessa ativa: 409 por padrão (ação explícita e auditável,
+// não substitui silenciosamente) — só substitui se o operador mandar
+// `substituir: true` explicitamente no corpo, e nesse caso reusa
+// registrarPromessa() (que já cancela a anterior e emite PROMESSA_SUBSTITUIDA
+// — lógica existente, não duplicada aqui).
+router.post('/:id/promessa', adminOnly, async (req, res) => {
+  try {
+    const { data: conta, error: erroConta } = await supabase
+      .from('contas_financeiras')
+      .select('id, pessoa_nome, telefone_cobranca, valor, valor_pago')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroConta) throw erroConta
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+
+    const status = await statusQuitacaoTitulo(req.params.id)
+    if (status.quitado) {
+      return res.status(409).json({ erro: 'Título não pode receber promessa neste estado', motivo: status.motivo })
+    }
+
+    const validacaoData = validarDataPrometida(req.body?.data_prometida)
+    if (!validacaoData.valido) return res.status(400).json({ erro: validacaoData.erro })
+
+    const validacaoObs = validarObservacao(req.body?.observacao)
+    if (!validacaoObs.valido) return res.status(400).json({ erro: validacaoObs.erro })
+
+    const existente = await promessaAtivaPara(req.params.id)
+    if (existente && req.body?.substituir !== true) {
+      return res.status(409).json({
+        erro: 'Já existe promessa ativa para este título — envie "substituir": true pra cancelar a anterior e registrar a nova',
+        promessa_existente: existente,
+      })
+    }
+
+    const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
+    const promessa = await registrarPromessa({
+      contasFinanceirasId: req.params.id,
+      clienteNome: conta.pessoa_nome,
+      clienteTelefone: conta.telefone_cobranca,
+      valor: saldo,
+      promisedDate: req.body.data_prometida,
+      origem: 'HUMAN',
+      notes: validacaoObs.valorLimpo,
+    })
+
+    res.status(existente ? 200 : 201).json({ promessa })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// POST /api/financeiro/:id/promessa/cancelar — cancela a promessa ativa sem
+// registrar uma nova (diferente de "substituir" acima). Não usa DELETE —
+// nunca apaga histórico físico, só muda status e registra evento na
+// timeline. adminOnly, mesmo motivo do POST acima.
+router.post('/:id/promessa/cancelar', adminOnly, async (req, res) => {
+  try {
+    const { data: conta, error: erroConta } = await supabase
+      .from('contas_financeiras')
+      .select('id')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroConta) throw erroConta
+    if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
+
+    const validacaoObs = validarObservacao(req.body?.motivo)
+    if (!validacaoObs.valido) return res.status(400).json({ erro: validacaoObs.erro?.replace('observacao', 'motivo') })
+
+    const cancelada = await cancelarPromessaAtiva(req.params.id, { origem: 'HUMAN', motivo: validacaoObs.valorLimpo })
+    if (!cancelada) return res.status(404).json({ erro: 'Nenhuma promessa ativa para cancelar' })
+
+    res.json({ promessa: cancelada })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

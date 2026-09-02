@@ -74,6 +74,7 @@ const LABELS_EVENTO = Object.freeze({
   PROMESSA_CUMPRIDA: 'Promessa cumprida',
   PROMESSA_QUEBRADA: 'Promessa quebrada',
   PROMESSA_SUBSTITUIDA: 'Promessa substituída',
+  PROMESSA_CANCELADA: 'Promessa cancelada',
 })
 
 // Allowlist (nunca denylist) de campos de `dados` seguros pra sair pela API
