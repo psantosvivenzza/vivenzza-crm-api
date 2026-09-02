@@ -43,6 +43,7 @@ import avaliacoesRouter from './routes/avaliacoes.js'
 import avaliacoesAdminRouter from './routes/avaliacoes-admin.js'
 import googleReviewsRouter from './routes/google-reviews.js'
 import agingRouter from './routes/aging.js'
+import dashboardRecuperacaoRouter from './routes/dashboard-recuperacao.js'
 import cobrancasRouter from './routes/cobrancas.js'
 import notificationsRouter from './routes/notifications.js'
 import cron from 'node-cron'
@@ -171,6 +172,10 @@ app.use('/api/notas-entrada', auth, notasEntradaRouter)
 // GET /:id) intercepta "/aging" como se fosse um id de conta, e a Postgres
 // rejeita "aging" como uuid inválido antes da requisição chegar no agingRouter.
 app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
+// Mesmo motivo do aging acima — precisa vir ANTES de '/api/financeiro' pra
+// "dashboard-recuperacao" não ser interceptado por financeiroRouter (GET /:id)
+// como se fosse um uuid de conta.
+app.use('/api/financeiro/dashboard-recuperacao', auth, adminOnly, dashboardRecuperacaoRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/nfe-entradas', auth, nfeEntradasRouter)
