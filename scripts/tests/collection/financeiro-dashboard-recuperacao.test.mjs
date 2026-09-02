@@ -85,10 +85,16 @@ test('GET /api/financeiro/dashboard-recuperacao', async (t) => {
     assert.equal(status, 200)
     assert.equal(body.periodo.chave, 'mes')
     assert.equal(body.periodo.timezone, 'America/Sao_Paulo')
-    for (const grupo of ['saldo', 'aging', 'recuperacao', 'promessas', 'contatos', 'cobranca']) {
+    for (const grupo of ['saldo', 'aging', 'recebimentos', 'promessas', 'contatos', 'cobranca']) {
       assert.ok(body[grupo], `grupo "${grupo}" ausente na resposta`)
     }
     assert.ok(Array.isArray(body.nao_implementados))
+    assert.ok(!('valor_recuperado_periodo' in body.recebimentos), '"valor_recuperado" não é um KPI causal válido nesta base — não pode existir no shape')
+    assert.ok(!('recuperacao' in body), 'o grupo antigo "recuperacao" (causal) foi renomeado pra "recebimentos" (factual)')
+    assert.ok(
+      body.nao_implementados.some((n) => n.kpi === 'valor_recuperado'),
+      'valor_recuperado precisa SEMPRE aparecer em nao_implementados (independente do motor de WhatsApp) — não há atribuição confiável entre baixa e cobrança em nenhum cenário',
+    )
   })
 
   await t.test('3b. período inválido cai no default (mes), nunca quebra', async () => {
@@ -248,14 +254,38 @@ test('GET /api/financeiro/dashboard-recuperacao', async (t) => {
     await supabase.from('contas_financeiras').update({ status: 'cancelada' }).in('id', [contaBloqueada.id, contaLivre.id])
   })
 
-  await t.test('14. recebido/recuperado no período: baixa ativa soma em "recebido"; só a paga DEPOIS do vencimento soma em "recuperado"', async () => {
-    const antes = (await chamar('?periodo=hoje')).body.recuperacao
+  await t.test('13b. cobrança elegível: título com PROMESSA ATIVA não entra em titulos_em_cobranca (dispatchEngine.js pausa o disparo — "silêncio inteligente")', async () => {
+    const antes = (await chamar('')).body.cobranca
 
-    // Pago em dia (vencimento é hoje, pagamento é hoje) — conta em "recebido", não em "recuperado".
+    const contaComPromessa = await criarContaDeTeste(supabase, { status: 'vencida' })
+    await supabase.from('collection_promises').insert({
+      contas_financeiras_id: contaComPromessa.id, cliente_nome: 'Teste', cliente_telefone: contaComPromessa.telefone_cobranca,
+      valor: 100, promised_date: diasFuturoISO(5), origem: 'HUMAN', status: 'ativa',
+    })
+
+    const contaSemPromessa = await criarContaDeTeste(supabase, { status: 'vencida' })
+
+    const depois = (await chamar('')).body.cobranca
+    assert.equal(depois.titulos_em_cobranca - antes.titulos_em_cobranca, 1, 'só a conta SEM promessa ativa soma — a que está em "silêncio inteligente" fica de fora, como o motor real de disparo trata')
+    assert.equal(depois.clientes_em_cobranca - antes.clientes_em_cobranca, 1)
+
+    // A promessa ativa em si continua contando normalmente no snapshot de promessas — são métricas diferentes.
+    const promessas = (await chamar('')).body.promessas
+    assert.ok(promessas.ativas >= 1)
+
+    await supabase.from('collection_promises').update({ status: 'cancelada', cancelled_at: new Date().toISOString() }).eq('contas_financeiras_id', contaComPromessa.id)
+    await supabase.from('contas_financeiras').update({ status: 'cancelada' }).in('id', [contaComPromessa.id, contaSemPromessa.id])
+  })
+
+  await t.test('14. recebido no período: baixa ativa soma; estornada nunca soma; NENHUMA atribuição causal "recuperado pela cobrança" é inventada', async () => {
+    const antes = (await chamar('?periodo=hoje')).body.recebimentos
+
+    // Pago em dia (vencimento é hoje, pagamento é hoje) — conta em "recebido", sem faixa de atraso.
     const contaEmDia = await criarContaDeTeste(supabase, { status: 'aberta', valor: 200, vencimento: hojeBrtISO() })
     await supabase.from('baixas_financeiras').insert({ conta_financeira_id: contaEmDia.id, valor_baixado: 200, data_pagamento: hojeBrtISO(), status: 'ativa', origem: 'manual' })
 
-    // Pago com atraso de 10 dias — conta nos dois, e cai na faixa 8_15 de recuperação.
+    // Pago com atraso de 10 dias — soma em "recebido" e cai na faixa 8_15 (fato: quanto foi recebido
+    // enquanto o título estava vencido — NUNCA uma alegação de que a cobrança causou o pagamento).
     const contaAtrasada = await criarContaDeTeste(supabase, { status: 'aberta', valor: 300, vencimento: diasAtrasISO(10) })
     await supabase.from('baixas_financeiras').insert({ conta_financeira_id: contaAtrasada.id, valor_baixado: 300, data_pagamento: hojeBrtISO(), status: 'ativa', origem: 'manual' })
 
@@ -263,10 +293,15 @@ test('GET /api/financeiro/dashboard-recuperacao', async (t) => {
     const contaEstornada = await criarContaDeTeste(supabase, { status: 'aberta', valor: 999, vencimento: hojeBrtISO() })
     await supabase.from('baixas_financeiras').insert({ conta_financeira_id: contaEstornada.id, valor_baixado: 999, data_pagamento: hojeBrtISO(), status: 'estornada', origem: 'manual' })
 
-    const depois = (await chamar('?periodo=hoje')).body.recuperacao
+    const { body } = await chamar('?periodo=hoje')
+    const depois = body.recebimentos
     assert.equal(round2(depois.recebido_periodo - antes.recebido_periodo), 500, '200 (em dia) + 300 (atrasada) — a estornada (999) nunca soma')
-    assert.equal(round2(depois.valor_recuperado_periodo - antes.valor_recuperado_periodo), 300, 'só a paga depois do vencimento conta como "recuperado"')
-    assert.equal(round2(depois.recuperado_por_faixa_dias_atraso['8_15'] - antes.recuperado_por_faixa_dias_atraso['8_15']), 300)
+    assert.equal(round2(depois.recebido_por_faixa_dias_atraso['8_15'] - antes.recebido_por_faixa_dias_atraso['8_15']), 300, 'faixa é factual (dias de atraso no pagamento), não uma métrica de causalidade')
+
+    // A ausência de atribuição confiável nunca "vira" recuperado por omissão —
+    // continua explicitamente listada, mesmo com baixas reais no período.
+    assert.ok(!('valor_recuperado_periodo' in depois))
+    assert.ok(body.nao_implementados.some((n) => n.kpi === 'valor_recuperado'))
   })
 
   await t.test('15. performance de cobrança (motor v2): tentativas/entregas/falhas batem exatamente com collection_dispatch_attempts, purpose=internal_test é excluído, e divisão por zero é null antes de qualquer fixture', async () => {
@@ -286,9 +321,9 @@ test('GET /api/financeiro/dashboard-recuperacao', async (t) => {
     // 15b — com fixtures reais.
     const conta = await criarContaDeTeste(supabase, { status: 'vencida' })
     const dispatchReal = await inserirDispatch(supabase, conta.id, 'collection')
-    await inserirAttempt(supabase, dispatchReal.id, 1, 'delivered')
+    await inserirAttempt(supabase, dispatchReal.id, 1, 'delivered') // ACK real de entrega (aplicarAckDeEntrega, webhook Evolution)
     await inserirAttempt(supabase, dispatchReal.id, 2, 'failed')
-    await inserirAttempt(supabase, dispatchReal.id, 3, 'sent') // nem entrega nem falha — só soma em tentativas
+    await inserirAttempt(supabase, dispatchReal.id, 3, 'sent') // provider aceitou o envio, SEM ack de entrega ainda — não pode contar como "entregue"
 
     // Dispatch de homologação (internal_test) — nunca deveria aparecer nas métricas.
     const dispatchTeste = await inserirDispatch(supabase, conta.id, 'internal_test')
@@ -296,10 +331,34 @@ test('GET /api/financeiro/dashboard-recuperacao', async (t) => {
 
     const { body } = await chamar('?periodo=hoje')
     assert.equal(body.cobranca.tentativas_periodo, 3, 'purpose=internal_test não deve ser contado')
-    assert.equal(body.cobranca.entregas_confirmadas_periodo, 1)
+    assert.equal(body.cobranca.entregas_confirmadas_periodo, 1, '"sent" (provider aceitou) não vira "entregue" sem receipt real — só a linha "delivered" conta')
     assert.equal(body.cobranca.falhas_periodo, 1)
     assert.equal(body.cobranca.taxa_entrega_pct, Number(((1 / 3) * 100).toFixed(1)))
-    assert.deepEqual(body.nao_implementados, [], 'com multi_whatsapp=true todas as métricas de performance são calculáveis')
+    assert.equal(body.nao_implementados.length, 1, 'com multi_whatsapp=true, performance de cobrança é 100% calculável — só valor_recuperado (sem fonte em NENHUM cenário) continua listado')
+    assert.equal(body.nao_implementados[0].kpi, 'valor_recuperado')
+  })
+
+  await t.test('15c. performance de cobrança (motor LEGADO, multi_whatsapp=false): tentativas vêm de cobrancas_whatsapp; entregas/falhas/taxa ficam null e listadas em nao_implementados (sem fonte real nesse motor)', async () => {
+    await supabase.from('automacoes_config').update({ multi_whatsapp: false }).eq('id', 1)
+    invalidarCacheFlags()
+
+    const antes = (await chamar('?periodo=hoje')).body.cobranca.tentativas_periodo
+    await supabase.from('cobrancas_whatsapp').insert({
+      cliente_nome: 'Teste', cliente_telefone: telefoneDeTeste(), valor: 100, etapa: 1,
+      status: 'enviada', origem: 'manual', data_envio: new Date().toISOString(), mensagem_enviada: 'teste',
+    })
+
+    const { body } = await chamar('?periodo=hoje')
+    assert.equal(body.cobranca.tentativas_periodo - antes, 1, 'no motor legado, tentativas vem de cobrancas_whatsapp (única fonte existente)')
+    assert.equal(body.cobranca.entregas_confirmadas_periodo, null, 'motor legado não tem tabela de tentativa/entrega — nunca inventar um número aqui')
+    assert.equal(body.cobranca.falhas_periodo, null)
+    assert.equal(body.cobranca.taxa_entrega_pct, null)
+    for (const kpi of ['entregas_confirmadas_periodo', 'falhas_periodo', 'taxa_entrega_pct']) {
+      assert.ok(body.nao_implementados.some((n) => n.kpi === kpi), `${kpi} precisa estar em nao_implementados com multi_whatsapp=false`)
+    }
+
+    await supabase.from('automacoes_config').update({ multi_whatsapp: true }).eq('id', 1)
+    invalidarCacheFlags()
   })
 
   await t.test('16. segurança: resposta agregada nunca expõe telefone/UUID de fixtures usadas nos testes', async () => {

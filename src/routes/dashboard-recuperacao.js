@@ -4,6 +4,12 @@
 // Reaproveita as mesmas fontes de verdade já estabelecidas no módulo
 // (statusQuitacaoTitulo/aging.js para "em aberto", providerAttemptCounter.js/
 // doNotContactGuard.js para cobrança/contato) em vez de inventar novas.
+//
+// Revisão semântica 2026-09-02 — auditoria explícita encontrou uma
+// atribuição causal indevida (baixa tardia "= recuperada pela cobrança") e
+// uma exclusão faltando em "em cobrança" (títulos com promessa ativa não
+// entram na régua — ver dispatchEngine.js). Corrigido abaixo, com o raciocínio
+// documentado em cada bloco pra não repetir o erro numa próxima revisão.
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { registroAindaValido } from '../lib/collection/doNotContactGuard.js'
@@ -128,38 +134,62 @@ router.get('/', async (req, res) => {
     const registrosDnc = await buscarTodasAsLinhas('collection_do_not_contact', 'cliente_telefone, expira_em')
     const telefonesBloqueados = new Set(registrosDnc.filter(registroAindaValido).map((r) => r.cliente_telefone))
 
-    // ---- G — títulos/clientes atualmente "em cobrança": em aberto, com
-    // telefone cadastrado, fora de revisão financeira e fora de bloqueio de
-    // contato — o universo que o motor de disparo de fato alcança hoje. ----
-    let titulosElegiveisCobranca = 0
-    const clientesElegiveis = new Set()
-    for (const c of contasAbertas) {
-      if (!c.em_revisao_financeira && c.telefone_cobranca && !telefonesBloqueados.has(c.telefone_cobranca)) {
-        titulosElegiveisCobranca++
-        clientesElegiveis.add(c.telefone_cobranca)
-      }
-    }
-
-    // ---- I/J/K — promessas. "Ativas" é sempre snapshot atual (não tem
-    // sentido de período); cumpridas/quebradas são contadas pela data real da
-    // transição (fulfilled_at/broken_at) dentro do período escolhido. ----
-    const [{ count: promessasAtivas, error: erroAtivas }, { count: promessasCumpridas, error: erroCumpridas }, { count: promessasQuebradas, error: erroQuebradas }] =
+    // ---- I/J/K — promessas. "Ativas" é sempre SNAPSHOT do estado atual (não
+    // tem sentido de período — uma promessa ou está ativa agora, ou não
+    // está); "cumpridas"/"quebradas" são FLUXO — contadas pela data real da
+    // transição (fulfilled_at/broken_at) que caiu dentro do período
+    // escolhido. Nunca misturar os dois sentidos numa mesma leitura. ----
+    const [{ data: promessasAtivasLinhas, count: promessasAtivas, error: erroAtivas }, { count: promessasCumpridas, error: erroCumpridas }, { count: promessasQuebradas, error: erroQuebradas }] =
       await Promise.all([
-        supabase.from('collection_promises').select('id', { count: 'exact', head: true }).eq('status', 'ativa'),
+        supabase.from('collection_promises').select('contas_financeiras_id', { count: 'exact' }).eq('status', 'ativa'),
         supabase.from('collection_promises').select('id', { count: 'exact', head: true }).eq('status', 'cumprida').gte('fulfilled_at', periodo.data_inicio),
         supabase.from('collection_promises').select('id', { count: 'exact', head: true }).eq('status', 'quebrada').gte('broken_at', periodo.data_inicio),
       ])
     if (erroAtivas) throw erroAtivas
     if (erroCumpridas) throw erroCumpridas
     if (erroQuebradas) throw erroQuebradas
+    const contasComPromessaAtiva = new Set((promessasAtivasLinhas ?? []).map((p) => p.contas_financeiras_id))
 
-    // ---- E/H/Q — recebido/recuperado no período. Fonte: baixas_financeiras
-    // com status='ativa' (nunca 'estornada') — é literalmente o mesmo
-    // predicado que fn_baixar_titulo/fn_estornar_baixa usam pra recalcular
-    // valor_pago da conta, a MESMA verdade financeira, não uma aproximação.
-    // "Recebido" = toda baixa ativa no período. "Recuperado" = subconjunto
-    // cujo pagamento ocorreu DEPOIS do vencimento do título — recuperação de
-    // inadimplência de fato, não pagamento em dia. ----
+    // ---- G — títulos/clientes atualmente "em cobrança": em aberto, com
+    // telefone cadastrado, fora de revisão financeira, fora de bloqueio de
+    // contato E fora de "silêncio inteligente" — dispatchEngine.js consulta
+    // promessaAtivaPara() ANTES de qualquer envio e pula o título
+    // (status:'skipped', motivo:'promessa_ativa') quando há promessa ativa.
+    // Um título com promessa ativa NÃO está sendo contatado agora — contá-lo
+    // aqui inflaria a métrica com títulos pausados, não elegíveis de fato. ----
+    let titulosElegiveisCobranca = 0
+    const clientesElegiveis = new Set()
+    for (const c of contasAbertas) {
+      if (
+        !c.em_revisao_financeira &&
+        c.telefone_cobranca &&
+        !telefonesBloqueados.has(c.telefone_cobranca) &&
+        !contasComPromessaAtiva.has(c.id)
+      ) {
+        titulosElegiveisCobranca++
+        clientesElegiveis.add(c.telefone_cobranca)
+      }
+    }
+
+    // ---- E/Q — recebido no período (+ quebra por faixa de atraso NO
+    // MOMENTO DO PAGAMENTO). Fonte: baixas_financeiras com status='ativa'
+    // (nunca 'estornada') — é literalmente o mesmo predicado que
+    // fn_baixar_titulo/fn_estornar_baixa usam pra recalcular valor_pago da
+    // conta, a MESMA verdade financeira, não uma aproximação; período pela
+    // data real da baixa (data_pagamento), nunca por status textual.
+    //
+    // NÃO existe "valor recuperado (pela cobrança)" aqui — auditoria
+    // 2026-09-02 confirmou que não há vínculo estrutural entre
+    // baixas_financeiras e collection_dispatches/collection_promises (sem FK,
+    // sem coluna própria), e o job cobranca-whatsapp.js dispara pra
+    // essencialmente TODO título vencido como política de rotina — então
+    // "existia um dispatch antes desta baixa" seria verdade pra quase
+    // qualquer pagamento tardio, não discrimina "pago por causa da cobrança"
+    // de "pago tarde por outro motivo". Sem atribuição confiável, chamar isso
+    // de "recuperado" seria inventar causalidade — por isso a quebra abaixo é
+    // só uma faixa de RECEBIMENTOS por atraso (dado factual: quanto foi
+    // recebido enquanto o título estava com N dias de atraso), nunca uma
+    // alegação de causa. Ver `nao_implementados` na resposta. ----
     const fimExclusivo = adicionarDiasISO(periodo.data_fim, 1)
     const baixasPeriodo = await buscarTodasAsLinhas(
       'baixas_financeiras',
@@ -168,8 +198,7 @@ router.get('/', async (req, res) => {
     )
 
     let recebidoPeriodo = 0
-    let recuperadoPeriodo = 0
-    const recuperadoPorFaixa = faixasVazias()
+    const recebidoPorFaixa = faixasVazias()
     if (baixasPeriodo.length) {
       const idsContas = [...new Set(baixasPeriodo.map((b) => b.conta_financeira_id))]
       const contaPorId = new Map()
@@ -186,28 +215,42 @@ router.get('/', async (req, res) => {
         const valor = Number(b.valor_baixado || 0)
         recebidoPeriodo += valor
         const diasNoPagamento = Math.floor((new Date(b.data_pagamento) - new Date(conta.vencimento)) / UM_DIA_MS)
-        if (diasNoPagamento > 0) {
-          recuperadoPeriodo += valor
-          const faixa = faixaDiasAtraso(diasNoPagamento)
-          if (faixa) recuperadoPorFaixa[faixa] += valor
-        }
+        const faixa = faixaDiasAtraso(diasNoPagamento) // null quando pago em dia — não entra em nenhuma faixa
+        if (faixa) recebidoPorFaixa[faixa] += valor
       }
     }
 
     // ---- M/N/O/P — performance de cobrança. Fonte EXCLUSIVA (nunca soma com
     // cobrancas_whatsapp — o mesmo envio real do motor v2 grava as duas
     // tabelas pelo mesmo evento, ver providerAttemptCounter.js): motor v2
-    // (multi_whatsapp=true) → collection_dispatch_attempts, purpose='collection'
-    // (exclui internal_test). Motor legado não tem tabela de tentativa (gap
-    // conhecido e já documentado em providerAttemptCounter.js) — sem fonte
-    // confiável pra entregas/falhas/taxa nesse caso; reportado como NÃO
-    // IMPLEMENTADO em vez de inventado. ----
+    // (multi_whatsapp=true, automacoes_config.multi_whatsapp — não existe
+    // nem é usada nenhuma flag "collection_engine_v2") → collection_dispatch_attempts,
+    // purpose='collection' (exclui internal_test).
+    //
+    // "Entrega" aqui é REAL, não "provider aceitou o envio": status='sent'
+    // só significa que a Evolution aceitou a chamada de envio — 'delivered'/
+    // 'read' só são escritos por aplicarAckDeEntrega() (dispatchEngine.js),
+    // chamada exclusivamente a partir de um webhook real de ACK da Evolution
+    // (messages.update, códigos 3=DELIVERY_ACK/4=READ, ver webhook-handler.js
+    // e evolutionAdapter.js/MAPA_STATUS_EVOLUTION) — nunca inferida a partir
+    // do sucesso da chamada de envio. Por isso 'sent'/'sending' NUNCA contam
+    // como entrega abaixo, só 'delivered'/'read'. (Os contadores
+    // whatsapp_instances.delivered_today/read_today são mortos — nunca
+    // incrementados em lugar nenhum do código — e por isso deliberadamente
+    // NÃO usados aqui.)
+    //
+    // Motor legado não tem tabela de tentativa (gap conhecido e já
+    // documentado em providerAttemptCounter.js) — sem fonte confiável pra
+    // entregas/falhas/taxa nesse caso; reportado como NÃO IMPLEMENTADO em vez
+    // de inventado. ----
     const config = await obterConfigCobranca()
     let tentativas = 0
     let entregas = null
     let falhas = null
     let taxaEntrega = null
-    const naoImplementados = []
+    const naoImplementados = [
+      { kpi: 'valor_recuperado', motivo: 'Não há atribuição confiável entre uma baixa e uma ação de cobrança: baixas_financeiras não tem vínculo estrutural (FK/coluna) com collection_dispatches/collection_promises, e o job de cobrança dispara para essencialmente todo título vencido como rotina — a mera existência de um dispatch antes do pagamento não distingue "pago por causa da cobrança" de "pago tarde por outro motivo". Ver recebimentos.recebido_por_faixa_dias_atraso para a quebra factual (sem causalidade) por atraso.' },
+    ]
 
     if (config.multi_whatsapp === true) {
       // Brasil não observa horário de verão desde 2019 — BRT é sempre -03:00,
@@ -247,10 +290,9 @@ router.get('/', async (req, res) => {
         inadimplencia_pct: totalAberto > 0 ? Number(((totalVencido / totalAberto) * 100).toFixed(1)) : null,
       },
       aging: mapRound2(aging),
-      recuperacao: {
+      recebimentos: {
         recebido_periodo: round2(recebidoPeriodo),
-        valor_recuperado_periodo: round2(recuperadoPeriodo),
-        recuperado_por_faixa_dias_atraso: mapRound2(recuperadoPorFaixa),
+        recebido_por_faixa_dias_atraso: mapRound2(recebidoPorFaixa),
       },
       promessas: {
         ativas: promessasAtivas ?? 0,
