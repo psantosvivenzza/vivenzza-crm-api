@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { timelineDoTituloPaginada, serializarEventoTimeline } from '../lib/collection/timeline.js'
 import { adminOnly } from '../middleware/auth.js'
 import { statusQuitacaoTitulo } from '../lib/collection/paymentGuard.js'
-import { promessaAtivaPara, registrarPromessa, cancelarPromessaAtiva } from '../lib/collection/promises.js'
+import { promessaAtivaPara, registrarPromessa, cancelarPromessaAtiva, ERRO_PROMESSA_ATIVA_CONCORRENTE } from '../lib/collection/promises.js'
 import { hojeBrtISO } from '../lib/collection/collectionContactPolicy.js'
 
 const DIAS_MAX_PROMESSA_FUTURA = 90
@@ -256,15 +256,27 @@ router.post('/:id/promessa', adminOnly, async (req, res) => {
     }
 
     const saldo = Number(conta.valor || 0) - Number(conta.valor_pago || 0)
-    const promessa = await registrarPromessa({
-      contasFinanceirasId: req.params.id,
-      clienteNome: conta.pessoa_nome,
-      clienteTelefone: conta.telefone_cobranca,
-      valor: saldo,
-      promisedDate: req.body.data_prometida,
-      origem: 'HUMAN',
-      notes: validacaoObs.valorLimpo,
-    })
+    let promessa
+    try {
+      promessa = await registrarPromessa({
+        contasFinanceirasId: req.params.id,
+        clienteNome: conta.pessoa_nome,
+        clienteTelefone: conta.telefone_cobranca,
+        valor: saldo,
+        promisedDate: req.body.data_prometida,
+        origem: 'HUMAN',
+        notes: validacaoObs.valorLimpo,
+      })
+    } catch (erroRegistro) {
+      // Corrida real: outra requisição concorrente já inseriu a promessa
+      // ativa entre a checagem de `existente` acima e o INSERT — o índice
+      // único do banco pegou, não um bug. 409 coerente, nunca 500 bruto.
+      if (erroRegistro.code === ERRO_PROMESSA_ATIVA_CONCORRENTE) {
+        const atual = await promessaAtivaPara(req.params.id)
+        return res.status(409).json({ erro: erroRegistro.message, promessa_existente: atual })
+      }
+      throw erroRegistro
+    }
 
     res.status(existente ? 200 : 201).json({ promessa })
   } catch (err) {

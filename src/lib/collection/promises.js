@@ -15,10 +15,26 @@ export async function promessaAtivaPara(contasFinanceirasId) {
   return data
 }
 
+// Código de erro Postgres pra unique_violation — usado pra reconhecer quando
+// o índice único parcial (idx_collection_promises_unica_ativa) bloqueou um
+// INSERT concorrente, e distinguir isso de qualquer outro erro real de banco.
+export const ERRO_PROMESSA_ATIVA_CONCORRENTE = 'PROMESSA_ATIVA_CONCORRENTE'
+
 // Registrar uma nova promessa cancela automaticamente qualquer promessa ativa
 // anterior para o mesmo título (nunca duas promessas ativas coexistindo — reforçado
 // também pelo índice único parcial no banco). `origem` é AUTOMATION/AI/HUMAN,
 // nunca inventado pela IA sem confirmação explícita de data+valor (ver AI_AGENT.md).
+//
+// Concorrência (hardening 2026-09-02, revisão da PR #65): o cancelamento da
+// promessa anterior é condicional (WHERE id=X AND status='ativa') — igual à
+// disciplina de marcarPromessaCumprida/marcarPromessaQuebrada/
+// cancelarPromessaAtiva — então PROMESSA_SUBSTITUIDA só é emitido quando a
+// transição realmente aconteceu (não quando outra chamada concorrente já
+// tinha cancelado/resolvido a mesma promessa primeiro). Se o INSERT final
+// esbarrar no índice único (outra chamada concorrente inseriu a ativa
+// primeiro), lança um erro reconhecível (code=ERRO_PROMESSA_ATIVA_CONCORRENTE)
+// em vez de deixar o erro bruto do Postgres vazar — quem chama decide o
+// HTTP/mensagem certos (ver POST /:id/promessa em financeiro.js).
 export async function registrarPromessa({ contasFinanceirasId, clienteNome, clienteTelefone, valor, promisedDate, origem, notes = null }) {
   if (!['AUTOMATION', 'AI', 'HUMAN'].includes(origem)) {
     throw new Error(`Origem de promessa inválida: ${origem}`)
@@ -29,17 +45,23 @@ export async function registrarPromessa({ contasFinanceirasId, clienteNome, clie
 
   const anterior = await promessaAtivaPara(contasFinanceirasId)
   if (anterior) {
-    await supabase
+    const { data: canceladaAnterior, error: erroCancelar } = await supabase
       .from('collection_promises')
       .update({ status: 'cancelada', cancelled_at: new Date().toISOString() })
       .eq('id', anterior.id)
-    await registrarEvento({
-      contasFinanceirasId,
-      clienteTelefone,
-      tipo: 'PROMESSA_SUBSTITUIDA',
-      origem,
-      descricao: `Promessa anterior de ${anterior.promised_date} substituída por nova negociação`,
-    })
+      .eq('status', 'ativa')
+      .select()
+      .maybeSingle()
+    if (erroCancelar) throw erroCancelar
+    if (canceladaAnterior) {
+      await registrarEvento({
+        contasFinanceirasId,
+        clienteTelefone,
+        tipo: 'PROMESSA_SUBSTITUIDA',
+        origem,
+        descricao: `Promessa anterior de ${anterior.promised_date} substituída por nova negociação`,
+      })
+    }
   }
 
   const { data, error } = await supabase
@@ -55,7 +77,14 @@ export async function registrarPromessa({ contasFinanceirasId, clienteNome, clie
     })
     .select()
     .single()
-  if (error) throw error
+  if (error) {
+    if (error.code === '23505') {
+      const conflito = new Error('Já existe uma promessa ativa para este título (criada por outra requisição concorrente)')
+      conflito.code = ERRO_PROMESSA_ATIVA_CONCORRENTE
+      throw conflito
+    }
+    throw error
+  }
 
   await registrarEvento({
     contasFinanceirasId,

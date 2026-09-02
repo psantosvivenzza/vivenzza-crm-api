@@ -103,6 +103,23 @@ test('GET/POST /api/financeiro/:id/promessa + cancelar', async (t) => {
     assert.equal(status, 400)
   })
 
+  await t.test('4d. limite de "hoje" respeita fuso America/Sao_Paulo, não UTC/horário local do processo — caso próximo da meia-noite BRT', async (subT) => {
+    // 02:00 UTC = 23:00 BRT do dia ANTERIOR (BRT = UTC-3). Nesse instante,
+    // "hoje" em UTC já virou o dia seguinte, mas "hoje" em BRT ainda é o dia
+    // anterior — validarDataPrometida() usa hojeBrtISO(), não Date local.
+    subT.mock.timers.enable({ apis: ['Date'], now: new Date('2026-09-10T02:00:00Z') })
+    const hojeBrt = '2026-09-09'
+    const ontemBrt = '2026-09-08'
+
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const rHoje = await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: hojeBrt } })
+    assert.equal(rHoje.status, 201, '"hoje" em BRT precisa ser aceito mesmo com o relógio UTC do processo já no dia seguinte')
+
+    const conta2 = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const rOntem = await chamar('POST', `/api/financeiro/${conta2.id}/promessa`, { body: { data_prometida: ontemBrt } })
+    assert.equal(rOntem.status, 400, '"ontem" em BRT precisa continuar bloqueado como data passada')
+  })
+
   await t.test('5. título inexistente -> 404', async () => {
     const { status } = await chamar('POST', '/api/financeiro/00000000-0000-0000-0000-000000000000/promessa', { body: { data_prometida: AMANHA } })
     assert.equal(status, 404)
@@ -188,35 +205,145 @@ test('GET/POST /api/financeiro/:id/promessa + cancelar', async (t) => {
     assert.equal(status, 404)
   })
 
-  await t.test('12. concorrência: 2 POSTs simultâneos pro mesmo título -> no máximo 1 promessa ativa no final', async () => {
+  await t.test('11c. cancelamento idempotente: repetir cancelar sobre a mesma promessa já cancelada -> 2ª tentativa 404 coerente, sem 2º evento PROMESSA_CANCELADA', async () => {
     const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
-    await Promise.all([
+    await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } })
+    const r1 = await chamar('POST', `/api/financeiro/${conta.id}/promessa/cancelar`)
+    assert.equal(r1.status, 200)
+    const r2 = await chamar('POST', `/api/financeiro/${conta.id}/promessa/cancelar`)
+    assert.equal(r2.status, 404, 'a 2ª tentativa não encontra mais promessa ativa — resposta coerente, nunca finge sucesso de novo')
+
+    const eventos = await timelineDoTitulo(conta.id)
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_CANCELADA').length, 1, 'repetir o cancelamento não pode gerar um 2º evento falso')
+  })
+
+  await t.test('12A. concorrência — duas CRIAÇÕES simultâneas sem promessa anterior: 1 vence (201), 1 perde com 409 coerente (nunca 500), no máximo 1 ativa, timeline sem evento falso', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const [r1, r2] = await Promise.all([
       chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } }),
       chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } }),
     ])
+    const respostas = [r1, r2]
+    const vencedoras = respostas.filter((r) => r.status === 201)
+    const perdedoras = respostas.filter((r) => r.status !== 201)
+    assert.equal(vencedoras.length, 1, 'exatamente 1 das 2 chamadas deveria criar de fato (201)')
+    assert.equal(perdedoras.length, 1)
+    assert.equal(perdedoras[0].status, 409, 'a perdedora precisa de uma resposta coerente (409), nunca 500 bruto de constraint')
+    assert.ok(perdedoras[0].body.erro)
+
     const { data: ativas } = await supabase.from('collection_promises').select('id').eq('contas_financeiras_id', conta.id).eq('status', 'ativa')
-    assert.equal(ativas.length, 1, 'índice único parcial no banco garante no máximo 1 ativa mesmo sob concorrência real')
+    assert.equal(ativas.length, 1, 'no máximo 1 promessa ativa no final')
+
+    const eventos = await timelineDoTitulo(conta.id)
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_PAGAMENTO').length, 1, 'PROMESSA_PAGAMENTO só pela chamada que realmente criou — a perdedora não registra evento falso de sucesso')
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_SUBSTITUIDA').length, 0, 'não havia promessa anterior — não pode ter substituído nada')
   })
 
-  await t.test('13. timeline recebe PROMESSA_PAGAMENTO na criação', async () => {
+  await t.test('12B. concorrência — duas SUBSTITUIÇÕES simultâneas sobre a mesma promessa ativa: estado final coerente, promessa anterior cancelada no máximo 1x, PROMESSA_SUBSTITUIDA nunca duplicado', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const original = await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } })
+    assert.equal(original.status, 201)
+
+    const dataB = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10)
+    const dataC = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)
+    const [rB, rC] = await Promise.all([
+      chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: dataB, substituir: true } }),
+      chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: dataC, substituir: true } }),
+    ])
+    const respostas = [rB, rC]
+    const vencedoras = respostas.filter((r) => r.status === 200)
+    const perdedoras = respostas.filter((r) => r.status !== 200)
+    assert.equal(vencedoras.length, 1, 'exatamente 1 substituição vence de fato')
+    assert.equal(perdedoras.length, 1)
+    assert.equal(perdedoras[0].status, 409, 'a perdedora recebe 409 coerente, nunca 500')
+
+    const { data: ativas } = await supabase.from('collection_promises').select('id').eq('contas_financeiras_id', conta.id).eq('status', 'ativa')
+    assert.equal(ativas.length, 1, 'exatamente 1 ativa no final')
+
+    const { data: original_bd } = await supabase.from('collection_promises').select('status').eq('id', original.body.promessa.id).single()
+    assert.equal(original_bd.status, 'cancelada')
+
+    const eventos = await timelineDoTitulo(conta.id)
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_SUBSTITUIDA').length, 1, 'a promessa original só pode ter sido substituída UMA vez, mesmo com 2 chamadas concorrentes tentando')
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_PAGAMENTO').length, 2, '1 da promessa original + 1 da substituta vencedora — a perdedora nunca chega a registrar PROMESSA_PAGAMENTO')
+  })
+
+  await t.test('12C. concorrência — CANCELAR e SUBSTITUIR simultâneos sobre a mesma promessa ativa: estado final determinístico, evento só quando a transição correspondente realmente ocorreu', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const original = await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } })
+    assert.equal(original.status, 201)
+
+    const novaData = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10)
+    const [rCancelar, rSubstituir] = await Promise.all([
+      chamar('POST', `/api/financeiro/${conta.id}/promessa/cancelar`, {}),
+      chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: novaData, substituir: true } }),
+    ])
+
+    // Estado final determinístico: OU (a) cancelar venceu e não sobrou
+    // promessa nova (substituir não achou nada pra substituir — ver nota
+    // abaixo), OU (b) substituir vez a promessa original antes do cancelar
+    // rodar, e o cancelar então cancela a promessa NOVA (comportamento correto
+    // e esperado de "cancelar a que estiver ativa agora" — nunca um erro,
+    // nunca duas ativas).
+    const { data: ativasFinal } = await supabase.from('collection_promises').select('id, promised_date, status').eq('contas_financeiras_id', conta.id).eq('status', 'ativa')
+    assert.ok(ativasFinal.length <= 1, 'nunca mais de 1 ativa no final, não importa a ordem real de execução')
+
+    const { data: todasFinal } = await supabase.from('collection_promises').select('id, status').eq('contas_financeiras_id', conta.id)
+    const canceladas = todasFinal.filter((p) => p.status === 'cancelada')
+    assert.ok(canceladas.length >= 1, 'pelo menos a promessa original terminou cancelada, de um jeito ou de outro')
+
+    // Nunca as duas operações relatam sucesso "criando confusão" — cancelar
+    // só reporta sucesso (200) se de fato cancelou algo; se não havia nada
+    // ativo no momento exato da sua transição condicional, reporta 404, nunca
+    // finge sucesso.
+    assert.ok([200, 404].includes(rCancelar.status), `cancelar precisa responder 200 (cancelou de verdade) ou 404 (nada ativo no momento) — nunca outra coisa (recebido ${rCancelar.status})`)
+    assert.ok([200, 201, 409].includes(rSubstituir.status), `substituir precisa responder 200/201 (criou de verdade) ou 409 (perdeu a corrida) — nunca 500 (recebido ${rSubstituir.status})`)
+
+    // A quantidade de eventos de cancelamento/substituição bate exatamente
+    // com o que aconteceu de verdade no banco — nunca um evento "extra" só
+    // porque duas requisições tentaram ao mesmo tempo.
+    const eventos = await timelineDoTitulo(conta.id)
+    const totalCancelSubst = eventos.filter((e) => e.tipo === 'PROMESSA_CANCELADA').length + eventos.filter((e) => e.tipo === 'PROMESSA_SUBSTITUIDA').length
+    assert.ok(totalCancelSubst <= 1, `a promessa original só pode ter sido resolvida (cancelada OU substituída) 1 vez — encontrado ${totalCancelSubst} evento(s)`)
+  })
+
+  await t.test('13. timeline recebe exatamente 1 PROMESSA_PAGAMENTO na criação', async () => {
     const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
     await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } })
     const eventos = await timelineDoTitulo(conta.id)
-    assert.ok(eventos.some((e) => e.tipo === 'PROMESSA_PAGAMENTO'))
+    assert.equal(eventos.filter((e) => e.tipo === 'PROMESSA_PAGAMENTO').length, 1)
   })
 
-  await t.test('14. timeline recebe PROMESSA_SUBSTITUIDA na substituição e PROMESSA_CANCELADA no cancelamento explícito', async () => {
+  await t.test('14. timeline recebe PROMESSA_SUBSTITUIDA na substituição e exatamente 1 PROMESSA_CANCELADA no cancelamento explícito', async () => {
     const contaSub = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
     await chamar('POST', `/api/financeiro/${contaSub.id}/promessa`, { body: { data_prometida: AMANHA } })
     await chamar('POST', `/api/financeiro/${contaSub.id}/promessa`, { body: { data_prometida: AMANHA, substituir: true } })
     const eventosSub = await timelineDoTitulo(contaSub.id)
-    assert.ok(eventosSub.some((e) => e.tipo === 'PROMESSA_SUBSTITUIDA'))
+    assert.equal(eventosSub.filter((e) => e.tipo === 'PROMESSA_SUBSTITUIDA').length, 1)
+    assert.equal(eventosSub.filter((e) => e.tipo === 'PROMESSA_PAGAMENTO').length, 2, '1 da promessa original + 1 da substituta')
 
     const contaCancel = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
     await chamar('POST', `/api/financeiro/${contaCancel.id}/promessa`, { body: { data_prometida: AMANHA } })
     await chamar('POST', `/api/financeiro/${contaCancel.id}/promessa/cancelar`)
     const eventosCancel = await timelineDoTitulo(contaCancel.id)
-    assert.ok(eventosCancel.some((e) => e.tipo === 'PROMESSA_CANCELADA'))
+    assert.equal(eventosCancel.filter((e) => e.tipo === 'PROMESSA_CANCELADA').length, 1)
+  })
+
+  await t.test('14b. PROMESSA_CANCELADA na timeline consultável (GET /:id/timeline): label reconhecido (nunca "evento desconhecido"), metadata sem promise_id/UUID/telefone/segredo', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: AMANHA } })
+    await chamar('POST', `/api/financeiro/${conta.id}/promessa/cancelar`, { body: { motivo: 'Cliente desistiu' } })
+
+    const { status, body } = await chamar('GET', `/api/financeiro/${conta.id}/timeline`)
+    assert.equal(status, 200)
+    const evCancelado = body.eventos.find((e) => e.tipo === 'PROMESSA_CANCELADA')
+    assert.ok(evCancelado, 'PROMESSA_CANCELADA precisa aparecer na timeline consultável')
+    assert.equal(evCancelado.label, 'Promessa cancelada', 'label reconhecido, nunca cai como tipo bruto/desconhecido')
+    assert.ok(evCancelado.resumo, 'resumo (descrição legível) presente')
+    const metadataStr = JSON.stringify(evCancelado.metadata)
+    assert.ok(!('promise_id' in evCancelado.metadata), 'metadata não pode expor o UUID interno da promessa')
+    assert.doesNotMatch(metadataStr, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, 'metadata não pode conter nenhum UUID')
+    assert.doesNotMatch(metadataStr, /telefone|phone|token|secret|senha/i, 'metadata não pode expor telefone/token/segredo')
   })
 
   await t.test('15. sem auth -> 401 (GET e POST)', async () => {
