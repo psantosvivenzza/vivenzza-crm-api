@@ -35,6 +35,15 @@ indexa a documentação detalhada por domínio.
   contra o `origin/main` atual (`git fetch`), não contra memória de uma
   sessão anterior nem contra um checkout local desatualizado.
 
+## Contexto histórico / handoff
+
+Para contexto operacional e decisões acumuladas até 2026-09-03, consultar:
+
+`docs/CHATGPT_HANDOFF_2026-09-03.md`
+
+Importante: o código atual em `origin/main` e o estado real de produção
+sempre prevalecem sobre o handoff.
+
 ## Onde as coisas ficam
 
 - `docs/claude-context/` — este índice de contexto (arquitetura, decisões,
