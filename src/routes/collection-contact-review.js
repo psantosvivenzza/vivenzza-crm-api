@@ -20,6 +20,17 @@
 //   resolvido_automaticamente = telefone mudou E o novo não tem DNC próprio
 //   possivelmente_corrigido   = telefone mudou mas o novo também tem alguma
 //                                linha em DNC (precisa checar manualmente)
+//
+// 2026-09-02 — camada operacional ADITIVA sobre o status derivado acima:
+// collection_contact_review_actions (append-only, nunca UPDATE/DELETE)
+// registra que um operador olhou o caso — nunca altera telefone_cobranca,
+// nunca escreve/apaga collection_do_not_contact, nunca dispara WhatsApp.
+// `status_operacional` combina os dois: resolvido_automaticamente sempre
+// vence (é verdade verificada pelo sistema); senão, a última ação manual
+// só conta se for MAIS RECENTE que a última falha do cliente (uma falha
+// nova depois da revisão invalida a revisão — o caso volta a pendente/
+// possivelmente_corrigido sozinho, sem precisar de outra ação manual pra
+// "reabrir").
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { normalizarTelefone } from '../lib/telefone.js'
@@ -28,6 +39,8 @@ const router = Router()
 const PAGE_SUPABASE = 1000
 const MOTIVO_NUMERO_INVALIDO = 'numero_invalido_whatsapp'
 const TRINTA_DIAS_MS = 30 * 24 * 60 * 60 * 1000
+const ACOES_VALIDAS = ['revisado', 'sem_contato_valido', 'aguardando_atualizacao_origem']
+const TAMANHO_MAX_MOTIVO = 500
 
 async function buscarTudoPaginado(query) {
   const linhas = []
@@ -51,6 +64,39 @@ async function buscarContasElegiveis() {
       .in('status', ['aberta', 'vencida', 'pago_parcial'])
       .eq('em_revisao_financeira', false)
   )
+}
+
+// Última ação registrada por cliente (append-only — pega só a mais recente
+// por codigo_cliente via reduce em memória, nunca UPDATE/DELETE na tabela).
+// Nome do operador via join manual em usuarios (mesmo padrão de
+// estornos_financeiros) — nunca expõe o UUID de registrado_por na resposta.
+async function buscarUltimasAcoes(codigosClientes) {
+  if (!codigosClientes.length) return new Map()
+  const linhas = await buscarTudoPaginado(
+    supabase.from('collection_contact_review_actions').select('codigo_cliente, acao, motivo, registrado_por, registrado_em').in('codigo_cliente', codigosClientes).order('registrado_em', { ascending: false })
+  )
+  const idsUsuarios = [...new Set(linhas.map((l) => l.registrado_por))]
+  const { data: usuarios, error } = idsUsuarios.length ? await supabase.from('usuarios').select('id, nome').in('id', idsUsuarios) : { data: [] }
+  if (error) throw error
+  const nomePorId = new Map((usuarios ?? []).map((u) => [u.id, u.nome]))
+
+  const porCliente = new Map()
+  for (const l of linhas) {
+    if (porCliente.has(l.codigo_cliente)) continue // já tem a mais recente (linhas vêm ordenadas desc)
+    porCliente.set(l.codigo_cliente, { ...l, registrado_por_nome: nomePorId.get(l.registrado_por) ?? null })
+  }
+  return porCliente
+}
+
+// resolvido_automaticamente sempre vence (verdade verificada pelo sistema,
+// mais confiável que uma nota manual). Senão, a ação manual só é "atual" se
+// for mais recente que a última falha do cliente — uma falha nova depois da
+// revisão reabre o caso sozinho (nunca precisa de ação manual pra reabrir).
+function calcularStatusOperacional(statusAutomatico, ultimaAcao, ultimaFalhaEm) {
+  if (statusAutomatico === 'resolvido_automaticamente') return 'resolvido_automaticamente'
+  const revisaoAindaValida = ultimaAcao && (!ultimaFalhaEm || new Date(ultimaAcao.registrado_em) > new Date(ultimaFalhaEm))
+  if (revisaoAindaValida) return ultimaAcao.acao
+  return statusAutomatico // 'pendente' | 'possivelmente_corrigido'
 }
 
 async function montarDados() {
@@ -117,6 +163,7 @@ async function montarDados() {
     ? await buscarTudoPaginado(supabase.from('clientes_erp').select('legacy_id, razao_social, nome_fantasia, contatos, vendedor_responsavel').in('legacy_id', codigosClientes))
     : []
   const clientePorCodigo = new Map(clientesErp.map((c) => [String(c.legacy_id).trim(), c]))
+  const ultimaAcaoPorCliente = await buscarUltimasAcoes(codigosClientes)
 
   // Agrupa por cliente (codigo_cliente) — a fila é por CLIENTE, não por
   // título; um cliente pode ter vários títulos em aberto.
@@ -160,6 +207,9 @@ async function montarDados() {
     const dncAtual = digitosAtual ? dncPorDigitos.get(digitosAtual) : null
     const quarentenaAtiva = Boolean(dncAtual?.expira_em && new Date(dncAtual.expira_em).getTime() > agora)
 
+    const ultimaAcao = ultimaAcaoPorCliente.get(codigo) ?? null
+    const statusOperacional = calcularStatusOperacional(status, ultimaAcao, ultimaFalhaEm)
+
     const contatoAtual = contatos.find((c) => normalizarTelefone(c?.valor) === digitosAtual)
     const tipoContatoAtual = contatoAtual ? String(contatoAtual.tipo || '').trim().toLowerCase() || null : null
 
@@ -191,6 +241,10 @@ async function montarDados() {
       celular_alternativo_existe: celularAlternativoExiste,
       vendedor_responsavel: cliente?.vendedor_responsavel ?? null,
       status,
+      status_operacional: statusOperacional,
+      revisao_manual: ultimaAcao
+        ? { acao: ultimaAcao.acao, motivo: ultimaAcao.motivo, registrado_por_nome: ultimaAcao.registrado_por_nome, registrado_em: ultimaAcao.registrado_em }
+        : null,
     })
   }
 
@@ -230,11 +284,16 @@ router.get('/', async (req, res) => {
       sem_alternativa: todos.filter((i) => i.status === 'pendente' && !i.celular_alternativo_existe).length,
       com_alternativa: todos.filter((i) => i.status === 'pendente' && i.celular_alternativo_existe).length,
       quarentena_ativa: todos.filter((i) => i.quarentena_ativa).length,
+      revisados: todos.filter((i) => i.status_operacional === 'revisado').length,
+      sem_contato_valido: todos.filter((i) => i.status_operacional === 'sem_contato_valido').length,
+      aguardando_atualizacao_origem: todos.filter((i) => i.status_operacional === 'aguardando_atualizacao_origem').length,
     }
 
     let filtrados = todos
     const { status, alternativa, quarentena } = req.query
-    if (status && status !== 'todos') filtrados = filtrados.filter((i) => i.status === status)
+    // Filtra por status_operacional (superset do status automático — quando
+    // não há ação manual válida, status_operacional === status mesmo).
+    if (status && status !== 'todos') filtrados = filtrados.filter((i) => i.status_operacional === status)
     if (alternativa === 'com') filtrados = filtrados.filter((i) => i.celular_alternativo_existe)
     else if (alternativa === 'sem') filtrados = filtrados.filter((i) => !i.celular_alternativo_existe)
     if (quarentena === 'ativa') filtrados = filtrados.filter((i) => i.quarentena_ativa)
@@ -259,6 +318,60 @@ router.get('/', async (req, res) => {
     })
   } catch (err) {
     // Nunca loga telefone/nome de cliente — só a mensagem de erro técnica.
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+function validarMotivo(valor) {
+  if (valor === undefined || valor === null || valor === '') return { valido: true, valorLimpo: null }
+  if (typeof valor !== 'string') return { valido: false, erro: '"motivo" precisa ser texto' }
+  const limpo = valor.trim()
+  if (limpo.length === 0) return { valido: true, valorLimpo: null }
+  if (limpo.length > TAMANHO_MAX_MOTIVO) return { valido: false, erro: `"motivo" excede o limite de ${TAMANHO_MAX_MOTIVO} caracteres` }
+  if (/[<>]/.test(limpo)) return { valido: false, erro: '"motivo" não pode conter os caracteres < ou >' }
+  return { valido: true, valorLimpo: limpo }
+}
+
+// POST /api/collection-contact-review/:codigoCliente/acao — registra que um
+// operador revisou o caso. NUNCA altera contas_financeiras.telefone_cobranca,
+// NUNCA escreve/apaga collection_do_not_contact, NUNCA dispara WhatsApp —
+// só um INSERT append-only em collection_contact_review_actions (auditável:
+// quem = req.user.id, quando = default now(), qual cliente = codigoCliente,
+// qual ação + motivo). adminOnly (mount-level, igual ao resto do router).
+router.post('/:codigoCliente/acao', async (req, res) => {
+  try {
+    const { codigoCliente } = req.params
+    const { acao, motivo, telefone_revisado } = req.body ?? {}
+
+    if (!ACOES_VALIDAS.includes(acao)) {
+      return res.status(400).json({ erro: `"acao" precisa ser uma de: ${ACOES_VALIDAS.join(', ')}` })
+    }
+    const validacaoMotivo = validarMotivo(motivo)
+    if (!validacaoMotivo.valido) return res.status(400).json({ erro: validacaoMotivo.erro })
+
+    // Valida contra contas_financeiras (a mesma fonte de codigo_cliente que
+    // a fila usa), não clientes_erp — a fila já tolera título sem match em
+    // clientes_erp (cai no fallback pessoa_nome), então exigir clientes_erp
+    // aqui seria mais restritivo que a própria fila que este botão serve.
+    const { data: existe, error: erroExiste } = await supabase.from('contas_financeiras').select('id').eq('codigo_cliente', codigoCliente).limit(1).maybeSingle()
+    if (erroExiste) throw erroExiste
+    if (!existe) return res.status(404).json({ erro: 'Cliente não encontrado' })
+
+    const { data, error } = await supabase
+      .from('collection_contact_review_actions')
+      .insert({
+        codigo_cliente: codigoCliente,
+        telefone_revisado: typeof telefone_revisado === 'string' ? telefone_revisado.slice(0, 40) : null,
+        acao,
+        motivo: validacaoMotivo.valorLimpo,
+        registrado_por: req.user.id,
+      })
+      .select('id, acao, motivo, registrado_em')
+      .single()
+    if (error) throw error
+
+    res.status(201).json({ acao: data })
+  } catch (err) {
     res.status(500).json({ erro: err.message })
   }
 })

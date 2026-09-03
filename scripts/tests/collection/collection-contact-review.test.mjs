@@ -5,14 +5,24 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'http'
+import jwt from 'jsonwebtoken'
 import { iniciarAmbienteDeTeste, pararAmbienteDeTeste, criarContaDeTeste, limparInstanciasDeTeste, telefoneDeTeste } from './_setup.mjs'
 
-let supabase, fakeEvolution, server, porta
+let supabase, fakeEvolution, server, porta, tokenAdminReal, tokenNaoAdmin
 
 before(async () => {
   fakeEvolution = await iniciarAmbienteDeTeste()
   ;({ supabase } = await import('../../../src/lib/supabase-admin.server.js'))
   process.env.API_SECRET_KEY = 'chave-teste-contact-review'
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'segredo-teste'
+
+  // POST /:codigoCliente/acao grava registrado_por como FK real pra
+  // usuarios(id) — 'api-user' (id sintético do fallback API_SECRET_KEY) não
+  // é um uuid válido, então os testes de escrita precisam de um usuário
+  // admin de verdade no banco, com um JWT assinado pra ele.
+  const { data: usuarioAdmin } = await supabase.from('usuarios').insert({ nome: 'Admin Teste Revisão', email: `admin-revisao-${Date.now()}@teste.com`, role: 'admin' }).select().single()
+  tokenAdminReal = jwt.sign({ id: usuarioAdmin.id, email: usuarioAdmin.email, role: 'admin' }, process.env.JWT_SECRET)
+  tokenNaoAdmin = jwt.sign({ id: 'usuario-nao-admin', email: 'vendedor@teste.com', role: 'vendedor' }, process.env.JWT_SECRET)
 
   const express = (await import('express')).default
   const { auth, adminOnly } = await import('../../../src/middleware/auth.js')
@@ -47,6 +57,19 @@ function chamar(query = '', { comAuth = true } = {}) {
   })
 }
 
+function chamarAcao(codigoCliente, corpo, { comAuth = true, token = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = comAuth ? { authorization: `Bearer ${token ?? tokenAdminReal}`, 'content-type': 'application/json' } : {}
+    const req = http.request({ host: '127.0.0.1', port: porta, method: 'POST', path: `/api/collection-contact-review/${encodeURIComponent(codigoCliente)}/acao`, headers }, (res) => {
+      let chunks = ''
+      res.on('data', (c) => { chunks += c })
+      res.on('end', () => resolve({ status: res.statusCode, body: chunks ? JSON.parse(chunks) : null }))
+    })
+    req.on('error', reject)
+    req.end(corpo ? JSON.stringify(corpo) : undefined)
+  })
+}
+
 async function limparTudo() {
   await limparInstanciasDeTeste(supabase)
   // collection_dispatch_attempts.dispatch_id TEM ON DELETE CASCADE (ao
@@ -62,6 +85,7 @@ async function limparTudo() {
   await supabase.from('contas_financeiras').delete().like('codigo_cliente', 'CLI-REVISAO-%')
   await supabase.from('collection_do_not_contact').delete().neq('id', '00000000-0000-0000-0000-000000000000')
   await supabase.from('clientes_erp').delete().like('legacy_id', 'CLI-REVISAO-%')
+  await supabase.from('collection_contact_review_actions').delete().like('codigo_cliente', 'CLI-REVISAO-%')
 }
 
 // criarContaDeTeste() só cria a linha em clientes_erp quando codigo_cliente
@@ -285,5 +309,162 @@ test('Fila de Revisão de Contatos', async (t) => {
 
     await chamar()
     assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+  })
+
+  // ==================================================================
+  // Ação operacional (POST /:codigoCliente/acao) — camada auditável
+  // adicionada em 2026-09-02. Nunca altera telefone/DNC/dispara WhatsApp.
+  // ==================================================================
+
+  await t.test('16. POST acao=revisado -> 201, GET reflete status_operacional="revisado" com revisao_manual (nome, nunca UUID)', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    const post = await chamarAcao(codigo, { acao: 'revisado', motivo: 'Liguei e confirmei o número certo' })
+    assert.equal(post.status, 201)
+    assert.ok(!JSON.stringify(post.body).includes('registrado_por'), 'resposta do POST não deveria expor o campo registrado_por (UUID)')
+
+    const { body } = await chamar()
+    const item = body.itens.find((i) => i.codigo_cliente === codigo)
+    assert.equal(item.status_operacional, 'revisado')
+    assert.equal(item.revisao_manual.acao, 'revisado')
+    assert.equal(item.revisao_manual.motivo, 'Liguei e confirmei o número certo')
+    assert.equal(item.revisao_manual.registrado_por_nome, 'Admin Teste Revisão')
+    assert.ok(!Object.values(item.revisao_manual).some((v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)), 'revisao_manual nunca deveria conter um UUID (registrado_por)')
+  })
+
+  await t.test('17. POST acao="sem_contato_valido" e "aguardando_atualizacao_origem" são aceitas', async () => {
+    await limparTudo()
+    for (const acao of ['sem_contato_valido', 'aguardando_atualizacao_origem']) {
+      const telefone = telefoneDeTeste()
+      const codigo = `CLI-REVISAO-${Date.now()}-${acao}`
+      const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+      await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+      const post = await chamarAcao(codigo, { acao })
+      assert.equal(post.status, 201)
+      const { body } = await chamar()
+      assert.equal(body.itens.find((i) => i.codigo_cliente === codigo)?.status_operacional, acao)
+    }
+  })
+
+  await t.test('18. acao inválida -> 400, nada é gravado', async () => {
+    await limparTudo()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    await criarContaDeTeste(supabase, { telefone_cobranca: telefoneDeTeste(), codigo_cliente: codigo })
+    const post = await chamarAcao(codigo, { acao: 'apagar_tudo' })
+    assert.equal(post.status, 400)
+    const { data } = await supabase.from('collection_contact_review_actions').select('id').eq('codigo_cliente', codigo)
+    assert.equal(data.length, 0)
+  })
+
+  await t.test('19. motivo com < ou > -> 400; motivo acima do limite -> 400', async () => {
+    await limparTudo()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    await criarContaDeTeste(supabase, { telefone_cobranca: telefoneDeTeste(), codigo_cliente: codigo })
+    const comHtml = await chamarAcao(codigo, { acao: 'revisado', motivo: '<script>alert(1)</script>' })
+    assert.equal(comHtml.status, 400)
+    const longo = await chamarAcao(codigo, { acao: 'revisado', motivo: 'x'.repeat(501) })
+    assert.equal(longo.status, 400)
+  })
+
+  await t.test('20. POST sem auth -> 401', async () => {
+    const { status } = await chamarAcao('qualquer', { acao: 'revisado' }, { comAuth: false })
+    assert.equal(status, 401)
+  })
+
+  await t.test('21. POST autenticado sem permissão de admin -> 403', async () => {
+    const { status } = await chamarAcao('qualquer', { acao: 'revisado' }, { token: tokenNaoAdmin })
+    assert.equal(status, 403)
+  })
+
+  await t.test('22. codigo_cliente inexistente -> 404', async () => {
+    const { status } = await chamarAcao('CLI-NAO-EXISTE-XYZ', { acao: 'revisado' })
+    assert.equal(status, 404)
+  })
+
+  await t.test('23. idempotência: registrar a mesma ação duas vezes não quebra — a mais recente prevalece, sem erro', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    const r1 = await chamarAcao(codigo, { acao: 'revisado' })
+    const r2 = await chamarAcao(codigo, { acao: 'revisado' })
+    assert.equal(r1.status, 201)
+    assert.equal(r2.status, 201, 'repetir a mesma ação nunca deveria dar erro — é um log append-only')
+
+    const { data } = await supabase.from('collection_contact_review_actions').select('id').eq('codigo_cliente', codigo)
+    assert.equal(data.length, 2, 'cada chamada gera sua própria linha de auditoria (histórico completo preservado)')
+
+    const { body } = await chamar()
+    assert.equal(body.itens.find((i) => i.codigo_cliente === codigo)?.status_operacional, 'revisado')
+  })
+
+  await t.test('24. nunca altera telefone_cobranca da conta', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    await chamarAcao(codigo, { acao: 'sem_contato_valido', motivo: 'telefone não existe mais' })
+
+    const { data: contaDepois } = await supabase.from('contas_financeiras').select('telefone_cobranca').eq('id', conta.id).single()
+    assert.equal(contaDepois.telefone_cobranca, telefone, 'telefone_cobranca precisa permanecer EXATAMENTE o mesmo')
+  })
+
+  await t.test('25. preserva opt-out permanente e DNC temporário — nenhum campo muda, nenhuma linha é apagada', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+    await registrarDnc({ telefone, motivo: 'numero_invalido_whatsapp', expiraEm: new Date(Date.now() + 29 * 86400000).toISOString() })
+
+    const telefoneOptOut = telefoneDeTeste()
+    await registrarDnc({ telefone: telefoneOptOut, motivo: 'pedido do cliente', expiraEm: null })
+
+    const { data: dncAntes } = await supabase.from('collection_do_not_contact').select('*').order('cliente_telefone')
+
+    await chamarAcao(codigo, { acao: 'revisado' })
+
+    const { data: dncDepois } = await supabase.from('collection_do_not_contact').select('*').order('cliente_telefone')
+    assert.deepEqual(dncAntes, dncDepois, 'nenhuma linha de collection_do_not_contact pode mudar — nem a quarentena temporária, nem o opt-out permanente')
+  })
+
+  await t.test('26. nenhuma comunicação real é disparada ao registrar a ação', async () => {
+    await limparTudo()
+    fakeEvolution.resetar()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    await chamarAcao(codigo, { acao: 'aguardando_atualizacao_origem', motivo: 'corrigindo no NetVision' })
+    assert.equal(fakeEvolution.mensagensEnviadas.length, 0)
+  })
+
+  await t.test('27. uma falha NOVA depois da revisão reabre o caso automaticamente (revisão fica stale)', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date(Date.now() - 3600000).toISOString() })
+    await registrarDnc({ telefone, motivo: 'numero_invalido_whatsapp', expiraEm: new Date(Date.now() + 29 * 86400000).toISOString() })
+
+    await chamarAcao(codigo, { acao: 'revisado' })
+    const antes = (await chamar()).body.itens.find((i) => i.codigo_cliente === codigo)
+    assert.equal(antes.status_operacional, 'revisado')
+
+    // Falha nova, DEPOIS da revisão.
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    const depois = (await chamar()).body.itens.find((i) => i.codigo_cliente === codigo)
+    assert.equal(depois.status_operacional, 'pendente', 'uma falha nova depois da revisão precisa reabrir o caso sozinha, sem precisar de outra ação manual')
   })
 })
