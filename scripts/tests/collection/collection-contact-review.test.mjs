@@ -386,23 +386,79 @@ test('Fila de Revisão de Contatos', async (t) => {
     assert.equal(status, 404)
   })
 
-  await t.test('23. idempotência: registrar a mesma ação duas vezes não quebra — a mais recente prevalece, sem erro', async () => {
+  await t.test('23. idempotência: duas submissões IDÊNTICAS (mesmo cliente/ação/motivo/operador) em sequência rápida colapsam numa única linha', async () => {
     await limparTudo()
     const telefone = telefoneDeTeste()
     const codigo = `CLI-REVISAO-${Date.now()}`
     const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
     await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
 
-    const r1 = await chamarAcao(codigo, { acao: 'revisado' })
-    const r2 = await chamarAcao(codigo, { acao: 'revisado' })
+    const r1 = await chamarAcao(codigo, { acao: 'revisado', motivo: 'confirmado por telefone' })
+    const r2 = await chamarAcao(codigo, { acao: 'revisado', motivo: 'confirmado por telefone' })
     assert.equal(r1.status, 201)
-    assert.equal(r2.status, 201, 'repetir a mesma ação nunca deveria dar erro — é um log append-only')
+    assert.equal(r2.status, 200, 'a 2ª submissão idêntica (duplo clique/retry) nunca cria uma linha nova — devolve a existente')
+    assert.equal(r2.body.idempotente, true)
+    assert.equal(r2.body.acao.id, r1.body.acao.id, 'mesma linha de auditoria, não uma duplicata indistinguível')
 
     const { data } = await supabase.from('collection_contact_review_actions').select('id').eq('codigo_cliente', codigo)
-    assert.equal(data.length, 2, 'cada chamada gera sua própria linha de auditoria (histórico completo preservado)')
+    assert.equal(data.length, 1, 'duas submissões idênticas simultâneas geram UMA linha, nunca duas indistinguíveis')
 
     const { body } = await chamar()
     assert.equal(body.itens.find((i) => i.codigo_cliente === codigo)?.status_operacional, 'revisado')
+  })
+
+  await t.test('23b. ação diferente (ou motivo diferente) para o mesmo cliente NÃO é colapsada pela idempotência — histórico legítimo preservado', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    const r1 = await chamarAcao(codigo, { acao: 'revisado', motivo: 'primeira checagem' })
+    const r2 = await chamarAcao(codigo, { acao: 'sem_contato_valido', motivo: 'na verdade não tem contato' })
+    const r3 = await chamarAcao(codigo, { acao: 'revisado', motivo: 'motivo diferente da primeira vez' })
+    assert.equal(r1.status, 201)
+    assert.equal(r2.status, 201, 'ação diferente é sempre uma ação nova, nunca colapsada')
+    assert.equal(r3.status, 201, 'mesma ação mas motivo diferente também é uma ação nova')
+
+    const { data } = await supabase.from('collection_contact_review_actions').select('id').eq('codigo_cliente', codigo)
+    assert.equal(data.length, 3, 'as 3 ações são legitimamente distintas — histórico completo preservado')
+  })
+
+  await t.test('23c. a mesma ação/motivo repetida DEPOIS da janela de idempotência conta como uma nova revisão legítima', { timeout: 15000 }, async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    const r1 = await chamarAcao(codigo, { acao: 'aguardando_atualizacao_origem' })
+    assert.equal(r1.status, 201)
+
+    // Janela de idempotência é 5s — espera passar pra provar que depois dela
+    // uma revisão repetida (ex: operador confirma de novo dias depois) volta
+    // a criar uma linha nova, nunca fica bloqueada pra sempre.
+    await new Promise((resolve) => setTimeout(resolve, 5500))
+
+    const r2 = await chamarAcao(codigo, { acao: 'aguardando_atualizacao_origem' })
+    assert.equal(r2.status, 201, 'fora da janela de idempotência, a mesma ação é uma revisão nova e legítima')
+    assert.notEqual(r2.body.acao.id, r1.body.acao.id)
+
+    const { data } = await supabase.from('collection_contact_review_actions').select('id').eq('codigo_cliente', codigo)
+    assert.equal(data.length, 2)
+  })
+
+  await t.test('23d. telefone_revisado é sempre o SNAPSHOT do servidor (contas_financeiras.telefone_cobranca) — nunca aceito cru do corpo da requisição', async () => {
+    await limparTudo()
+    const telefone = telefoneDeTeste()
+    const codigo = `CLI-REVISAO-${Date.now()}`
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: telefone, codigo_cliente: codigo })
+    await registrarFalhaPermanentRecipient({ contaId: conta.id, telefone, criadoEm: new Date().toISOString() })
+
+    await chamarAcao(codigo, { acao: 'revisado', telefone_revisado: '00000000000-VALOR-FALSO-DO-CLIENTE' })
+
+    const { data } = await supabase.from('collection_contact_review_actions').select('telefone_revisado').eq('codigo_cliente', codigo).single()
+    assert.equal(data.telefone_revisado, telefone, 'o snapshot gravado precisa ser o telefone REAL do servidor, ignorando qualquer valor enviado no corpo')
   })
 
   await t.test('24. nunca altera telefone_cobranca da conta', async () => {

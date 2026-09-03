@@ -41,6 +41,12 @@ const MOTIVO_NUMERO_INVALIDO = 'numero_invalido_whatsapp'
 const TRINTA_DIAS_MS = 30 * 24 * 60 * 60 * 1000
 const ACOES_VALIDAS = ['revisado', 'sem_contato_valido', 'aguardando_atualizacao_origem']
 const TAMANHO_MAX_MOTIVO = 500
+// Janela de idempotência: duas submissões IDÊNTICAS (mesmo cliente/ação/
+// motivo/operador) dentro deste intervalo são tratadas como a MESMA
+// solicitação (duplo clique, retry de rede) — nunca duas linhas
+// indistinguíveis. Fora da janela (ou ação/motivo diferente), é sempre uma
+// ação nova e legítima, preservada no histórico.
+const JANELA_IDEMPOTENCIA_MS = 5000
 
 async function buscarTudoPaginado(query) {
   const linhas = []
@@ -336,12 +342,14 @@ function validarMotivo(valor) {
 // operador revisou o caso. NUNCA altera contas_financeiras.telefone_cobranca,
 // NUNCA escreve/apaga collection_do_not_contact, NUNCA dispara WhatsApp —
 // só um INSERT append-only em collection_contact_review_actions (auditável:
-// quem = req.user.id, quando = default now(), qual cliente = codigoCliente,
-// qual ação + motivo). adminOnly (mount-level, igual ao resto do router).
+// quem = req.user.id — SEMPRE do token autenticado, nunca aceito do corpo da
+// requisição —, quando = default now() do banco, qual cliente =
+// codigoCliente, qual ação + motivo). adminOnly (mount-level, igual ao resto
+// do router).
 router.post('/:codigoCliente/acao', async (req, res) => {
   try {
     const { codigoCliente } = req.params
-    const { acao, motivo, telefone_revisado } = req.body ?? {}
+    const { acao, motivo } = req.body ?? {}
 
     if (!ACOES_VALIDAS.includes(acao)) {
       return res.status(400).json({ erro: `"acao" precisa ser uma de: ${ACOES_VALIDAS.join(', ')}` })
@@ -353,15 +361,41 @@ router.post('/:codigoCliente/acao', async (req, res) => {
     // a fila usa), não clientes_erp — a fila já tolera título sem match em
     // clientes_erp (cai no fallback pessoa_nome), então exigir clientes_erp
     // aqui seria mais restritivo que a própria fila que este botão serve.
-    const { data: existe, error: erroExiste } = await supabase.from('contas_financeiras').select('id').eq('codigo_cliente', codigoCliente).limit(1).maybeSingle()
+    // telefone_revisado é o SNAPSHOT do telefone atual no momento da ação —
+    // sempre computado aqui a partir da própria fonte (nunca aceito cru do
+    // corpo da requisição, que poderia mandar qualquer string arbitrária).
+    const { data: existe, error: erroExiste } = await supabase.from('contas_financeiras').select('id, telefone_cobranca').eq('codigo_cliente', codigoCliente).limit(1).maybeSingle()
     if (erroExiste) throw erroExiste
     if (!existe) return res.status(404).json({ erro: 'Cliente não encontrado' })
+
+    // Idempotência: uma submissão IDÊNTICA (mesmo cliente/ação/motivo/
+    // operador) nos últimos 5s é a MESMA solicitação (duplo clique, retry de
+    // rede) — devolve a linha já existente em vez de duplicar. Ação/motivo
+    // diferente, ou fora da janela, é sempre tratada como nova (preserva
+    // histórico legítimo de revisões repetidas ao longo do tempo). Compara
+    // `motivo` em JS (não em SQL) só pra não depender de um operador extra
+    // (.is()) no filtro — a lista já vem filtrada por cliente/ação/operador/
+    // janela, sempre pequena.
+    const desde = new Date(Date.now() - JANELA_IDEMPOTENCIA_MS).toISOString()
+    const { data: recentes, error: erroRecente } = await supabase
+      .from('collection_contact_review_actions')
+      .select('id, acao, motivo, registrado_em')
+      .eq('codigo_cliente', codigoCliente)
+      .eq('acao', acao)
+      .eq('registrado_por', req.user.id)
+      .gte('registrado_em', desde)
+      .order('registrado_em', { ascending: false })
+    if (erroRecente) throw erroRecente
+    const recente = (recentes ?? []).find((r) => (r.motivo ?? null) === validacaoMotivo.valorLimpo)
+    if (recente) {
+      return res.status(200).json({ acao: recente, idempotente: true })
+    }
 
     const { data, error } = await supabase
       .from('collection_contact_review_actions')
       .insert({
         codigo_cliente: codigoCliente,
-        telefone_revisado: typeof telefone_revisado === 'string' ? telefone_revisado.slice(0, 40) : null,
+        telefone_revisado: existe.telefone_cobranca ?? null,
         acao,
         motivo: validacaoMotivo.valorLimpo,
         registrado_por: req.user.id,
