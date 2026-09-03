@@ -6,7 +6,7 @@
 //
 // Cobre exatamente os métodos usados pelo código real deste projeto (auditado via
 // grep em src/lib/collection + rotas relacionadas): select/eq/neq/in/gte/lte/gt/lt/
-// order/range/limit/maybeSingle/single/insert/update/delete/rpc. NÃO é um
+// not/order/range/limit/maybeSingle/single/insert/update/delete/rpc. NÃO é um
 // PostgREST genérico — é um adaptador propositalmente estreito, então qualquer
 // query nova fora desse padrão pode precisar de ajuste aqui (erro fica óbvio: método
 // undefined).
@@ -127,6 +127,15 @@ class QueryBuilder {
   in(col, arr) { this._filters.push({ col: assertIdent(col, 'coluna'), op: 'in', val: arr }); return this }
   like(col, pattern) { this._filters.push({ col: assertIdent(col, 'coluna'), op: 'like', val: pattern }); return this }
   ilike(col, pattern) { this._filters.push({ col: assertIdent(col, 'coluna'), op: 'ilike', val: pattern }); return this }
+  // CORREÇÃO 2026-09-02 — achado real: .not() é usado por vários arquivos de
+  // produção (sync-financeiro-legado.js, erp.js, reativacao.js, comissoes.js,
+  // etc.) mas nunca tinha suporte aqui — qualquer teste local que exercitasse
+  // esse caminho de código quebrava com "TypeError: ...not is not a function",
+  // então esses trechos nunca foram testados contra Postgres local. Só cobre
+  // os dois padrões realmente usados no código real (auditado via grep):
+  // .not(col, 'is', null) e .not(col, 'in', '(a,b,c)') — mesmo espírito
+  // "adaptador estreito, não PostgREST genérico" do resto deste arquivo.
+  not(col, operator, val) { this._filters.push({ col: assertIdent(col, 'coluna'), op: `not.${operator}`, val }); return this }
 
   order(col, { ascending = true } = {}) { this._order.push(`${assertIdent(col, 'coluna')} ${ascending ? 'ASC' : 'DESC'}`); return this }
   range(from, to) { this._range = [from, to]; return this }
@@ -139,6 +148,7 @@ class QueryBuilder {
     const params = []
     let i = startIndex
     for (const f of this._filters) {
+      const paramsAntes = params.length
       if (f.op === 'in') {
         clauses.push(`${f.col} = ANY($${i})`)
         params.push(f.val)
@@ -146,11 +156,21 @@ class QueryBuilder {
         clauses.push(`${f.col} ${f.op.toUpperCase()} $${i}`)
         // supabase-js usa "*" como coringa (estilo PostgREST); Postgres usa "%".
         params.push(String(f.val).replace(/\*/g, '%'))
+      } else if (f.op === 'not.is' && f.val === null) {
+        // Sem parâmetro — "IS NOT NULL" nunca é bind param no Postgres.
+        clauses.push(`${f.col} IS NOT NULL`)
+      } else if (f.op === 'not.in') {
+        // supabase-js aceita a lista já formatada estilo PostgREST: '(a,b,c)'.
+        const itens = String(f.val).replace(/^\(|\)$/g, '').split(',').map((v) => v.trim()).filter(Boolean)
+        clauses.push(`${f.col} <> ALL($${i})`)
+        params.push(itens)
+      } else if (f.op.startsWith('not.')) {
+        throw new Error(`compat client local: .not('${f.col}', '${f.op.slice(4)}', ...) não suportado — só 'is'/'in' são cobertos hoje`)
       } else {
         clauses.push(`${f.col} ${f.op} $${i}`)
         params.push(f.val)
       }
-      i++
+      if (params.length > paramsAntes) i++
     }
     return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params, next: i }
   }
