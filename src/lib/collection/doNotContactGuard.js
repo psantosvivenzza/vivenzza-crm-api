@@ -16,8 +16,28 @@
 import { supabase } from '../supabase-admin.server.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
+import { normalizarTelefone } from '../telefone.js'
 
 export const MOTIVO_NUMERO_INVALIDO_HOJE = 'numero_invalido_whatsapp'
+
+// CORREÇÃO 2026-09-03 (auditoria da régua) — achado da investigação do
+// leak-through de DNC: a busca era .eq('cliente_telefone', ...) — igualdade
+// de STRING exata, nunca normalizada. Reconstrução forense das 51
+// tentativas suspeitas confirmou que NENHUMA foi causada por diferença de
+// formato (100% caía na janela de quarentena antiga "até meia-noite BRT",
+// pré-PR #57) — mas o gap era real e latente: dois títulos do MESMO cliente
+// com telefone_cobranca gravado em formatos diferentes (ex: "(51)
+// 98132-0490" vs "51981320490") poderiam, em tese, driblar o guard. Corrige
+// buscando por CANAL só (índice pequeno, ~dezenas de linhas em produção) e
+// comparando dígito-a-dígito em memória — mesmo padrão já usado e revisado
+// em collection-contact-review.js. normalizarTelefone() SÓ remove
+// pontuação/espaço — nunca reinterpreta DDI/9º dígito, então nunca faz dois
+// telefones REALMENTE diferentes colidirem (pedido explícito da auditoria).
+function telefonesEquivalentesDnc(a, b) {
+  const na = normalizarTelefone(a)
+  const nb = normalizarTelefone(b)
+  return Boolean(na) && Boolean(nb) && na === nb
+}
 
 // Leitura compartilhada — MESMA query usada pelo guard real (fail-closed,
 // abaixo) e por nextBestAction.js/estaEmOptOut() (shadow, fail-open,
@@ -36,14 +56,16 @@ export const MOTIVO_NUMERO_INVALIDO_HOJE = 'numero_invalido_whatsapp'
 // abaixo, nos dois chamadores (guard real e shadow). Tabela pequena por
 // natureza (opt-out real é raro, bloqueio temporário expira sozinho em até
 // 1 dia) — sem custo real em trazer as poucas linhas por telefone e filtrar
-// em JS.
+// em JS. Mesma razão pela qual filtrar por CANAL (não mais por telefone
+// exato) e comparar dígitos em memória continua barato.
 export async function buscarRegistroDoNotContact(clienteTelefone, canais = ['todos', 'whatsapp']) {
   if (!clienteTelefone) return { data: [], error: null }
-  return supabase
+  const { data, error } = await supabase
     .from('collection_do_not_contact')
-    .select('id, motivo, expira_em')
-    .eq('cliente_telefone', clienteTelefone)
+    .select('id, cliente_telefone, motivo, expira_em')
     .in('canal', canais)
+  if (error) return { data: null, error }
+  return { data: (data ?? []).filter((r) => telefonesEquivalentesDnc(r.cliente_telefone, clienteTelefone)), error: null }
 }
 
 // 2026-08-18 — expira_em NULL = permanente (sempre vale); não-NULL só vale
@@ -139,9 +161,12 @@ export function proximaExpiracaoQuarentena(expiraAtualIso) {
 // UNIQUE INDEX real de produção em (cliente_telefone, canal), SEM motivo
 // (idx_collection_dnc_telefone_canal, migrations/collection_shadow_minimal.sql
 // — já aplicada, fora do pipeline supabase/migrations/): só pode existir 1
-// linha por telefone+canal, qualquer que seja o motivo. Por isso:
-// - NUNCA faz INSERT às cegas: sempre consulta a linha existente pra
-//   (telefone, 'whatsapp') primeiro (no máx 1, garantido pela constraint).
+// linha por STRING exata de telefone+canal, qualquer que seja o motivo. Como
+// a busca abaixo (2026-09-03) passou a comparar por dígito normalizado, é
+// estruturalmente possível achar mais de uma linha "equivalente" (índice não
+// impede duas STRINGS diferentes pro mesmo número real) — tratado explicitamente.
+// - NUNCA faz INSERT às cegas: sempre consulta a linha existente por
+//   equivalência normalizada primeiro.
 // - expira_em NULL = permanente, DE QUALQUER MOTIVO (opt-out real ou
 //   qualquer outra origem futura) — nunca é tocado, nunca vira UPDATE nem é
 //   sobrescrito por um INSERT concorrente. Retorna imediatamente.
@@ -157,16 +182,25 @@ export function proximaExpiracaoQuarentena(expiraAtualIso) {
 export async function registrarBloqueioNumeroInvalidoHoje(clienteTelefone) {
   if (!clienteTelefone) return
   try {
-    const { data: existente, error: erroConsulta } = await supabase
+    // Mesma correção de normalização de estaEmDoNotContact() acima — busca
+    // por canal e compara dígito-a-dígito em memória, pra achar (e estender)
+    // uma linha existente mesmo se o formato exato do telefone divergir do
+    // que foi gravado da primeira vez. Se por acaso já existir mais de uma
+    // linha equivalente em produção (resíduo de antes desta correção),
+    // prioriza: permanente (expira_em NULL) > a de expira_em mais distante —
+    // nunca escolhe a que resultaria em ENCURTAR o bloqueio efetivo.
+    const { data: candidatas, error: erroConsulta } = await supabase
       .from('collection_do_not_contact')
-      .select('id, motivo, expira_em')
-      .eq('cliente_telefone', clienteTelefone)
+      .select('id, cliente_telefone, motivo, expira_em')
       .eq('canal', 'whatsapp')
-      .maybeSingle()
     if (erroConsulta) {
       console.error('[doNotContactGuard] falha ao consultar bloqueio existente (best-effort, não afeta o envio já concluído):', erroConsulta.message)
       return
     }
+    const equivalentes = (candidatas ?? []).filter((r) => telefonesEquivalentesDnc(r.cliente_telefone, clienteTelefone))
+    const existente = equivalentes.find((r) => !r.expira_em)
+      ?? equivalentes.sort((a, b) => new Date(b.expira_em) - new Date(a.expira_em))[0]
+      ?? null
 
     if (existente) {
       if (!existente.expira_em) return // permanente (qualquer motivo) — nunca toca
