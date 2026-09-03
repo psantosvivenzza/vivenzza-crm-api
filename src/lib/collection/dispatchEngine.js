@@ -111,6 +111,46 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
   let ultimoErro = null
 
   for (let numero = 1; numero <= MAX_TENTATIVAS; numero++) {
+    // CORREÇÃO 2026-09-03 (auditoria da régua) — revalidação ANTES DE CADA
+    // tentativa real ao provider, não só uma vez na entrada. O guard de
+    // pagamento/promessa/DNC (estaEmDoNotContact) já era checado em
+    // collectionRouting.js antes de chamar esta função — mas isso cobria só
+    // a 1ª tentativa; o loop de failover (numero>1, só quando
+    // whatsapp_failover=true) chamava enviarTexto() de novo pra uma
+    // instância diferente sem revalidar nada. Hoje whatsapp_failover=false
+    // em produção (o loop nunca passa de numero=1 na prática — auditoria
+    // read-only de 03/09/2026 não achou nenhum bypass real de DNC nos
+    // últimos 30 dias, as 51 tentativas suspeitas foram 100% explicadas pela
+    // janela de quarentena antiga "até meia-noite BRT", pré-PR #57), mas o
+    // gap existia e fecha aqui pra quando o failover for ligado. Mesma
+    // revalidação em toda iteração (inclusive numero=1) — mais simples e
+    // uniforme que tratar a 1ª tentativa como caso especial; custo extra é
+    // desprezível (a checagem já é rápida e cacheada onde aplicável) e nunca
+    // roda mais de 1x hoje mesmo.
+    const statusQuitacaoRetry = await statusQuitacaoTitulo(contasFinanceirasId)
+    if (statusQuitacaoRetry.quitado) {
+      await atualizarDispatch(dispatch.id, { status: 'cancelled' })
+      return { status: 'skipped', motivo: statusQuitacaoRetry.motivo, dispatchId: dispatch.id }
+    }
+    const promessaRetry = await promessaAtivaPara(contasFinanceirasId)
+    if (promessaRetry) {
+      await atualizarDispatch(dispatch.id, { status: 'cancelled' })
+      return { status: 'skipped', motivo: 'promessa_ativa', promessaId: promessaRetry.id, dispatchId: dispatch.id }
+    }
+    // Revalida com o telefone EXATO desta tentativa (clienteTelefone é fixo
+    // pro dispatch inteiro — nunca muda entre tentativas do mesmo envio,
+    // mas revalidar aqui, não só uma vez no início, é o que garante que uma
+    // quarentena escrita por OUTRO título/dispatch concorrente entre a
+    // entrada desta função e esta iteração específica seja respeitada).
+    const dncRetry = await estaEmDoNotContact(clienteTelefone)
+    if (dncRetry.blocked) {
+      await atualizarDispatch(dispatch.id, { status: 'cancelled' })
+      if (dncRetry.reason === 'OPT_OUT') {
+        await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId, clienteTelefone, reason: dncRetry.reason })
+      }
+      return { status: 'blocked', motivo: dncRetry.reason, dispatchId: dispatch.id }
+    }
+
     // Instância única legado: usada quando multi_whatsapp=false, para não mudar
     // comportamento em produção enquanto a flag estiver desligada.
     const instancia = instanciaUnicaLegado
