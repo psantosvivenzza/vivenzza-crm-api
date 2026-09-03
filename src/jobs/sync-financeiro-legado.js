@@ -83,7 +83,7 @@ async function lerContasDoCrm() {
   for (let offset = 0; ; offset += PAGE_SUPABASE) {
     const { data, error } = await supabase
       .from('contas_financeiras')
-      .select('id, legacy_id, valor, valor_pago, valor_pago_legado, status, vencimento, pessoa_nome')
+      .select('id, legacy_id, valor, valor_pago, valor_pago_legado, status, vencimento, pessoa_nome, codigo_cliente, telefone_cobranca')
       .eq('tipo', 'receber')
       .not('legacy_id', 'is', null)
       .range(offset, offset + PAGE_SUPABASE - 1)
@@ -202,6 +202,13 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     total_encerrado_com_saldo: 0,
     // Títulos que existiam só no NetVision e passaram a existir no CRM.
     total_criado: 0,
+    // CORREÇÃO 2026-09-02 — achado de auditoria: título JÁ EXISTENTE nunca
+    // tinha telefone_cobranca reatualizado por este sync (só o fn_sincronizar_
+    // baixa_legado, que é só pagamento/status, e só o CAMINHO DE CRIAÇÃO usava
+    // telefoneDoCliente()). Uma correção de telefone no NetVision pra um
+    // cliente com títulos JÁ existentes nunca chegava na cobrança sozinha —
+    // só via PATCH manual /api/financeiro/aging/telefone. Ver telefoneAtualizar abaixo.
+    total_telefone_atualizado: 0,
   }
   const erros = []
   const amostraMudancas = []
@@ -263,8 +270,23 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     const contasPorChave = await lerContasDoCrm()
     log(`[sync-financeiro] ${contasPorChave.size} títulos com legacy_id no CRM`)
 
+    // Carregado uma vez, sob demanda (evita ler clientes_erp inteiro num ciclo
+    // que não precisa) — reusado tanto pela criação (aCriar) quanto pela
+    // reatualização de telefone abaixo (telefoneAAtualizar).
+    let clientesCache = null
+    async function obterClientesErp() {
+      if (!clientesCache) clientesCache = await lerClientesErp()
+      return clientesCache
+    }
+
     const aAplicar = []
     const aCriar = []
+    // Map<contaId, novoTelefone> — telefone só entra aqui quando a fonte
+    // (clientes_erp.contatos, mesma prioridade celular>fone/telefone>contato
+    // de telefoneDoCliente()) tem um valor NÃO VAZIO e DIFERENTE do atual.
+    // Nunca apaga um telefone existente quando a fonte vem vazia/sem match —
+    // Map.set só é chamado quando `novo` é truthy (ver dentro do loop abaixo).
+    const telefoneAAtualizar = new Map()
 
     for (const linha of linhasLegado) {
       contadores.total_lido++
@@ -298,6 +320,20 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
       }
 
       for (const conta of contas) {
+        // Reatualização de telefone — independente da decisão de pagamento
+        // abaixo (um título pode não ter NENHUMA mudança financeira neste
+        // ciclo e ainda assim ter um telefone corrigido no NetVision). Só
+        // telefone_cobranca é considerado; valor/valor_pago/status/vencimento/
+        // em_revisao_financeira/baixa/promessa não são tocados aqui.
+        if (conta.codigo_cliente && !telefoneAAtualizar.has(conta.id)) {
+          const clientes = await obterClientesErp()
+          const cliente = clientes.get(String(conta.codigo_cliente).trim())
+          const novoTelefone = telefoneDoCliente(cliente)
+          if (novoTelefone && novoTelefone !== conta.telefone_cobranca) {
+            telefoneAAtualizar.set(conta.id, novoTelefone)
+          }
+        }
+
         let decisao
         try {
           decisao = decidirAtualizacao({ conta, legado })
@@ -333,7 +369,7 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
 
     // ── Criação dos títulos que só existem no ERP ─────────────────────────
     if (aCriar.length && !dryRun) {
-      const clientes = await lerClientesErp()
+      const clientes = await obterClientesErp()
       const novos = []
 
       for (const l of aCriar) {
@@ -418,6 +454,30 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     } else {
       contadores.total_atualizado = aAplicar.filter((a) => a.decisao.acao === 'atualizar').length
       contadores.total_cancelado = aAplicar.filter((a) => a.decisao.acao === 'cancelar').length
+    }
+
+    // ── Reatualização de telefone_cobranca em títulos já existentes ───────
+    // UPDATE escopado por id (um título por vez, nunca por pessoa_nome como o
+    // PATCH manual de aging.js) e restrito à própria coluna — nunca toca
+    // valor/valor_pago/status/vencimento/em_revisao_financeira/baixa/promessa.
+    // Falha aqui nunca conta como erro do título (o pagamento/status dele já
+    // foi tratado acima com sucesso) — só fica registrada no log.
+    if (telefoneAAtualizar.size && !dryRun) {
+      const entradas = [...telefoneAAtualizar.entries()]
+      for (let i = 0; i < entradas.length; i += CONCORRENCIA) {
+        const lote = entradas.slice(i, i + CONCORRENCIA)
+        await Promise.all(lote.map(async ([contaId, novoTelefone]) => {
+          try {
+            const { error } = await supabase.from('contas_financeiras').update({ telefone_cobranca: novoTelefone }).eq('id', contaId)
+            if (error) throw error
+            contadores.total_telefone_atualizado++
+          } catch (err) {
+            log(`[sync-financeiro] falha ao reatualizar telefone do título ${contaId}: ${err.message}`)
+          }
+        }))
+      }
+    } else if (telefoneAAtualizar.size && dryRun) {
+      contadores.total_telefone_atualizado = telefoneAAtualizar.size
     }
 
     const status = contadores.total_com_erro > 0 ? 'concluido_com_erros' : 'concluido'
