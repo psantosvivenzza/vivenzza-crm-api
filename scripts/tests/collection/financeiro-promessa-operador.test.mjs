@@ -48,9 +48,29 @@ function chamar(method, path, { comAuth = true, token = 'chave-teste-financeiro-
   })
 }
 
-const AMANHA = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10)
-const ONTEM = new Date(Date.now() - 1 * 86400000).toISOString().slice(0, 10)
-const DAQUI_200_DIAS = new Date(Date.now() + 200 * 86400000).toISOString().slice(0, 10)
+// CORREÇÃO 2026-09-03 — achado real: estas 3 constantes eram calculadas com
+// `new Date(Date.now() ± N*86400000).toISOString().slice(0,10)` — fatiando o
+// calendário UTC, não BRT. Entre 00h-03h UTC (21h-24h BRT do dia anterior),
+// UTC já virou o dia seguinte enquanto BRT ainda não — ONTEM (exatamente 1
+// dia antes) caía no MESMO dia que "hoje BRT" nessa janela, e o teste "data
+// passada" falhava (a API aceitava, porque não era passado de verdade em
+// BRT). A regra de produção (validarDataPrometida() em financeiro.js, já usa
+// hojeBrtISO()) sempre esteve correta — só o HELPER DE TESTE não seguia o
+// mesmo calendário. Corrigido ancorando em hojeBrtISO(), nunca em Date.now()
+// cru — resultado agora é o mesmo em qualquer hora real de execução,
+// comprovado pelo teste 4e abaixo (mock.timers na janela de virada).
+function hojeBrtISO() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+}
+function diasBrtISO(offsetDias) {
+  const d = new Date(`${hojeBrtISO()}T12:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + offsetDias)
+  return d.toISOString().slice(0, 10)
+}
+
+const AMANHA = diasBrtISO(5)
+const ONTEM = diasBrtISO(-1)
+const DAQUI_200_DIAS = diasBrtISO(200)
 
 test('GET/POST /api/financeiro/:id/promessa + cancelar', async (t) => {
   const { timelineDoTitulo } = await import('../../../src/lib/collection/timeline.js')
@@ -81,13 +101,19 @@ test('GET/POST /api/financeiro/:id/promessa + cancelar', async (t) => {
     assert.equal(body.promessa.status, 'ativa')
   })
 
-  await t.test('4. data passada -> 400, nenhuma promessa criada', async () => {
+  await t.test('4. data passada (ontem em BRT) -> 400, nenhuma promessa criada', async () => {
     const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
     const { status, body } = await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: ONTEM } })
     assert.equal(status, 400)
     assert.match(body.erro, /passada/)
     const check = await chamar('GET', `/api/financeiro/${conta.id}/promessa`)
     assert.equal(check.body.promessa, null)
+  })
+
+  await t.test('4a. hoje em BRT (data real, sem mock) -> aceito conforme a regra atual', async () => {
+    const conta = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+    const { status } = await chamar('POST', `/api/financeiro/${conta.id}/promessa`, { body: { data_prometida: hojeBrtISO() } })
+    assert.equal(status, 201, '"hoje" nunca pode ser tratado como data passada')
   })
 
   await t.test('4b. data mais de 90 dias no futuro -> 400', async () => {
@@ -118,6 +144,33 @@ test('GET/POST /api/financeiro/:id/promessa + cancelar', async (t) => {
     const conta2 = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
     const rOntem = await chamar('POST', `/api/financeiro/${conta2.id}/promessa`, { body: { data_prometida: ontemBrt } })
     assert.equal(rOntem.status, 400, '"ontem" em BRT precisa continuar bloqueado como data passada')
+  })
+
+  await t.test('4e. virada UTC/BRT não muda o resultado: mesmo dia BRT dá a mesma resposta nos dois lados da virada de meia-noite UTC', async (subT) => {
+    const diaBrt = '2026-09-09'
+    const diaAnteriorBrt = '2026-09-08'
+    // Dois instantes reais diferentes, mas o MESMO dia calendário em BRT:
+    // A) meio-dia BRT (UTC e BRT concordam que é dia 9);
+    // B) 23h BRT do dia 9 = já 02h UTC do dia 10 (UTC e BRT DIVERGEM sobre
+    //    que dia é "hoje" nesse instante — a virada em si).
+    const instantes = [
+      { nome: 'meio-dia BRT (sem virada)', utc: '2026-09-09T15:00:00Z' },
+      { nome: '23h BRT / já 02h UTC do dia seguinte (virada)', utc: '2026-09-10T02:00:00Z' },
+    ]
+
+    for (const instante of instantes) {
+      subT.mock.timers.enable({ apis: ['Date'], now: new Date(instante.utc) })
+
+      const contaHoje = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+      const rHoje = await chamar('POST', `/api/financeiro/${contaHoje.id}/promessa`, { body: { data_prometida: diaBrt } })
+      assert.equal(rHoje.status, 201, `[${instante.nome}] "${diaBrt}" (hoje BRT) precisa ser aceito nos dois lados da virada, sem diferença de resultado`)
+
+      const contaOntem = await criarContaDeTeste(supabase, { status: 'aberta', valor: 500, valor_pago: 0 })
+      const rOntem = await chamar('POST', `/api/financeiro/${contaOntem.id}/promessa`, { body: { data_prometida: diaAnteriorBrt } })
+      assert.equal(rOntem.status, 400, `[${instante.nome}] "${diaAnteriorBrt}" (ontem BRT) precisa continuar bloqueado nos dois lados da virada`)
+
+      subT.mock.timers.reset()
+    }
   })
 
   await t.test('5. título inexistente -> 404', async () => {
