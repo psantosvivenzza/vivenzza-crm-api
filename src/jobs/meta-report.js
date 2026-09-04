@@ -118,7 +118,7 @@ const getCost = (costs, type) =>
 // ─── Google Ads ────────────────────────────────────────────────────────────────
 
 async function fetchGoogleAdsDaily(dateLabel) {
-  if (!googleAdsConfigurado()) return null
+  if (!googleAdsConfigurado()) return { status: 'nao_configurado' }
 
   const rows = await gaqlQuery(`
     SELECT
@@ -132,7 +132,7 @@ async function fetchGoogleAdsDaily(dateLabel) {
       AND campaign.status != 'REMOVED'
   `)
 
-  if (!rows.length) return null
+  if (!rows.length) return { status: 'sem_campanhas' }
 
   const fromMicros = (v) => Number(v || 0) / 1_000_000
   const gasto      = rows.reduce((s, r) => s + fromMicros(r.metrics.costMicros),   0)
@@ -142,18 +142,27 @@ async function fetchGoogleAdsDaily(dateLabel) {
   const ctr        = impressoes > 0 ? (cliques / impressoes) * 100 : 0
   const custoConv  = conversoes > 0 ? gasto / conversoes : null
 
-  return { gasto, cliques, impressoes, ctr, conversoes, custoConv }
+  return { status: 'ok', gasto, cliques, impressoes, ctr, conversoes, custoConv }
 }
 
-function buildGoogleAdsBlock(data, dateLabel) {
+function buildGoogleAdsBlock(resultado, dateLabel) {
   const sep = '━━━━━━━━━━━━━━━━━━━━━'
   const header = `\n${sep}\n📊 *GOOGLE ADS — ${dateLabel}*\n${sep}`
 
-  if (!data) {
-    return `${header}\n🔴 Sem campanhas ativas no momento`
+  // Erro real (ex.: OAuth invalid_grant) — nunca deve parecer "sem campanhas".
+  // Distinção crítica: "sem campanhas ativas" significa a API respondeu e não
+  // havia dado pra reportar; "integração quebrada" significa a API nem respondeu.
+  if (resultado?.status === 'erro') {
+    return `${header}\n🔴 Integração quebrada — ${resultado.mensagem}\n⚠️ Dados abaixo indisponíveis até a integração ser corrigida`
+  }
+  if (resultado?.status === 'nao_configurado') {
+    return `${header}\n⚪ Google Ads não configurado`
+  }
+  if (resultado?.status === 'sem_campanhas') {
+    return `${header}\n🔵 Sem campanhas ativas no momento`
   }
 
-  const { gasto, cliques, impressoes, ctr, conversoes, custoConv } = data
+  const { gasto, cliques, impressoes, ctr, conversoes, custoConv } = resultado
   return (
     `${header}\n` +
     `💰 Gasto: R$ ${fmt(gasto)}\n` +
@@ -253,11 +262,11 @@ export async function runMetaReport({ daysAgo = 1 } = {}) {
   let msg = buildMessage(insights, statusMap, dateLabel, totalSpend)
 
   try {
-    const gadsData = await fetchGoogleAdsDaily(dateLabel)
-    msg += buildGoogleAdsBlock(gadsData, dateLabel)
+    const gadsResultado = await fetchGoogleAdsDaily(dateLabel)
+    msg += buildGoogleAdsBlock(gadsResultado, dateLabel)
   } catch (err) {
     console.error('[meta-report] Google Ads fetch falhou:', err.message)
-    msg += buildGoogleAdsBlock(null, dateLabel)
+    msg += buildGoogleAdsBlock({ status: 'erro', mensagem: err.message }, dateLabel)
   }
 
   await sendWhatsApp(msg)
