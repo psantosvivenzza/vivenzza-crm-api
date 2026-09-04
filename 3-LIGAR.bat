@@ -19,19 +19,23 @@ del /q "%TEMP%\vivenzza-tarefa-check.txt" >nul 2>&1
 
 if "%TAREFA_STATUS%"=="PRECISA_INSTALAR" goto precisa_admin
 
-echo Tarefa OK. Verificando se o worker ja esta rodando...
-powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'sync-financeiro-legado.mjs' -and $_.CommandLine -match '--watch' } | Select-Object -First 1; if ($p) { Write-Output \"JA_RODANDO=$($p.ProcessId)\" } else { Write-Output 'JA_RODANDO=' }" > "%TEMP%\vivenzza-check.txt"
-for /f "usebackq tokens=1,2 delims==" %%a in ("%TEMP%\vivenzza-check.txt") do set %%a=%%b
-del /q "%TEMP%\vivenzza-check.txt" >nul 2>&1
+echo Tarefa OK. Ligando a sincronizacao financeira...
+echo.
 
-if defined JA_RODANDO if not "%JA_RODANDO%"=="" (
-  echo Worker ja esta rodando ^(PID %JA_RODANDO%^) - nada a iniciar.
-) else (
-  echo Nenhum worker ativo - limpando sinalizador de parada, se houver...
-  del /q "logs\sync-financeiro.stop" >nul 2>&1
-  echo Iniciando via Tarefa Agendada...
-  schtasks /run /tn "VivenzzaSyncFinanceiroLegado"
-)
+REM Fase 2E (3a rodada): nao precisa mais de privilegio elevado - o script
+REM abaixo NUNCA chama Enable-ScheduledTask em caminho nenhum (a tarefa so
+REM e religada quando ja esta instalada, consultavel e Enabled=True; se
+REM estiver Disabled, nao existir, ou a consulta falhar por acesso negado,
+REM ele falha com a mensagem REAL e orienta reparo administrativo, sem
+REM tentar reabilitar/elevar sozinho). So DEPOIS dessa validacao remove o
+REM sinalizador de parada e CONFIRMA a ausencia (transacional: se o worker
+REM nao for confirmado de pe pelo WATCHDOG a tempo, o sinalizador e
+REM restaurado automaticamente antes do script terminar - nunca fica
+REM removido "no ar"). So sai com sucesso depois que o watchdog confirma o
+REM worker de pe usando o handle real do processo Node (nao mais o cmd.exe
+REM que o lancava, e nunca WMI) - nunca antes disso.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ligar-sync-financeiro.ps1"
+if errorlevel 1 goto erro_ligar
 
 echo.
 echo ============================================================
@@ -63,6 +67,15 @@ echo.
 echo   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\instalar-tarefa-sync-financeiro.ps1"
 echo.
 echo   Depois rode este 3-LIGAR.bat de novo normalmente.
+echo.
+pause
+exit /b 1
+
+:erro_ligar
+echo.
+echo ============================================================
+echo   NAO CONSEGUI LIGAR - veja a mensagem acima antes de tentar de novo.
+echo ============================================================
 echo.
 pause
 exit /b 1
