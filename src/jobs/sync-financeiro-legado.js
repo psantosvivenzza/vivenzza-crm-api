@@ -48,6 +48,19 @@ const JANELA_SEGURANCA_MS = 10 * 60 * 1000
 // anterior ainda está no meio (17k títulos levam alguns minutos).
 let emExecucao = false
 
+// CORREÇÃO 2026-09-03 (Fase 2B — auditoria de drift de migrations) — achado
+// real: os dois `UPDATE`s finais em sincronizacoes_financeiro (conclusão e
+// fallback de falha) espalhavam `{ error }` sem checar o retorno. Quando a
+// migration 20260101000044 (total_telefone_atualizado) ainda não tinha sido
+// aplicada em produção, o UPDATE de conclusão falhava com 42703 e ninguém
+// percebia: a função retornava como se tivesse dado certo, logava "concluído"
+// e a linha ficava presa em 'executando' pra sempre — nenhuma vez virou
+// 'falhou' em toda a tabela. Helper pequeno e específico só pra este ponto
+// (não generaliza pra outros módulos, pedido explícito desta fase).
+async function atualizarRegistroSincronizacao(syncId, campos) {
+  return supabase.from('sincronizacoes_financeiro').update(campos).eq('id', syncId)
+}
+
 async function conectarE01() {
   const pool = new pg.Pool({
     host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
@@ -485,20 +498,36 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     if (!dryRun && syncId) {
       if (erros.length) {
         for (let i = 0; i < erros.length; i += 500) {
-          await supabase.from('sincronizacao_financeiro_erros')
-            .insert(erros.slice(i, i + 500).map((e) => ({ ...e, sincronizacao_id: syncId })))
+          const lote = erros.slice(i, i + 500)
+          // Best-effort de propósito: é uma tabela auxiliar de detalhe/auditoria
+          // (a decisão de negócio — atualizar/cancelar/conflito — já foi
+          // aplicada com sucesso antes daqui). Uma falha aqui NUNCA pode
+          // esconder a conclusão real do ciclo, mas também nunca pode ser
+          // silenciosa — log explícito, sempre, com o id da sincronização pra
+          // conseguir correlacionar depois.
+          const { error: erroInsercaoErros } = await supabase.from('sincronizacao_financeiro_erros')
+            .insert(lote.map((e) => ({ ...e, sincronizacao_id: syncId })))
+          if (erroInsercaoErros) {
+            log(`[sync-financeiro] AVISO: falha ao registrar ${lote.length} erro(s)/conflito(s) de detalhe em sincronizacao_financeiro_erros (sincronizacao_id=${syncId}): ${erroInsercaoErros.message}`)
+          }
         }
       }
-      await supabase.from('sincronizacoes_financeiro')
-        .update({
-          status,
-          concluido_em: new Date().toISOString(),
-          // Só avança o cursor quando o ciclo fechou sem erro de leitura. Um
-          // ciclo com falha mantém o ponto anterior, então nada é pulado.
-          cursor_final: contadores.total_com_erro === 0 && cursorFinal ? cursorFinal.toISOString() : cursorAnterior?.toISOString() ?? null,
-          ...contadores,
-        })
-        .eq('id', syncId)
+
+      const { error: erroConclusao } = await atualizarRegistroSincronizacao(syncId, {
+        status,
+        concluido_em: new Date().toISOString(),
+        // Só avança o cursor quando o ciclo fechou sem erro de leitura. Um
+        // ciclo com falha mantém o ponto anterior, então nada é pulado.
+        cursor_final: contadores.total_com_erro === 0 && cursorFinal ? cursorFinal.toISOString() : cursorAnterior?.toISOString() ?? null,
+        ...contadores,
+      })
+      // CORREÇÃO 2026-09-03 — nunca considerar o ciclo concluído (nem no log,
+      // nem no retorno) se a PERSISTÊNCIA do status final falhar. Lançar aqui
+      // (ainda dentro do try) reaproveita o mesmo catch abaixo, que tenta
+      // marcar 'falhou' com um payload mínimo — sem duplicar essa lógica.
+      if (erroConclusao) {
+        throw new Error(`falha ao persistir conclusão da sincronização (id=${syncId}, status=${status}): ${erroConclusao.message}`)
+      }
     }
 
     log(`[sync-financeiro] concluído: ${JSON.stringify(contadores)}`)
@@ -509,9 +538,29 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     }
   } catch (err) {
     if (!dryRun && syncId) {
-      await supabase.from('sincronizacoes_financeiro')
-        .update({ status: 'falhou', concluido_em: new Date().toISOString(), mensagem_erro: err.message, ...contadores })
-        .eq('id', syncId)
+      // Payload MÍNIMO e estável de propósito — nunca `...contadores`. Se o
+      // erro original foi causado por uma coluna nova ausente em `contadores`
+      // (exatamente o que aconteceu com total_telefone_atualizado antes desta
+      // correção), repetir `...contadores` aqui faria este UPDATE de
+      // fallback falhar pelo MESMO motivo, e a linha nunca sairia de
+      // 'executando' — justo o cenário que este hardening existe pra fechar.
+      const { error: erroFallback } = await atualizarRegistroSincronizacao(syncId, {
+        status: 'falhou',
+        concluido_em: new Date().toISOString(),
+        mensagem_erro: err.message,
+      })
+      if (erroFallback) {
+        // Log estruturado e inequívoco: se nem o fallback conseguiu
+        // persistir, a linha fica presa em 'executando' — precisa ficar
+        // claro no log pra quem for investigar depois, sem depender só da
+        // tabela. O erro SECUNDÁRIO (deste UPDATE) nunca substitui o erro
+        // ORIGINAL — só é logado, nunca lançado no lugar dele.
+        log(
+          `[sync-financeiro] ERRO CRÍTICO: falha ao registrar status 'falhou' da sincronização ` +
+          `(sincronizacao_id=${syncId}). A linha pode ficar presa em 'executando' indefinidamente. ` +
+          `erro_original="${err.message}" erro_ao_marcar_falha="${erroFallback.message}"`
+        )
+      }
     }
     throw err
   } finally {
