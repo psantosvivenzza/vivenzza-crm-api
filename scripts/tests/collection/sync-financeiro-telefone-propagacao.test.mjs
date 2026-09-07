@@ -14,6 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { exigirSucessoFixture } from '../helpers/fixture-result.mjs'
+import { limparContasCr999EDependencias } from '../helpers/limpar-contas-dependentes-cr999.mjs'
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 process.env.NODE_ENV = 'test'
 process.env.LOCAL_PG_URL = `postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DATABASE}`
@@ -50,16 +51,11 @@ async function limparTudo() {
   // encerrada no meio), os testes collection-shadow-* que rodam antes deste
   // arquivo em ordem alfabética processam a carteira INTEIRA e recalculam
   // score/NBA pra elas — sem apagar essas dependências primeiro, o DELETE de
-  // contas_financeiras abaixo falha com FK (23503) em vez de limpar.
-  const { data: contasParaRemover } = await exigirSucessoFixture('buscar contas cr-999% p/ limpar dependências',
-    supabase.from('contas_financeiras').select('id').like('legacy_id', 'cr-999%'))
-  const idsParaRemover = (contasParaRemover || []).map((c) => c.id)
-  if (idsParaRemover.length > 0) {
-    await exigirSucessoFixture('limpar recovery scores de cr-999%', supabase.from('collection_recovery_scores').delete().in('contas_financeiras_id', idsParaRemover))
-    await exigirSucessoFixture('limpar priority scores de cr-999%', supabase.from('collection_priority_scores').delete().in('contas_financeiras_id', idsParaRemover))
-    await exigirSucessoFixture('limpar nba shadow log de cr-999%', supabase.from('nba_shadow_log').delete().in('contas_financeiras_id', idsParaRemover))
-  }
-  await exigirSucessoFixture('limpar contas cr-999%', supabase.from('contas_financeiras').delete().like('legacy_id', 'cr-999%'))
+  // contas_financeiras falharia com FK (23503) em vez de limpar. Extraído
+  // pra scripts/tests/helpers/limpar-contas-dependentes-cr999.mjs, com
+  // cobertura de regressão permanente em
+  // scripts/tests/collection/limpar-contas-dependentes-fk.test.mjs.
+  await limparContasCr999EDependencias(supabase)
   await exigirSucessoFixture('limpar clientes CLI-TEL-%', supabase.from('clientes_erp').delete().like('legacy_id', 'CLI-TEL-%'))
   await exigirSucessoFixture('limpar DNC', supabase.from('collection_do_not_contact').delete().neq('id', '00000000-0000-0000-0000-000000000000'))
   await exigirSucessoFixture('limpar sincronizacoes', supabase.from('sincronizacoes_financeiro').delete().neq('id', '00000000-0000-0000-0000-000000000000'))
