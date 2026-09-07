@@ -13,6 +13,8 @@
 // chama Evolution em nenhum ponto).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { exigirSucessoFixture } from '../helpers/fixture-result.mjs'
+import { limparContasCr999EDependencias } from '../helpers/limpar-contas-dependentes-cr999.mjs'
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 process.env.NODE_ENV = 'test'
 process.env.LOCAL_PG_URL = `postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DATABASE}`
@@ -39,14 +41,24 @@ function criarPoolE01Fake(linhas) {
 }
 
 async function criarClienteComContatos(codigoCliente, contatos) {
-  await supabase.from('clientes_erp').insert({ legacy_id: codigoCliente, tipo: 'PJ', razao_social: `Cliente ${codigoCliente}`, ativo: true, contatos })
+  await exigirSucessoFixture('criar cliente com contatos',
+    supabase.from('clientes_erp').insert({ legacy_id: codigoCliente, tipo: 'PJ', razao_social: `Cliente ${codigoCliente}`, ativo: true, contatos }))
 }
 
 async function limparTudo() {
-  await supabase.from('contas_financeiras').delete().like('legacy_id', 'cr-999%')
-  await supabase.from('clientes_erp').delete().like('legacy_id', 'CLI-TEL-%')
-  await supabase.from('collection_do_not_contact').delete().neq('id', '00000000-0000-0000-0000-000000000000')
-  await supabase.from('sincronizacoes_financeiro').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+  // Reproduzido em 07/09/2026 rodando a SUÍTE COMPLETA (nunca isolando este
+  // arquivo): se uma execução anterior deixou conta(s) cr-999% pra trás (ex:
+  // encerrada no meio), os testes collection-shadow-* que rodam antes deste
+  // arquivo em ordem alfabética processam a carteira INTEIRA e recalculam
+  // score/NBA pra elas — sem apagar essas dependências primeiro, o DELETE de
+  // contas_financeiras falharia com FK (23503) em vez de limpar. Extraído
+  // pra scripts/tests/helpers/limpar-contas-dependentes-cr999.mjs, com
+  // cobertura de regressão permanente em
+  // scripts/tests/collection/limpar-contas-dependentes-fk.test.mjs.
+  await limparContasCr999EDependencias(supabase)
+  await exigirSucessoFixture('limpar clientes CLI-TEL-%', supabase.from('clientes_erp').delete().like('legacy_id', 'CLI-TEL-%'))
+  await exigirSucessoFixture('limpar DNC', supabase.from('collection_do_not_contact').delete().neq('id', '00000000-0000-0000-0000-000000000000'))
+  await exigirSucessoFixture('limpar sincronizacoes', supabase.from('sincronizacoes_financeiro').delete().neq('id', '00000000-0000-0000-0000-000000000000'))
 }
 
 test('Propagação de telefone NetVision -> cobrança, em título já existente', async (t) => {
@@ -60,7 +72,7 @@ test('Propagação de telefone NetVision -> cobrança, em título já existente'
     const conta = await criarContaDeTeste(supabase, {
       codigo_cliente: codigo, telefone_cobranca: telefoneA, valor: 100, valor_pago: 0, status: 'aberta', vencimento: '2026-12-01',
     })
-    await supabase.from('contas_financeiras').update({ legacy_id: 'cr-999001-1' }).eq('id', conta.id)
+    await exigirSucessoFixture('vincular título 999001', supabase.from('contas_financeiras').update({ legacy_id: 'cr-999001-1' }).eq('id', conta.id))
 
     // Linha do "NetVision" com o MESMO valor pago (0) — decidirAtualizacao()
     // vai retornar 'nenhuma' (nenhuma mudança financeira), e MESMO ASSIM o
@@ -87,7 +99,7 @@ test('Propagação de telefone NetVision -> cobrança, em título já existente'
     await criarClienteComContatos(codigo, [])
 
     const conta = await criarContaDeTeste(supabase, { codigo_cliente: codigo, telefone_cobranca: telefoneA, valor: 50, valor_pago: 0, status: 'aberta' })
-    await supabase.from('contas_financeiras').update({ legacy_id: 'cr-999002-1' }).eq('id', conta.id)
+    await exigirSucessoFixture('vincular título 999002', supabase.from('contas_financeiras').update({ legacy_id: 'cr-999002-1' }).eq('id', conta.id))
 
     const pool = criarPoolE01Fake([{ NumeroTitulo: '999002', Sequencia: '1', ValorPago: 0, CodigoCliente: codigo }])
     const relatorio = await executarSincronizacaoFinanceira({ completo: true, poolE01: pool, dryRun: false, log: () => {} })
@@ -105,14 +117,14 @@ test('Propagação de telefone NetVision -> cobrança, em título já existente'
     await criarClienteComContatos(codigo, [{ tipo: 'celular', valor: telefoneB }])
 
     const conta = await criarContaDeTeste(supabase, { codigo_cliente: codigo, telefone_cobranca: telefoneA, valor: 100, valor_pago: 0, status: 'vencida' })
-    await supabase.from('contas_financeiras').update({ legacy_id: 'cr-999003-1' }).eq('id', conta.id)
+    await exigirSucessoFixture('vincular título 999003', supabase.from('contas_financeiras').update({ legacy_id: 'cr-999003-1' }).eq('id', conta.id))
 
     // Quarentena temporária ativa em A (número inválido) + opt-out permanente
     // num telefone C qualquer, sem relação nenhuma com este título.
     const quarentenaExpiraEm = new Date(Date.now() + 20 * 86400000).toISOString()
-    await supabase.from('collection_do_not_contact').insert({ cliente_telefone: telefoneA, canal: 'whatsapp', motivo: 'numero_invalido_whatsapp', expira_em: quarentenaExpiraEm })
+    await exigirSucessoFixture('criar quarentena', supabase.from('collection_do_not_contact').insert({ cliente_telefone: telefoneA, canal: 'whatsapp', motivo: 'numero_invalido_whatsapp', expira_em: quarentenaExpiraEm }))
     const telefoneOptOut = telefoneDeTeste()
-    await supabase.from('collection_do_not_contact').insert({ cliente_telefone: telefoneOptOut, canal: 'todos', motivo: 'pedido do cliente', expira_em: null })
+    await exigirSucessoFixture('criar opt-out', supabase.from('collection_do_not_contact').insert({ cliente_telefone: telefoneOptOut, canal: 'todos', motivo: 'pedido do cliente', expira_em: null }))
 
     const { data: dncAntes } = await supabase.from('collection_do_not_contact').select('*').order('cliente_telefone')
 
@@ -136,7 +148,7 @@ test('Propagação de telefone NetVision -> cobrança, em título já existente'
     const codigo = `CLI-TEL-${Date.now()}`
     await criarClienteComContatos(codigo, [{ tipo: 'celular', valor: telefoneB }])
     const conta = await criarContaDeTeste(supabase, { codigo_cliente: codigo, telefone_cobranca: telefoneA, valor: 100, valor_pago: 0, status: 'aberta' })
-    await supabase.from('contas_financeiras').update({ legacy_id: 'cr-999004-1' }).eq('id', conta.id)
+    await exigirSucessoFixture('vincular título 999004', supabase.from('contas_financeiras').update({ legacy_id: 'cr-999004-1' }).eq('id', conta.id))
 
     const pool = criarPoolE01Fake([{ NumeroTitulo: '999004', Sequencia: '1', ValorPago: 0, CodigoCliente: codigo }])
     const relatorio = await executarSincronizacaoFinanceira({ completo: true, poolE01: pool, dryRun: true, log: () => {} })
@@ -153,7 +165,7 @@ test('Propagação de telefone NetVision -> cobrança, em título já existente'
     const codigo = `CLI-TEL-${Date.now()}`
     await criarClienteComContatos(codigo, [{ tipo: 'celular', valor: telefoneB }])
     const conta = await criarContaDeTeste(supabase, { codigo_cliente: codigo, telefone_cobranca: telefoneA, valor: 100, valor_pago: 0, status: 'aberta' })
-    await supabase.from('contas_financeiras').update({ legacy_id: 'cr-999005-1' }).eq('id', conta.id)
+    await exigirSucessoFixture('vincular título 999005', supabase.from('contas_financeiras').update({ legacy_id: 'cr-999005-1' }).eq('id', conta.id))
 
     const pool = criarPoolE01Fake([{ NumeroTitulo: '999005', Sequencia: '1', ValorPago: 0, CodigoCliente: codigo }])
     const relatorio = await executarSincronizacaoFinanceira({ completo: true, poolE01: pool, dryRun: false, log: () => {} })
