@@ -41,12 +41,26 @@ contra o banco já contaminado (6/6 testes) e na suíte completa inteira
 
 Achado à parte, sem correção de código: rodar a suíte completa DUAS vezes
 seguidas no mesmo banco (sem `db:local:reset` entre as execuções) produziu
-6 falhas adicionais (`collection-shadow-queue`,
-`collection-shadow-reports-large-portfolio`,
-`collection-shadow-reports-postgrest-pagination`,
-`financeiro-promessa-operador`, `promise-expiry-timezone-boundary`,
-`whatsapp-global-rate-limit`) por acúmulo de dados reais entre execuções
-(contagens exatas de carteira, teto global de envio por janela de tempo
-real). Nenhuma dessas falhas se repetiu numa execução única contra banco
-recém-resetado — não foram investigadas a fundo nem corrigidas nesta
-rotina. Rode `db:local:reset` antes de cada execução completa da suíte.
+6 arquivos com falha, em dois mecanismos distintos — nenhum confirmado
+como bug de produto, já que nenhuma asserção sobre comportamento real
+chegou a rodar:
+
+- `collection-shadow-queue`, `collection-shadow-reports-large-portfolio`,
+  `collection-shadow-reports-postgrest-pagination`: acúmulo real de linhas
+  entre execuções (carteira e `collection_dispatches` maiores do que o
+  esperado) quebra asserções de contagem/índice exatos.
+- `financeiro-promessa-operador`, `promise-expiry-timezone-boundary`,
+  `whatsapp-global-rate-limit`: violação de unicidade
+  `clientes_erp_legacy_id_unique` (23505) já na preparação do fixture, antes
+  de qualquer asserção do teste em si. Hipótese corroborada mas NÃO
+  confirmada (o gerador exato não foi rastreado): os três arquivos usam
+  `mock.timers.enable({ apis: ['Date'], now: <instante fixo> })` para
+  congelar o relógio em cenários de fronteira BRT/UTC; se algum gerador de
+  id de fixture depende de `Date.now()`/`new Date()`, o relógio congelado
+  produziria o mesmo id a cada execução, colidindo com a linha residual da
+  execução anterior.
+
+Nenhuma dessas falhas se repetiu numa execução única contra banco
+recém-resetado (56/56 arquivos, 0 falhas). Não foram investigadas a fundo
+nem corrigidas nesta rotina. Rode `db:local:reset` antes de cada execução
+completa da suíte.
