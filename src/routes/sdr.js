@@ -594,11 +594,31 @@ async function aplicarPacingLara() {
 // Registra cada envio da Lara em whatsapp_mensagens, no mesmo formato usado por
 // /api/whatsapp/enviar* — sem isso, a conversa que a vendedora vê no Pipeline/WhatsApp
 // fica incompleta (só apareceriam as mensagens do cliente, nunca as respostas da Lara).
+//
+// CORRIGIDO em 2026-09-08: esta função nunca checava o `error` do `.insert()`
+// — supabase-js só REJEITA a promise em falha de rede/conexão; um erro de
+// banco (constraint, coluna, RLS etc.) volta normalmente como
+// `{ data: null, error }`, sem lançar exceção. Isso mascarava em silêncio
+// qualquer falha de gravação aqui.
+//
+// Escopo desta correção: o defeito de tratamento de erro acima é comprovado
+// por leitura do código (o `error` nunca era lido). NÃO foi demonstrado que
+// este defeito causou algum caso histórico real de mensagem sem registro —
+// a investigação que motivou esta correção reconciliou uma amostra de
+// mensagens diretamente com a Evolution (histórico real, fonte
+// independente) e confirmou que foram entregues; o único caso sem resposta
+// encontrado foi um handoff humano antigo, não uma falha técnica deste tipo.
+// Entrega confirmada pela Evolution e persistência no CRM local são duas
+// evidências DIFERENTES — uma não prova a outra. Esta é uma correção
+// preventiva de um defeito real, não a correção de uma não-entrega
+// comprovada.
 async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
   try {
     const candidatos = candidatosTelefone(telefone)
-    const { data: leads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
-    await supabase.from('whatsapp_mensagens').insert({
+    const { data: leads, error: erroLeads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
+    if (erroLeads) throw erroLeads
+
+    const { error: erroInsert } = await supabase.from('whatsapp_mensagens').insert({
       lead_id: leads?.[0]?.id ?? null,
       mensagem,
       direcao: 'saida',
@@ -608,8 +628,18 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       media_tipo: mediaTipo,
       media_url: mediaUrl,
     })
+    if (erroInsert) throw erroInsert
   } catch (err) {
-    console.error('[sdr] erro ao registrar mensagem de saída:', err.message)
+    // Log sanitizado (sem conteúdo de mensagem nem telefone completo) que
+    // distingue EXPLICITAMENTE as duas falhas possíveis: esta função só é
+    // chamada DEPOIS de evolutionApi.post já ter retornado sucesso — ou
+    // seja, o ENVIO à Evolution já aconteceu antes desta etapa rodar. Um
+    // erro aqui é sempre uma falha de REGISTRO LOCAL, nunca prova (nem
+    // sugere) que o envio ao cliente falhou. Por isso, deliberadamente, NÃO
+    // há reenvio/retry aqui em nenhuma hipótese: reenviar às cegas por causa
+    // de uma falha de registro local arriscaria duplicar uma mensagem que o
+    // cliente já recebeu.
+    console.error('[sdr] falha ao REGISTRAR mensagem de saída no histórico local (o ENVIO à Evolution já havia sido confirmado antes desta etapa, separada) — sem reenvio automático:', err.message)
   }
 }
 
