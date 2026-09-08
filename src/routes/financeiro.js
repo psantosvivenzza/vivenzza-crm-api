@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { timelineDoTituloPaginada, serializarEventoTimeline } from '../lib/collection/timeline.js'
-import { adminOnly } from '../middleware/auth.js'
+import { adminOuFinanceiro } from '../middleware/auth.js'
 import { statusQuitacaoTitulo } from '../lib/collection/paymentGuard.js'
 import { promessaAtivaPara, registrarPromessa, cancelarPromessaAtiva, ERRO_PROMESSA_ATIVA_CONCORRENTE } from '../lib/collection/promises.js'
 import { hojeBrtISO } from '../lib/collection/collectionContactPolicy.js'
@@ -218,15 +218,16 @@ router.get('/:id/promessa', async (req, res) => {
 
 // POST /api/financeiro/:id/promessa — registra promessa de pagamento pro
 // título (data + observação opcional, sem valor parcial — sempre o saldo
-// devedor atual do título). adminOnly: é mutation financeira/operacional,
-// mesmo padrão de restrição de POST/estorno já usado neste arquivo.
+// devedor atual do título). adminOuFinanceiro: decisão explícita de
+// 2026-09-07 — só admin/financeiro operam qualquer coisa financeira, nunca
+// vendedor, nem no próprio título.
 //
 // Se já existir promessa ativa: 409 por padrão (ação explícita e auditável,
 // não substitui silenciosamente) — só substitui se o operador mandar
 // `substituir: true` explicitamente no corpo, e nesse caso reusa
 // registrarPromessa() (que já cancela a anterior e emite PROMESSA_SUBSTITUIDA
 // — lógica existente, não duplicada aqui).
-router.post('/:id/promessa', adminOnly, async (req, res) => {
+router.post('/:id/promessa', adminOuFinanceiro, async (req, res) => {
   try {
     const { data: conta, error: erroConta } = await supabase
       .from('contas_financeiras')
@@ -287,8 +288,8 @@ router.post('/:id/promessa', adminOnly, async (req, res) => {
 // POST /api/financeiro/:id/promessa/cancelar — cancela a promessa ativa sem
 // registrar uma nova (diferente de "substituir" acima). Não usa DELETE —
 // nunca apaga histórico físico, só muda status e registra evento na
-// timeline. adminOnly, mesmo motivo do POST acima.
-router.post('/:id/promessa/cancelar', adminOnly, async (req, res) => {
+// timeline. adminOuFinanceiro, mesmo motivo do POST acima.
+router.post('/:id/promessa/cancelar', adminOuFinanceiro, async (req, res) => {
   try {
     const { data: conta, error: erroConta } = await supabase
       .from('contas_financeiras')
@@ -310,8 +311,9 @@ router.post('/:id/promessa/cancelar', adminOnly, async (req, res) => {
   }
 })
 
-// POST /api/financeiro — criar conta
-router.post('/', async (req, res) => {
+// POST /api/financeiro — criar conta. adminOuFinanceiro (decisão de
+// 2026-09-07): criar título é operação financeira, vendedor nunca pode.
+router.post('/', adminOuFinanceiro, async (req, res) => {
   try {
     const {
       tipo, descricao, valor, vencimento,
@@ -345,13 +347,40 @@ router.post('/', async (req, res) => {
   }
 })
 
-// PUT /api/financeiro/:id — editar
-router.put('/:id', async (req, res) => {
+// Campos que PUT pode alterar — allowlist explícita (decisão de 2026-09-07):
+// nem admin/financeiro deve tocar pagamento/saldo/status/tipo/posse pelo CRUD
+// genérico, contornando baixa (fn_baixar_titulo)/estorno (fn_estornar_baixa)/
+// cancelamento e a trilha de auditoria que cada um mantém. Só os campos
+// abaixo — descritivos/administrativos, nunca o estado financeiro do título.
+// Único uso real confirmado hoje (frontend) é categoria_dre; os demais são
+// correções de cadastro de baixo risco (nome, referência, observação).
+// vencimento e pedido_id ficam de fora até decisão explícita (não avaliados
+// nesta rodada).
+const CAMPOS_EDITAVEIS_PUT = ['descricao', 'categoria', 'categoria_dre', 'pessoa_nome', 'documento_ref', 'observacoes']
+
+// PUT /api/financeiro/:id — editar. adminOuFinanceiro (decisão de
+// 2026-09-07): abandona o modelo de posse do vendedor — vendedor nunca edita
+// título nenhum, nem o da própria carteira. Só os campos de
+// CAMPOS_EDITAVEIS_PUT são aceitos; vendedor_id/tipo/valor/valor_pago/status
+// nunca são lidos do corpo aqui — só mudam via baixa/estorno/cancelamento.
+router.put('/:id', adminOuFinanceiro, async (req, res) => {
   try {
-    const campos = { ...req.body }
-    delete campos.id
-    delete campos.created_at
-    if (campos.valor != null) campos.valor = Number(campos.valor)
+    // Rejeita a requisição inteira se qualquer campo fora da allowlist for
+    // enviado — nunca aplica parcialmente os campos permitidos ignorando
+    // em silêncio os demais. `id`/`created_at`/`updated_at` no corpo também
+    // contam como não permitidos (nunca fazem sentido vindos do cliente).
+    const camposNaoPermitidos = Object.keys(req.body || {}).filter((chave) => !CAMPOS_EDITAVEIS_PUT.includes(chave))
+    if (camposNaoPermitidos.length > 0) {
+      return res.status(400).json({
+        erro: `Campo(s) não permitido(s) neste PUT: ${camposNaoPermitidos.join(', ')}. Use baixa/estorno/cancelamento para alterar pagamento, saldo, status, tipo ou posse.`,
+        campos_nao_permitidos: camposNaoPermitidos,
+      })
+    }
+
+    const campos = {}
+    for (const chave of CAMPOS_EDITAVEIS_PUT) {
+      if (req.body[chave] !== undefined) campos[chave] = req.body[chave]
+    }
     campos.updated_at = new Date().toISOString()
 
     const { data, error } = await supabase
@@ -373,10 +402,9 @@ router.put('/:id', async (req, res) => {
 // PATCH /api/financeiro/contas/:id/baixa — baixa manual (total ou parcial).
 // Chama fn_baixar_titulo (RPC atômica, trava a conta com FOR UPDATE) — cria uma
 // linha em baixas_financeiras e recalcula valor_pago/status a partir da soma
-// das baixas ativas. Vendedor só pode dar baixa em títulos vinculados a ele
-// (vendedor_id); admin, em qualquer um. Muitos títulos legados têm vendedor_id
-// nulo — nesses, só admin.
-router.patch('/contas/:id/baixa', async (req, res) => {
+// das baixas ativas. adminOuFinanceiro (decisão de 2026-09-07): vendedor não
+// pode dar baixa nem no próprio título — abandona o modelo de posse anterior.
+router.patch('/contas/:id/baixa', adminOuFinanceiro, async (req, res) => {
   try {
     const { valor_recebido, data_pagamento, forma_pagamento, observacao } = req.body
     const valorRecebidoNum = Number(valor_recebido)
@@ -387,15 +415,11 @@ router.patch('/contas/:id/baixa', async (req, res) => {
 
     const { data: conta, error: erroBusca } = await supabase
       .from('contas_financeiras')
-      .select('id, vendedor_id')
+      .select('id')
       .eq('id', req.params.id)
       .single()
     if (erroBusca) throw erroBusca
     if (!conta) return res.status(404).json({ erro: 'Conta não encontrada' })
-
-    if (req.user.role === 'vendedor' && conta.vendedor_id !== req.user.id) {
-      return res.status(403).json({ erro: 'Sem permissão para dar baixa neste título' })
-    }
 
     const hoje = new Date().toISOString().split('T')[0]
     const { data, error } = await supabase.rpc('fn_baixar_titulo', {
@@ -462,18 +486,14 @@ router.get('/contas/:contaId/baixas', async (req, res) => {
 })
 
 // POST /api/financeiro/contas/:contaId/baixas/:baixaId/estornos — solicita o
-// estorno de UMA baixa específica (nunca zera a conta inteira). Só admin.
+// estorno de UMA baixa específica (nunca zera a conta inteira). adminOuFinanceiro.
 // Abaixo de LIMITE_ESTORNO_SEM_APROVACAO conclui na hora; acima, fica
-// pendente_aprovacao até outro admin aprovar/rejeitar (fn_estornar_baixa decide).
+// pendente_aprovacao até outro admin/financeiro aprovar/rejeitar (fn_estornar_baixa decide).
 const CATEGORIAS_MOTIVO_ESTORNO = [
   'titulo_errado', 'valor_incorreto', 'pagamento_nao_confirmado', 'baixa_duplicada', 'devolucao_chargeback', 'outro',
 ]
-router.post('/contas/:contaId/baixas/:baixaId/estornos', async (req, res) => {
+router.post('/contas/:contaId/baixas/:baixaId/estornos', adminOuFinanceiro, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ erro: 'Apenas administradores podem estornar baixas' })
-    }
-
     const { motivo_categoria, motivo_detalhado, confirmacao } = req.body
     if (!CATEGORIAS_MOTIVO_ESTORNO.includes(motivo_categoria)) {
       return res.status(400).json({ erro: '"motivo_categoria" inválida' })
@@ -512,10 +532,13 @@ router.post('/contas/:contaId/baixas/:baixaId/estornos', async (req, res) => {
   }
 })
 
-// GET /api/financeiro/estornos/pendentes — fila de aprovação (admin)
-router.get('/estornos/pendentes', async (req, res) => {
+// GET /api/financeiro/estornos/pendentes — fila de aprovação. adminOuFinanceiro
+// (2026-09-07): quem já pode aprovar/rejeitar (PATCH .../aprovar|rejeitar,
+// também adminOuFinanceiro) precisa conseguir listar a fila — senão
+// financeiro aprova por id mas nunca descobre que há algo pendente. Escopo
+// estreito e explícito: só esta rota; nenhuma outra leitura foi alterada.
+router.get('/estornos/pendentes', adminOuFinanceiro, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores' })
 
     const { data, error } = await supabase
       .from('estornos_financeiros')
@@ -535,11 +558,11 @@ router.get('/estornos/pendentes', async (req, res) => {
   }
 })
 
-// PATCH /api/financeiro/estornos/:estornoId/aprovar — só admin, e nunca quem solicitou
-router.patch('/estornos/:estornoId/aprovar', async (req, res) => {
+// PATCH /api/financeiro/estornos/:estornoId/aprovar — adminOuFinanceiro, e
+// nunca quem solicitou (checagem de "nunca quem solicitou" é feita dentro de
+// fn_aprovar_estorno, não duplicada aqui).
+router.patch('/estornos/:estornoId/aprovar', adminOuFinanceiro, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores podem aprovar estornos' })
-
     const { data, error } = await supabase.rpc('fn_aprovar_estorno', {
       p_estorno_id: req.params.estornoId,
       p_usuario_id: req.user.id,
@@ -552,11 +575,9 @@ router.patch('/estornos/:estornoId/aprovar', async (req, res) => {
   }
 })
 
-// PATCH /api/financeiro/estornos/:estornoId/rejeitar — motivo obrigatório
-router.patch('/estornos/:estornoId/rejeitar', async (req, res) => {
+// PATCH /api/financeiro/estornos/:estornoId/rejeitar — motivo obrigatório, adminOuFinanceiro
+router.patch('/estornos/:estornoId/rejeitar', adminOuFinanceiro, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Apenas administradores podem rejeitar estornos' })
-
     const { motivo_rejeicao } = req.body
     if (!motivo_rejeicao?.trim()) {
       return res.status(400).json({ erro: '"motivo_rejeicao" é obrigatório' })
@@ -575,8 +596,10 @@ router.patch('/estornos/:estornoId/rejeitar', async (req, res) => {
   }
 })
 
-// PATCH /api/financeiro/:id/cancelar
-router.patch('/:id/cancelar', async (req, res) => {
+// PATCH /api/financeiro/:id/cancelar — adminOuFinanceiro (decisão de
+// 2026-09-07): abandona o modelo de posse — vendedor não cancela nenhum
+// título, nem o da própria carteira.
+router.patch('/:id/cancelar', adminOuFinanceiro, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('contas_financeiras')
@@ -594,8 +617,10 @@ router.patch('/:id/cancelar', async (req, res) => {
   }
 })
 
-// DELETE /api/financeiro/:id
-router.delete('/:id', async (req, res) => {
+// DELETE /api/financeiro/:id — exclusão física, sem reversão possível
+// (diferente de cancelar, que preserva o registro). adminOuFinanceiro. Sem
+// uso conhecido no frontend hoje.
+router.delete('/:id', adminOuFinanceiro, async (req, res) => {
   try {
     const { error } = await supabase
       .from('contas_financeiras')

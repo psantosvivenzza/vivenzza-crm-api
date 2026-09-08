@@ -7,6 +7,14 @@ const router = Router()
 
 const SELECT_FIELDS = 'id, nome, email, role, ativo, recebe_leads, criado_em, meta_mensal, comissao_sem_meta, comissao_com_meta'
 
+// Papel "financeiro" (2026-09-07, decisão explícita do responsável): só
+// autoriza operações financeiras em /api/financeiro (ver adminOuFinanceiro
+// em middleware/auth.js) — não concede adminOnly em nenhuma outra rota
+// (usuarios, configurações, campanhas, automações continuam só-admin).
+// Antes desta validação, `usuarios.role` aceitava qualquer string do corpo
+// da requisição sem checagem nenhuma (nem CHECK constraint no banco).
+const PAPEIS_VALIDOS = ['admin', 'vendedor', 'financeiro']
+
 // GET /api/usuarios — listar (só admin)
 router.get('/', adminOnly, async (req, res) => {
   try {
@@ -46,6 +54,9 @@ router.post('/', adminOnly, async (req, res) => {
     if (!nome || !email || !senha) {
       return res.status(400).json({ erro: 'nome, email e senha são obrigatórios' })
     }
+    if (!PAPEIS_VALIDOS.includes(role)) {
+      return res.status(400).json({ erro: `"role" deve ser um de: ${PAPEIS_VALIDOS.join(', ')}` })
+    }
 
     const senha_hash = await bcrypt.hash(senha, 12)
     const insertData = { nome, email: email.toLowerCase().trim(), senha_hash, role, ativo, recebe_leads }
@@ -71,6 +82,10 @@ router.patch('/:id', adminOnly, async (req, res) => {
   try {
     const { nome, email, senha, role, ativo, recebe_leads, meta_mensal, comissao_sem_meta, comissao_com_meta } = req.body
     const updates = {}
+    if (role !== undefined && !PAPEIS_VALIDOS.includes(role)) {
+      return res.status(400).json({ erro: `"role" deve ser um de: ${PAPEIS_VALIDOS.join(', ')}` })
+    }
+
     if (nome !== undefined) updates.nome = nome
     if (email !== undefined) updates.email = email.toLowerCase().trim()
     if (role !== undefined) updates.role = role

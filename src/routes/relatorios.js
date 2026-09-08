@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { adminOnly } from '../middleware/auth.js'
+import { adminOnly, adminOuFinanceiro } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -28,7 +28,8 @@ async function buscarTudo(construirQuery) {
 const mesArray = () => Array.from({ length: 12 }, (_, i) => i + 1)
 
 // GET /api/relatorios/dre?ano=2026&mes=7 (mês único) ou ?ano=2026 (12 meses lado a lado)
-router.get('/dre', adminOnly, async (req, res) => {
+// DRE faz parte do bloco financeiro (decisão de 2026-09-08): admin ou financeiro.
+router.get('/dre', adminOuFinanceiro, async (req, res) => {
   try {
     const ano = Number(req.query.ano)
     const mesFiltro = req.query.mes ? Number(req.query.mes) : null

@@ -13,9 +13,25 @@
 //
 // LIMITAÇÕES CONHECIDAS (documentadas, não são bugs — escopo deliberadamente
 // estreito, auditado em 2026-08-12):
-// - Embed de relacionamento (`'*, tabela(col1,col2)'`) só funciona pra UMA
-//   relação hardcoded em EMBED_FK (collection_calls→contas_financeiras).
-//   Qualquer outro embed é silenciosamente ignorado (sem erro).
+// - Embed de relacionamento (`'*, tabela(col1,col2)'`) sem apelido nem `!fkey`
+//   explícito só funciona pra relações em EMBED_FK (hardcoded, ver comentário
+//   junto ao mapa) — qualquer outra combinação tabela→tabela fora do mapa é
+//   silenciosamente ignorada (sem erro), exatamente como antes de 2026-09-08.
+//   Deliberado: uma versão anterior desta correção resolvia automaticamente
+//   qualquer par de tabelas com 1 FK só entre elas (introspecção do
+//   catálogo), mas isso mudava o resultado de ~50 embeds simples em rotas de
+//   produção não relacionadas (leads.js, erp.js, pedidos.js, produtos.js,
+//   etc.) que hoje dependem do embed local ser ignorado — revertido por
+//   escopo, cada relação nova entra em EMBED_FK uma de cada vez.
+// - Embed com apelido + FK nomeada explícita (`'apelido:tabela!nome_fkey(cols)'`,
+//   sintaxe real do PostgREST) É suportado desde 2026-09-08 — resolve a coluna
+//   de FK por introspecção real do catálogo (pg_constraint via
+//   information_schema), não por convenção de nome nem mapa hardcoded. Usado
+//   por GET /api/financeiro/contas/:contaId/baixas e
+//   GET /api/financeiro/estornos/pendentes (múltiplos embeds da mesma tabela
+//   usuarios, cada um via uma FK diferente — por isso precisam de apelido).
+//   FK nomeada que não existir no catálogo lança erro explícito (não ignora
+//   silenciosamente — ao contrário do caso sem apelido acima).
 // - Sem transação pública (BEGIN/COMMIT) — cada chamada é uma query isolada
 //   via pool.query(). Atomicidade multi-tabela precisa de função Postgres
 //   (rpc), igual ao padrão real do supabase-js.
@@ -58,19 +74,83 @@ function assertIdent(name, kind = 'identificador') {
 // Mapa mínimo de relacionamentos para suportar a sintaxe de embed do PostgREST
 // (`'*, tabela(col1, col2)'`) nos poucos lugares do código de cobrança que usam
 // isso. Adicionar aqui se um novo embed for necessário.
+//
+// DELIBERADAMENTE hardcoded, não introspectado automaticamente: o código de
+// produção tem ~50 embeds simples (leads.js, erp.js, pedidos.js, produtos.js,
+// tarefas.js, whatsapp.js, nfe.js, nfe-entradas.js, etc.) que NUNCA passaram
+// por EMBED_FK e são silenciosamente ignorados aqui há meses — comportamento
+// documentado e usado por quem escreveu essas rotas (sabem que o embed local
+// não resolve). Resolver esses embeds "de graça" via introspecção do catálogo
+// (como uma versão anterior desta correção fazia, revertida em 2026-09-08)
+// mudaria a forma de QUALQUER um deles sem relação com este trabalho — escopo
+// bem maior que o pedido (2 embeds simples nas rotas de estorno). Por isso
+// cada entrada é adicionada aqui, uma de cada vez, só quando precisa de
+// verdade — igual ao padrão já estabelecido para collection_calls.
 const EMBED_FK = {
   collection_calls: { contas_financeiras: 'contas_financeiras_id' },
+  // 2026-09-08 — GET /api/financeiro/estornos/pendentes (financeiro.js) embeda
+  // baixas_financeiras e contas_financeiras sem apelido nem FK nomeada;
+  // estornos_financeiros só tem 1 FK pra cada uma das duas, sem ambiguidade.
+  estornos_financeiros: {
+    baixas_financeiras: 'baixa_financeira_id',
+    contas_financeiras: 'conta_financeira_id',
+  },
 }
 
-function parseSelect(cols) {
+// 2026-09-08 — suporte à sintaxe de embed do PostgREST com apelido e FK
+// nomeada explícita: `apelido:tabela!nome_da_constraint_fkey(col1, col2)`.
+// Necessário quando a MESMA tabela é referenciada mais de uma vez pela
+// tabela de origem (ex: estornos_financeiros tem 3 FKs pra usuarios:
+// solicitado_por/aprovado_por/rejeitado_por_usuario_id) — sem apelido, as
+// três sobrescreveriam a mesma chave no objeto de resultado.
+//
+// Grupo 1 (opcional): apelido, antes de ":". Grupo 2: nome da tabela.
+// Grupo 3 (opcional): nome da constraint de FK, depois de "!". Grupo 4:
+// lista de colunas dentro dos parênteses.
+const EMBED_RE = /(?:(\w+):)?(\w+)(?:!(\w+))?\(([^)]+)\)/g
+
+// Exportado só pra teste unitário direto (parser é função pura, mais fácil
+// de testar isolado do que sempre passando pelo Postgres real).
+export function parseSelect(cols) {
   if (!cols || cols === '*') return { main: '*', embeds: [] }
   const embeds = []
-  // Remove blocos "tabela(col1, col2)" do texto principal, guardando separadamente.
-  const main = cols.replace(/(\w+)\(([^)]+)\)/g, (_, tabela, colsInternas) => {
-    embeds.push({ tabela, cols: colsInternas.split(',').map((c) => c.trim()) })
+  // Remove blocos de embed do texto principal, guardando separadamente.
+  const main = cols.replace(EMBED_RE, (_, alias, tabela, fkeyName, colsInternas) => {
+    embeds.push({
+      alias: alias || tabela,
+      tabela,
+      fkeyName: fkeyName || null,
+      cols: colsInternas.split(',').map((c) => c.trim()),
+    })
     return ''
   }).split(',').map((c) => c.trim()).filter(Boolean).join(', ') || '*'
   return { main, embeds }
+}
+
+// Resolve o nome real da coluna de uma FK a partir do nome da CONSTRAINT
+// (ex: "estornos_financeiros_solicitado_por_usuario_id_fkey" →
+// "solicitado_por_usuario_id"), consultando o catálogo do Postgres — não
+// depende de convenção de nomenclatura nem de mapa hardcoded, então funciona
+// mesmo se a constraint tiver um nome customizado. Lança erro explícito se a
+// constraint não existir: uma FK nomeada explicitamente no `select()` que não
+// resolve é um erro de programação, não deve falhar em silêncio.
+const cacheColunaPorConstraint = new Map()
+async function resolverColunaPorNomeDeConstraint(pool, fkeyName) {
+  if (cacheColunaPorConstraint.has(fkeyName)) return cacheColunaPorConstraint.get(fkeyName)
+  const res = await pool.query(
+    `SELECT kcu.column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name AND tc.constraint_schema = kcu.constraint_schema
+      WHERE tc.constraint_name = $1 AND tc.constraint_type = 'FOREIGN KEY'`,
+    [fkeyName]
+  )
+  if (res.rows.length !== 1) {
+    throw new Error(`compat client local: constraint de FK "${fkeyName}" não encontrada no catálogo do Postgres`)
+  }
+  const coluna = assertIdent(res.rows[0].column_name, 'coluna de FK')
+  cacheColunaPorConstraint.set(fkeyName, coluna)
+  return coluna
 }
 
 class QueryBuilder {
@@ -201,8 +281,16 @@ class QueryBuilder {
     }
 
     for (const embed of embeds) {
-      const fk = EMBED_FK[this.table]?.[embed.tabela]
+      const fk = embed.fkeyName
+        ? await resolverColunaPorNomeDeConstraint(this.pool, embed.fkeyName)
+        : EMBED_FK[this.table]?.[embed.tabela]
       if (!fk) continue
+      // Chave do embed sempre presente e explicitamente null quando não há
+      // correspondência (igual ao Supabase/PostgREST real) — sem isto,
+      // JSON.stringify OMITE a chave (undefined não serializa), diferente de
+      // null (que serializa). Achado ao testar rejeitado_por em estornos não
+      // rejeitados: ficava ausente da resposta em vez de `null`.
+      for (const row of rows) row[embed.alias] = null
       const ids = [...new Set(rows.map((r) => r[fk]).filter(Boolean))]
       if (!ids.length) continue
       const relRes = await this.pool.query(
@@ -210,7 +298,7 @@ class QueryBuilder {
         [ids]
       )
       const byId = new Map(relRes.rows.map((r) => [r.id, r]))
-      for (const row of rows) row[embed.tabela] = byId.get(row[fk]) ?? null
+      for (const row of rows) row[embed.alias] = byId.get(row[fk]) ?? null
     }
 
     if (this._single) {
