@@ -612,12 +612,45 @@ async function aplicarPacingLara() {
 // evidências DIFERENTES — uma não prova a outra. Esta é uma correção
 // preventiva de um defeito real, não a correção de uma não-entrega
 // comprovada.
+// Formato aceito pra logar o código de erro do banco sem risco: SQLSTATE do
+// Postgres (5 dígitos, ex: '42703') ou código do PostgREST (letras+dígitos
+// maiúsculos, ex: 'PGRST116') — nunca frase livre. Fora desse formato, usa
+// um valor fixo — nunca ecoa o valor bruto recebido.
+const CODIGO_ERRO_PERMITIDO_RE = /^[A-Z0-9]{2,10}$/
+
+// 2026-09-08 — AJUSTE DE SEGURANÇA: a versão anterior deste log incluía
+// `err.message` — vindo direto do banco/PostgREST, essa mensagem PODE
+// ecoar dado recebido na própria chamada (achado real ao revisar a PR:
+// alguns formatos de erro de banco — ex: DETAIL de constraint — chegam a
+// incluir o valor da coluna que violou a restrição). Por isso o log agora é
+// só texto fixo + um identificador de ETAPA (um destes dois literais fixos:
+// 'consulta_lead' | 'insert_saida' — nunca dado do usuário) + o código de
+// erro, só se bater no formato permitido acima. NUNCA loga `err.message`,
+// `err.detail`, `err.hint` nem o objeto de erro bruto, em nenhuma hipótese.
+function logarFalhaDePersistenciaLocal(etapa, codigoErro) {
+  const codigoSeguro = (typeof codigoErro === 'string' && CODIGO_ERRO_PERMITIDO_RE.test(codigoErro)) ? codigoErro : 'nao_informado'
+  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoSeguro}) — sem reenvio automático`)
+}
+
 async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
+  // Rastreia a etapa em andamento pra o catch-all (exceções inesperadas,
+  // fora do caminho normal `{ data, error }` do supabase-js) ainda saber
+  // relatar qual etapa estava rodando — sem depender do texto da exceção.
+  let etapaAtual = 'consulta_lead'
   try {
     const candidatos = candidatosTelefone(telefone)
     const { data: leads, error: erroLeads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
-    if (erroLeads) throw erroLeads
+    if (erroLeads) {
+      // Deliberadamente NÃO há reenvio/retry aqui em nenhuma hipótese: esta
+      // função só é chamada DEPOIS de evolutionApi.post já ter retornado
+      // sucesso — o ENVIO à Evolution já aconteceu antes desta etapa rodar.
+      // Um erro aqui é sempre uma falha de REGISTRO LOCAL, nunca prova (nem
+      // sugere) que o envio ao cliente falhou.
+      logarFalhaDePersistenciaLocal('consulta_lead', erroLeads.code)
+      return
+    }
 
+    etapaAtual = 'insert_saida'
     const { error: erroInsert } = await supabase.from('whatsapp_mensagens').insert({
       lead_id: leads?.[0]?.id ?? null,
       mensagem,
@@ -628,18 +661,14 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       media_tipo: mediaTipo,
       media_url: mediaUrl,
     })
-    if (erroInsert) throw erroInsert
+    if (erroInsert) {
+      logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code)
+      return
+    }
   } catch (err) {
-    // Log sanitizado (sem conteúdo de mensagem nem telefone completo) que
-    // distingue EXPLICITAMENTE as duas falhas possíveis: esta função só é
-    // chamada DEPOIS de evolutionApi.post já ter retornado sucesso — ou
-    // seja, o ENVIO à Evolution já aconteceu antes desta etapa rodar. Um
-    // erro aqui é sempre uma falha de REGISTRO LOCAL, nunca prova (nem
-    // sugere) que o envio ao cliente falhou. Por isso, deliberadamente, NÃO
-    // há reenvio/retry aqui em nenhuma hipótese: reenviar às cegas por causa
-    // de uma falha de registro local arriscaria duplicar uma mensagem que o
-    // cliente já recebeu.
-    console.error('[sdr] falha ao REGISTRAR mensagem de saída no histórico local (o ENVIO à Evolution já havia sido confirmado antes desta etapa, separada) — sem reenvio automático:', err.message)
+    // Exceção inesperada (não o caminho normal `{ error }` acima) — mesma
+    // regra: nunca loga err.message/detail/hint/objeto bruto.
+    logarFalhaDePersistenciaLocal(etapaAtual, err?.code)
   }
 }
 

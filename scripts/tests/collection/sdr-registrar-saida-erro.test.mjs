@@ -1,7 +1,13 @@
 // PR candidata reduzida: só a correção de registrarMensagemSaida() em
 // src/routes/sdr.js (checagem explícita de `error` no select de leads e no
 // insert de whatsapp_mensagens, antes ignorados em silêncio) + log
-// sanitizado distinguindo falha de REGISTRO local de falha de ENVIO.
+// sanitizado por design: texto fixo + etapa ('consulta_lead'|'insert_saida',
+// sempre um literal do próprio código) + código de erro só se bater um
+// formato permitido (SQLSTATE/PostgREST), com fallback fixo caso contrário.
+// NUNCA loga err.message/detail/hint nem o objeto de erro bruto — mensagens
+// de erro de banco podem ecoar dado recebido na própria chamada (achado da
+// revisão desta PR). Comprovado pelo último teste do arquivo, com telefone/
+// conteúdo/segredo sintético embutidos deliberadamente no erro simulado.
 //
 // ESCOPO DELIBERADAMENTE ESTREITO — o que este arquivo NÃO cobre, de
 // propósito, fica preservado para revisão separada em
@@ -255,13 +261,15 @@ test('Evolution aceita o envio, mas o insert local falha — erro registrado e N
   assert.equal(envios.length, 1, 'a falha no registro local não pode gerar um segundo envio — nenhum reenvio automático')
   assert.equal(envios[0].texto, 'Mensagem enviada de verdade, insert local falha')
 
-  // Erro EXPLÍCITO e SANITIZADO (sem conteúdo de mensagem/telefone completo
-  // no texto fixo do log), distinguindo claramente REGISTRO de ENVIO.
-  const logDeErro = errosCapturados.find((m) => m.includes('falha ao REGISTRAR mensagem de saída'))
+  // Erro EXPLÍCITO e SANITIZADO — texto fixo + etapa (valor fixo do código)
+  // + código de erro em formato permitido. Nunca err.message/detail/hint.
+  const logDeErro = errosCapturados.find((m) => m.includes('falha ao persistir registro local'))
   assert.ok(logDeErro, `esperava um log de erro explícito sobre a falha de REGISTRO local; capturado: ${JSON.stringify(errosCapturados)}`)
-  assert.ok(logDeErro.includes('ENVIO'), 'o log precisa deixar explícito que o ENVIO (à Evolution) é uma etapa separada, já concluída')
+  assert.ok(logDeErro.includes('etapa=insert_saida'), 'etapa precisa identificar que a falha foi no insert')
+  assert.ok(logDeErro.includes('codigo=42703'), 'código de erro em formato permitido (SQLSTATE) deve aparecer')
   assert.ok(!logDeErro.includes(tel), 'log não pode conter o telefone completo')
   assert.ok(!logDeErro.includes('Mensagem enviada de verdade'), 'log não pode conter o conteúdo da mensagem')
+  assert.ok(!logDeErro.includes('coluna inexistente'), 'log não pode conter err.message bruto')
 
   // PROVA 2 (persistência no CRM — evidência DIFERENTE da entrega): a linha
   // realmente não existe localmente, mesmo com o envio real confirmado do
@@ -293,7 +301,7 @@ test('Evolution aceita o envio, mas o SELECT de leads dentro de registrarMensage
   // do insert em whatsapp_mensagens) — é essa que este teste força a falhar.
   const remover = interceptarChamada(supabase, {
     tabela: 'leads', operacao: 'select', ocorrencia: 2,
-    erroSimulado: { message: 'timeout simulado no select de leads' },
+    erroSimulado: { message: 'timeout simulado no select de leads', code: '08006' },
   })
   try {
     const r = await chamarWebhook(eventoTexto(tel, 'Testando select de leads falhando'))
@@ -309,10 +317,75 @@ test('Evolution aceita o envio, mas o SELECT de leads dentro de registrarMensage
   assert.equal(envios.length, 1, 'a falha no select de leads dentro do registro local não pode gerar um segundo envio')
   assert.equal(envios[0].texto, 'Mensagem enviada de verdade, select de leads falha')
 
-  const logDeErro = errosCapturados.find((m) => m.includes('falha ao REGISTRAR mensagem de saída'))
+  const logDeErro = errosCapturados.find((m) => m.includes('falha ao persistir registro local'))
   assert.ok(logDeErro, `esperava um log de erro explícito sobre a falha de REGISTRO local; capturado: ${JSON.stringify(errosCapturados)}`)
+  assert.ok(logDeErro.includes('etapa=consulta_lead'), 'etapa precisa identificar que a falha foi na consulta de leads, não no insert')
+  assert.ok(logDeErro.includes('codigo=08006'), 'código de erro em formato permitido deve aparecer')
   assert.ok(!logDeErro.includes(tel), 'log não pode conter o telefone completo')
+  assert.ok(!logDeErro.includes('timeout simulado'), 'log não pode conter err.message bruto')
 
   const saidas = await buscarMensagensSaida(tel)
   assert.equal(saidas.length, 0, 'select de leads falhou antes do insert — nenhuma linha de saída chega a ser gravada')
+})
+
+test('erro do banco com dado sensível embutido (telefone, conteúdo, segredo sintético) — nada disso aparece no log; ainda assim, um único envio', async (t) => {
+  const tel = telefoneDeTeste()
+  t.after(() => limparLead(tel))
+  fakeEvo.resetar()
+  fakeClaude.resetar()
+  await criarLeadDeTeste(tel, { atendimentoHumano: false })
+  const conteudoSensivel = 'Meu cartão é 4111-1111-1111-1111, pode confirmar meu endereço?'
+  fakeClaude.controlar({ texto: JSON.stringify({ resposta: conteudoSensivel, audio_script: null, acao: 'NENHUMA', tipo_lead: 'indefinido', proximo_estado: 'qualificando', temperatura: 'frio', etapa_cadencia: 1 }) })
+
+  const segredoSintetico = 'sk_test_SEGREDO_SINTETICO_1234567890'
+  // Simula o pior caso realista: um erro de banco cujo message/detail/hint
+  // ecoam de volta dado recebido na chamada (ex: DETAIL de constraint
+  // incluindo o valor da coluna) — e um `code` malicioso tentando vazar o
+  // telefone through o campo que É permitido logar (mais de 10 caracteres,
+  // então falha o formato e cai no fallback fixo).
+  const erroComDadoSensivel = {
+    message: `duplicate key value violates unique constraint "whatsapp_mensagens_telefone_key" DETAIL: Key (telefone)=(${tel}) already exists. mensagem="${conteudoSensivel}" token=${segredoSintetico}`,
+    detail: `Key (telefone)=(${tel}) already exists.`,
+    hint: `verifique o valor ${segredoSintetico}`,
+    code: tel, // maior que 10 caracteres — precisa cair no fallback 'nao_informado'
+  }
+
+  const errosCapturados = []
+  const consoleErrorOriginal = console.error
+  const mockConsoleError = mock.method(console, 'error', (...args) => {
+    errosCapturados.push(args.map(String).join(' '))
+    return consoleErrorOriginal.apply(console, args)
+  })
+
+  const remover = interceptarChamada(supabase, {
+    tabela: 'whatsapp_mensagens', operacao: 'insert',
+    erroSimulado: erroComDadoSensivel,
+  })
+  try {
+    const r = await chamarWebhook(eventoTexto(tel, 'Mensagem que aciona o cenário de erro sensível'))
+    assert.equal(r.status, 200)
+    await aguardar(async () => fakeEvo.mensagensEnviadas.some((m) => m.numero === tel))
+    await new Promise((r2) => setTimeout(r2, 200))
+  } finally {
+    remover()
+    mockConsoleError.mock.restore()
+  }
+
+  // Mesmo com um erro de banco "ruidoso" (dado sensível embutido em
+  // message/detail/hint/code), só um envio pode ter chegado à Evolution.
+  const envios = fakeEvo.mensagensEnviadas.filter((m) => m.numero === tel)
+  assert.equal(envios.length, 1, 'erro de banco com dado sensível embutido não pode gerar um segundo envio')
+
+  const todosOsLogs = errosCapturados.join('\n')
+  assert.ok(!todosOsLogs.includes(tel), 'telefone completo não pode aparecer em NENHUM log, em nenhuma hipótese')
+  assert.ok(!todosOsLogs.includes(conteudoSensivel), 'conteúdo da mensagem não pode aparecer em NENHUM log')
+  assert.ok(!todosOsLogs.includes(segredoSintetico), 'segredo sintético não pode aparecer em NENHUM log')
+  assert.ok(!todosOsLogs.includes('DETAIL'), 'detail bruto do erro de banco não pode aparecer no log')
+  assert.ok(!todosOsLogs.includes('unique constraint'), 'message bruto do erro de banco não pode aparecer no log')
+  assert.ok(!todosOsLogs.includes('verifique o valor'), 'hint bruto do erro de banco não pode aparecer no log')
+
+  const logDeFalha = errosCapturados.find((m) => m.includes('falha ao persistir registro local'))
+  assert.ok(logDeFalha, `esperava o log fixo de falha de persistência; capturado: ${JSON.stringify(errosCapturados)}`)
+  assert.ok(logDeFalha.includes('etapa=insert_saida'), 'etapa precisa vir de um valor fixo do código, nunca do erro')
+  assert.ok(logDeFalha.includes('codigo=nao_informado'), 'código fora do formato permitido (aqui, o telefone tentando se passar por código) precisa cair no fallback fixo')
 })
