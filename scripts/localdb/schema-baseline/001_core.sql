@@ -19,7 +19,13 @@ CREATE TABLE IF NOT EXISTS public.usuarios (
   criado_em timestamptz DEFAULT now(),
   senha_hash text,
   telefone text,
-  legacy_id text
+  legacy_id text,
+  -- Lidas/gravadas por src/routes/usuarios.js (SELECT_FIELDS, POST, PATCH) —
+  -- faltavam neste baseline de dev/teste (achado em 2026-09-07 testando a
+  -- rota real de criação/edição de usuário; não é migration de produção).
+  meta_mensal numeric,
+  comissao_sem_meta numeric,
+  comissao_com_meta numeric
 );
 
 CREATE TABLE IF NOT EXISTS public.clientes_erp (

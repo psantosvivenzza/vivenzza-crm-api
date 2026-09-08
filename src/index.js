@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url'
 import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { corsMiddleware } from './middleware/cors.js'
-import { auth, adminOnly } from './middleware/auth.js'
+import { auth, adminOnly, adminOuFinanceiro } from './middleware/auth.js'
 
 import authRouter from './routes/auth.js'
 import usuariosRouter from './routes/usuarios.js'
@@ -168,14 +168,20 @@ app.use('/api/tarefas', auth, tarefasRouter)
 app.use('/api/dashboard', auth, dashboardRouter)
 app.use('/api/estoque', auth, estoqueRouter)
 app.use('/api/notas-entrada', auth, notasEntradaRouter)
+// Bloco financeiro do CRM (decisão de 2026-09-08): as rotas do menu
+// Financeiro (aging, recuperação, cobranças, monitor de WhatsApp financeiro,
+// revisão de contatos) e o DRE aceitam admin OU financeiro (adminOuFinanceiro).
+// collection-shadow-status, ai-suggestions, reativacao e tudo em /api/admin/*
+// continuam só-admin.
+//
 // Precisa vir ANTES de '/api/financeiro' — senão financeiroRouter (que tem
 // GET /:id) intercepta "/aging" como se fosse um id de conta, e a Postgres
 // rejeita "aging" como uuid inválido antes da requisição chegar no agingRouter.
-app.use('/api/financeiro/aging', auth, adminOnly, agingRouter)
+app.use('/api/financeiro/aging', auth, adminOuFinanceiro, agingRouter)
 // Mesmo motivo do aging acima — precisa vir ANTES de '/api/financeiro' pra
 // "dashboard-recuperacao" não ser interceptado por financeiroRouter (GET /:id)
 // como se fosse um uuid de conta.
-app.use('/api/financeiro/dashboard-recuperacao', auth, adminOnly, dashboardRecuperacaoRouter)
+app.use('/api/financeiro/dashboard-recuperacao', auth, adminOuFinanceiro, dashboardRecuperacaoRouter)
 app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/nfe-entradas', auth, nfeEntradasRouter)
@@ -193,13 +199,13 @@ app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
 app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
-app.use('/api/cobrancas', auth, adminOnly, cobrancasRouter)
+app.use('/api/cobrancas', auth, adminOuFinanceiro, cobrancasRouter)
 app.use('/api/notifications', auth, notificationsRouter)
 // FASE B.1 (homologação) — shadow mínimo, só leitura + PATCH de 3 flags
 // próprias (nba_shadow_mode/score_shadow_mode/shadow_max_customers). Nenhuma
 // outra rota do motor v2 é montada nesta fase.
 app.use('/api/collection-shadow-status', auth, adminOnly, collectionShadowStatusRouter)
-app.use('/api/collection-shadow', auth, adminOnly, collectionShadowReportsRouter)
+app.use('/api/collection-shadow', auth, adminOuFinanceiro, collectionShadowReportsRouter)
 app.use('/api/ai-suggestions', auth, adminOnly, aiSuggestionsRouter)
 app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 
@@ -209,8 +215,8 @@ app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 // de reduzir risco (fica pra C.2, com flag+test mode). Cron/orquestrador novo
 // (dispatchEngine.js) não é registrado em nenhum job aqui nesta fase — o
 // sender legado (executarReguaCobranca) continua sendo o único caminho real.
-app.use('/api/collection-whatsapp', auth, adminOnly, collectionWhatsappMonitorRouter)
-app.use('/api/collection-contact-review', auth, adminOnly, collectionContactReviewRouter)
+app.use('/api/collection-whatsapp', auth, adminOuFinanceiro, collectionWhatsappMonitorRouter)
+app.use('/api/collection-contact-review', auth, adminOuFinanceiro, collectionContactReviewRouter)
 
 // Health check
 app.get('/health', (req, res) => {

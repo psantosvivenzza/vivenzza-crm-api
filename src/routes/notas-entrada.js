@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { PAPEIS_FINANCEIROS } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -70,6 +71,17 @@ router.post('/', async (req, res) => {
       gerar_conta_pagar, vencimento, observacoes, itens,
     } = req.body
 
+    // Fonte única de verdade: a mesma interpretação booleana de
+    // gerar_conta_pagar é usada tanto para decidir a autorização quanto
+    // para o payload enviado à RPC, evitando divergência por tipo/valor.
+    const geraContaPagar = !!gerar_conta_pagar
+
+    if (geraContaPagar && !PAPEIS_FINANCEIROS.includes(req.user?.role)) {
+      return res.status(403).json({
+        erro: 'Acesso restrito a administradores ou financeiro quando a nota de entrada gera conta a pagar',
+      })
+    }
+
     if (!numero_nota || !fornecedor_nome || !data_emissao || valor_total == null) {
       return res.status(400).json({
         erro: '"numero_nota", "fornecedor_nome", "data_emissao" e "valor_total" são obrigatórios',
@@ -88,14 +100,14 @@ router.post('/', async (req, res) => {
       }
     }
 
-    if (gerar_conta_pagar && !vencimento) {
+    if (geraContaPagar && !vencimento) {
       return res.status(400).json({ erro: 'Vencimento é obrigatório para gerar conta a pagar' })
     }
 
     const payload = {
       numero_nota, serie, fornecedor_nome, fornecedor_cnpj,
       data_emissao, data_entrada, valor_total: Number(valor_total), forma_pagamento,
-      gerar_conta_pagar: !!gerar_conta_pagar, vencimento, observacoes,
+      gerar_conta_pagar: geraContaPagar, vencimento, observacoes,
       usuario_id: req.user?.id,
       itens: itens.map(i => ({
         produto_id: i.produto_id,
