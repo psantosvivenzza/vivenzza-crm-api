@@ -594,11 +594,64 @@ async function aplicarPacingLara() {
 // Registra cada envio da Lara em whatsapp_mensagens, no mesmo formato usado por
 // /api/whatsapp/enviar* — sem isso, a conversa que a vendedora vê no Pipeline/WhatsApp
 // fica incompleta (só apareceriam as mensagens do cliente, nunca as respostas da Lara).
+//
+// CORRIGIDO em 2026-09-08: esta função nunca checava o `error` do `.insert()`
+// — supabase-js só REJEITA a promise em falha de rede/conexão; um erro de
+// banco (constraint, coluna, RLS etc.) volta normalmente como
+// `{ data: null, error }`, sem lançar exceção. Isso mascarava em silêncio
+// qualquer falha de gravação aqui.
+//
+// Escopo desta correção: o defeito de tratamento de erro acima é comprovado
+// por leitura do código (o `error` nunca era lido). NÃO foi demonstrado que
+// este defeito causou algum caso histórico real de mensagem sem registro —
+// a investigação que motivou esta correção reconciliou uma amostra de
+// mensagens diretamente com a Evolution (histórico real, fonte
+// independente) e confirmou que foram entregues; o único caso sem resposta
+// encontrado foi um handoff humano antigo, não uma falha técnica deste tipo.
+// Entrega confirmada pela Evolution e persistência no CRM local são duas
+// evidências DIFERENTES — uma não prova a outra. Esta é uma correção
+// preventiva de um defeito real, não a correção de uma não-entrega
+// comprovada.
+// Formato aceito pra logar o código de erro do banco sem risco: SQLSTATE do
+// Postgres (5 dígitos, ex: '42703') ou código do PostgREST (letras+dígitos
+// maiúsculos, ex: 'PGRST116') — nunca frase livre. Fora desse formato, usa
+// um valor fixo — nunca ecoa o valor bruto recebido.
+const CODIGO_ERRO_PERMITIDO_RE = /^[A-Z0-9]{2,10}$/
+
+// 2026-09-08 — AJUSTE DE SEGURANÇA: a versão anterior deste log incluía
+// `err.message` — vindo direto do banco/PostgREST, essa mensagem PODE
+// ecoar dado recebido na própria chamada (achado real ao revisar a PR:
+// alguns formatos de erro de banco — ex: DETAIL de constraint — chegam a
+// incluir o valor da coluna que violou a restrição). Por isso o log agora é
+// só texto fixo + um identificador de ETAPA (um destes dois literais fixos:
+// 'consulta_lead' | 'insert_saida' — nunca dado do usuário) + o código de
+// erro, só se bater no formato permitido acima. NUNCA loga `err.message`,
+// `err.detail`, `err.hint` nem o objeto de erro bruto, em nenhuma hipótese.
+function logarFalhaDePersistenciaLocal(etapa, codigoErro) {
+  const codigoSeguro = (typeof codigoErro === 'string' && CODIGO_ERRO_PERMITIDO_RE.test(codigoErro)) ? codigoErro : 'nao_informado'
+  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoSeguro}) — sem reenvio automático`)
+}
+
 async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
+  // Rastreia a etapa em andamento pra o catch-all (exceções inesperadas,
+  // fora do caminho normal `{ data, error }` do supabase-js) ainda saber
+  // relatar qual etapa estava rodando — sem depender do texto da exceção.
+  let etapaAtual = 'consulta_lead'
   try {
     const candidatos = candidatosTelefone(telefone)
-    const { data: leads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
-    await supabase.from('whatsapp_mensagens').insert({
+    const { data: leads, error: erroLeads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
+    if (erroLeads) {
+      // Deliberadamente NÃO há reenvio/retry aqui em nenhuma hipótese: esta
+      // função só é chamada DEPOIS de evolutionApi.post já ter retornado
+      // sucesso — o ENVIO à Evolution já aconteceu antes desta etapa rodar.
+      // Um erro aqui é sempre uma falha de REGISTRO LOCAL, nunca prova (nem
+      // sugere) que o envio ao cliente falhou.
+      logarFalhaDePersistenciaLocal('consulta_lead', erroLeads.code)
+      return
+    }
+
+    etapaAtual = 'insert_saida'
+    const { error: erroInsert } = await supabase.from('whatsapp_mensagens').insert({
       lead_id: leads?.[0]?.id ?? null,
       mensagem,
       direcao: 'saida',
@@ -608,8 +661,14 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       media_tipo: mediaTipo,
       media_url: mediaUrl,
     })
+    if (erroInsert) {
+      logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code)
+      return
+    }
   } catch (err) {
-    console.error('[sdr] erro ao registrar mensagem de saída:', err.message)
+    // Exceção inesperada (não o caminho normal `{ error }` acima) — mesma
+    // regra: nunca loga err.message/detail/hint/objeto bruto.
+    logarFalhaDePersistenciaLocal(etapaAtual, err?.code)
   }
 }
 
