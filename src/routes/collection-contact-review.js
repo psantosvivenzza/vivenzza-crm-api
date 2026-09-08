@@ -344,8 +344,9 @@ function validarMotivo(valor) {
 // só um INSERT append-only em collection_contact_review_actions (auditável:
 // quem = req.user.id — SEMPRE do token autenticado, nunca aceito do corpo da
 // requisição —, quando = default now() do banco, qual cliente =
-// codigoCliente, qual ação + motivo). adminOnly (mount-level, igual ao resto
-// do router).
+// codigoCliente, qual ação + motivo). Gate é adminOuFinanceiro (mount-level,
+// igual ao resto do router — decisão de 2026-09-08, ver middleware/auth.js);
+// não é mais adminOnly desde essa decisão.
 router.post('/:codigoCliente/acao', async (req, res) => {
   try {
     const { codigoCliente } = req.params

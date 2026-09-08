@@ -4,6 +4,7 @@ import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { executarReguaCobranca } from '../jobs/cobranca-whatsapp.js'
 import { verificarFrescorSync } from '../lib/collection/financialSyncGuard.js'
+import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -13,8 +14,15 @@ function diasAtrasoDe(vencimento) {
   return Math.floor((new Date(hojeBrt) - new Date(vencimento)) / umDia)
 }
 
-// POST /api/cobrancas/disparar — roda a régua agora (mesmo gate do switch que o cron usa)
-router.post('/disparar', async (req, res) => {
+// POST /api/cobrancas/disparar — roda a régua agora (mesmo gate do switch que o cron usa).
+// Política aprovada (2026-09-08, revisão do controle de acesso financeiro):
+// disparo em massa da régua inteira é operação de AUTOMAÇÃO GLOBAL (afeta
+// todos os clientes elegíveis de uma vez), diferente de "gerenciar contas
+// financeiras" — por isso `adminOnly` aqui, além (e antes) do
+// `adminOuFinanceiro` já aplicado no mount do router inteiro em
+// src/index.js. financeiro continua com a cobrança individual abaixo
+// (disparar-individual), que preserva o comportamento anterior.
+router.post('/disparar', adminOnly, async (req, res) => {
   try {
     const resumo = await executarReguaCobranca()
     res.json(resumo)
@@ -178,8 +186,12 @@ router.get('/status', async (req, res) => {
   }
 })
 
-// POST /api/cobrancas/toggle — liga/desliga o kill-switch da régua automática
-router.post('/toggle', async (req, res) => {
+// POST /api/cobrancas/toggle — liga/desliga o kill-switch da régua
+// automática. Política aprovada (2026-09-08): é configuração global de
+// automação (afeta a régua inteira, não uma conta/cliente específico) — só
+// admin, mesmo raciocínio de POST /disparar acima. `adminOnly` aqui, além
+// do `adminOuFinanceiro` do mount do router em src/index.js.
+router.post('/toggle', adminOnly, async (req, res) => {
   try {
     const { data: atual } = await supabase.from('automacoes_config').select('cobranca_whatsapp_ativa').eq('id', 1).maybeSingle()
     const novoValor = !(atual?.cobranca_whatsapp_ativa === true)
