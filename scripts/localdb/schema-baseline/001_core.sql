@@ -14,7 +14,22 @@ CREATE TABLE IF NOT EXISTS public.usuarios (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   nome text NOT NULL,
   email text NOT NULL UNIQUE,
-  role text DEFAULT 'vendedor',
+  -- ACHADO REAL (2026-09-09): usuarios_role_check EXISTE em produção mas
+  -- nunca esteve versionado em nenhuma migration nem neste baseline — só
+  -- foi descoberto quando a criação do primeiro usuário role='financeiro'
+  -- falhou de verdade em produção (a aplicação já validava 'financeiro'
+  -- desde a PR #75, mas o banco ainda não). Definição confirmada por
+  -- leitura direta do catálogo real (pg_constraint, via SQL Editor):
+  -- CHECK ((role = ANY (ARRAY['admin'::text, 'vendedor'::text]))).
+  -- Reproduzida aqui FIEL ao estado original (só admin/vendedor) de
+  -- propósito — supabase/migrations/20260101000047_usuarios_role_check_
+  -- financeiro.sql é quem adiciona 'financeiro' por cima, replayada por
+  -- localdb-reset.mjs logo depois deste baseline, exatamente como vai
+  -- acontecer em produção. Isso é o que faltava pro teste local conseguir
+  -- reproduzir a falha real antes da migration — sem isso, o baseline
+  -- deixava passar role='financeiro' sem checagem nenhuma, mascarando o
+  -- gap que só apareceu em produção.
+  role text DEFAULT 'vendedor' CONSTRAINT usuarios_role_check CHECK (role = ANY (ARRAY['admin'::text, 'vendedor'::text])),
   ativo boolean DEFAULT true,
   criado_em timestamptz DEFAULT now(),
   senha_hash text,
