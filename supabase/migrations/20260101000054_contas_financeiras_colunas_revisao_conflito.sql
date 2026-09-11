@@ -15,21 +15,14 @@
 -- título em src/jobs/sync-financeiro-legado.js — confirmado ali como
 -- timestamp (new Date().toISOString()), não é inferência.
 --
--- Tipos de motivo_revisao (text) e em_revisao_desde (timestamptz) são
--- inferidos por convenção do restante do schema (par com
--- em_revisao_financeira boolean já existente, e o mesmo padrão de
--- baixas_financeiras.motivo_estorno_categoria/detalhado text +
--- estornado_em timestamptz) — a função só os zera (SET ... = NULL) nesta
--- rodada, nunca escreve um valor não-nulo neles, então não força um tipo
--- específico na compilação do plpgsql (CREATE FUNCTION com plpgsql não
--- valida semântica de SQL embutido — só a 1ª execução real teria acusado
--- tipo incompatível, e a suíte local em
--- fn-sincronizar-baixa-legado.test.mjs passou com estes tipos). Já
--- conflito_baixa_legado é boolean com certeza: a função atribui a variável
--- plpgsql `v_conflito boolean` direto pra essa coluna. Se a inspeção real
--- do schema de produção (information_schema.columns) mostrar tipo
--- diferente pra motivo_revisao/em_revisao_desde, ajustar aqui antes de
--- tratar esta migration como definitiva.
+-- Tipos CONFIRMADOS via consulta read-only a information_schema.columns
+-- direto em produção (2026-09-11, nenhuma alteração aplicada) — não são
+-- mais inferência (a suspeita inicial, por convenção do resto do schema,
+-- bateu exatamente com o real):
+--   conflito_baixa_legado   -> boolean, NOT NULL, default false
+--   em_revisao_desde        -> timestamp with time zone, nullable, sem default
+--   motivo_revisao          -> text, nullable, sem default
+--   sincronizado_legado_em  -> timestamp with time zone, nullable, sem default
 ALTER TABLE public.contas_financeiras
   ADD COLUMN IF NOT EXISTS motivo_revisao text,
   ADD COLUMN IF NOT EXISTS em_revisao_desde timestamptz,
