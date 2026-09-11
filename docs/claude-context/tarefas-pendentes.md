@@ -56,14 +56,25 @@
       `sincronizado_legado_em` timestamptz — consulta read-only real contra
       `information_schema.columns` de produção bateu exatamente com a
       inferência original (ver comentário na migration 000054).
-      **Ressalva (bloqueia PR):** GRANTs reais da function ainda não
-      confirmados — `pg_get_functiondef` não os inclui. Se
-      `fn_sincronizar_baixa_legado` estiver exposta sem restrição via
-      PostgREST (Supabase auto-expõe RPCs salvo `REVOKE` explícito), calls
-      diretos contornariam o gate de admin/financeiro do Express em
-      `src/routes/financeiro.js`/`auth.js`. Query read-only exata preparada
-      (ver mensagem do agente), aguardando alguém rodar e devolver o
-      resultado antes de tratar esta versão como definitiva ou abrir a PR.
+      **GRANTs corrigidos (2026-09-11):** confirmado via painel do Supabase
+      que a function tinha `EXECUTE` concedido a `PUBLIC`, `anon`,
+      `authenticated`, `postgres` e `service_role` — qualquer JWT válido (ou
+      sem login, via chave anon) podia chamá-la direto via PostgREST,
+      contornando o gate adminOuFinanceiro de `src/routes/financeiro.js`/
+      `auth.js`. Corrigido SÓ localmente (nada aplicado em produção) em
+      `supabase/migrations/20260101000056_fn_sincronizar_baixa_legado_revoga_execute_publico.sql`:
+      revoga de `PUBLIC`/`anon`/`authenticated`, mantém só `service_role`
+      (o papel real usado por `supabase-admin.server.js`); `postgres`
+      (owner/superuser) não foi tocado. Função é `SECURITY INVOKER` — além
+      do `EXECUTE`, `service_role` também precisa de `SELECT`/`INSERT`/
+      `UPDATE` direto em `contas_financeiras`/`baixas_financeiras` (já tem
+      isso de verdade em qualquer Supabase real; migration replica só pra
+      ambiente novo/local funcionar). Coberto por
+      `scripts/tests/collection/fn-sincronizar-baixa-legado-grants.test.mjs`
+      (`SET ROLE` real dentro de transação, não apenas documentação):
+      anon/authenticated recusados com `42501`, service_role continua
+      funcionando ponta a ponta. **Ainda não aplicado em produção** —
+      decisão de quando/como aplicar fica pra quem revisar a PR.
       **Cluster de teste:** suíte de teste local rodada num cluster Postgres
       EXCLUSIVO (porta/banco fora do padrão 5433/vivenzza_dev — ver
       `scripts/tests/unit/README.md`), nunca o cluster compartilhado. O
