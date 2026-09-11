@@ -38,15 +38,44 @@
 
 ## Financeiro — RPC não versionada
 
-- [ ] `fn_sincronizar_baixa_legado` (chamada por `sync-financeiro-legado.js`
-      pra atualizar títulos existentes — cancelamento, encerramento,
-      resolução de `em_revisao_financeira`) não tem migration correspondente
-      em `supabase/migrations/` nem `migrations/`. Existe só no schema live
-      do Supabase, aplicada manualmente em algum momento — não auditável via
-      `git log`/`git blame`. Versionar a definição atual (via
-      `pg_get_functiondef` ou equivalente) antes de qualquer alteração
-      futura no fluxo de baixa financeira, pra não perder a única cópia
-      existente da lógica real.
+- [x] `fn_sincronizar_baixa_legado` versionada em 2026-09-11 — corpo real
+      capturado de produção via `pg_get_functiondef`/`pg_proc` (consulta
+      read-only, nada alterado em produção), commitado fielmente em
+      `supabase/migrations/20260101000048_fn_sincronizar_baixa_legado.sql`
+      (depende de `20260101000047_contas_financeiras_colunas_revisao_conflito.sql`,
+      que versiona 4 colunas de `contas_financeiras` — `motivo_revisao`,
+      `em_revisao_desde`, `conflito_baixa_legado`, `sincronizado_legado_em` —
+      que também nunca tiveram migration, mesmo padrão de drift de
+      `20260101000045`). Coberta por
+      `scripts/tests/collection/fn-sincronizar-baixa-legado.test.mjs` (7
+      cenários, Postgres local real, contas sintéticas `cr-997%`):
+      idempotência, nunca reverter pagamento, nunca duplicar dinheiro,
+      cancelamento, resolução automática de revisão, encerrado com saldo.
+      **Ressalva:** tipo de `motivo_revisao` (text) e `em_revisao_desde`
+      (timestamptz) foi inferido por convenção do schema, não confirmado
+      contra `information_schema.columns` de produção — ver comentário na
+      migration 000047 antes de tratar como definitivo.
+- [ ] Os 15 ajustes reais listados em `PREVIEW_RESOLUCAO_125_CONFLITOS.md`
+      (seção AUTO_RESOLVABLE_DETERMINISTIC, ex.: Francisco Freitas Oliveira,
+      FABIANO KAMPFF LEITE, THAINA RODRIGUES) continuam **não aplicados** —
+      versionar a RPC não é autorização pra rodá-la contra títulos reais.
+      Precisa de decisão explícita antes de aplicar via
+      `decidirAtualizacao()`/`fn_sincronizar_baixa_legado` em produção.
+- [ ] `fn_baixar_titulo`, `fn_estornar_baixa`, `fn_aprovar_estorno`,
+      `fn_rejeitar_estorno` e a tabela `estornos_financeiros` têm o MESMO
+      problema (achado ao investigar esta tarefa, 2026-09-11): não têm
+      migration em `supabase/migrations/`, só existem manualmente aplicadas
+      num cluster Postgres local separado (`.localdev/pgdata_financeiro_20260908`,
+      fora deste repositório versionado — ver comentário em
+      `scripts/tests/collection/pgcompat-embed-fkey-financeiro.test.mjs`).
+      `npm run db:local:reset` no cluster padrão NÃO recria essas 4
+      functions/tabela — os testes que dependem delas
+      (`financeiro-controle-acesso.test.mjs`,
+      `pgcompat-embed-fkey-financeiro.test.mjs`) só passam contra aquele
+      cluster exclusivo, não contra um `db:local:reset` do zero. Mesmo
+      tratamento que `fn_sincronizar_baixa_legado` recebeu aqui: versionar a
+      partir da definição real via `pg_get_functiondef`/`pg_proc` antes de
+      mexer no fluxo de baixa manual/estorno.
 
 ## Concluído (não refazer)
 
