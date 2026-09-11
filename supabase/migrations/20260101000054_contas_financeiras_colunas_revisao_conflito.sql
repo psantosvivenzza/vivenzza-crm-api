@@ -8,7 +8,7 @@
 -- existem no schema live de produção. ADD COLUMN IF NOT EXISTS é no-op lá;
 -- só passa a existir em ambientes novos (local/CI), que precisam delas pra
 -- rodar fn_sincronizar_baixa_legado (ver
--- 20260101000048_fn_sincronizar_baixa_legado.sql) de ponta a ponta nos
+-- 20260101000055_fn_sincronizar_baixa_legado.sql) de ponta a ponta nos
 -- testes. sincronizado_legado_em em particular já é lida por scripts reais
 -- (scripts/analise-duplicados-financeiro.mjs,
 -- scripts/preview-duplicados-financeiro.mjs) e escrita também na criação de

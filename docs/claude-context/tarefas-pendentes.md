@@ -41,8 +41,8 @@
 - [x] `fn_sincronizar_baixa_legado` versionada em 2026-09-11 — corpo real
       capturado de produção via `pg_get_functiondef`/`pg_proc` (consulta
       read-only, nada alterado em produção), commitado fielmente em
-      `supabase/migrations/20260101000048_fn_sincronizar_baixa_legado.sql`
-      (depende de `20260101000047_contas_financeiras_colunas_revisao_conflito.sql`,
+      `supabase/migrations/20260101000055_fn_sincronizar_baixa_legado.sql`
+      (depende de `20260101000054_contas_financeiras_colunas_revisao_conflito.sql`,
       que versiona 4 colunas de `contas_financeiras` — `motivo_revisao`,
       `em_revisao_desde`, `conflito_baixa_legado`, `sincronizado_legado_em` —
       que também nunca tiveram migration, mesmo padrão de drift de

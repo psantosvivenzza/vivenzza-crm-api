@@ -6,7 +6,7 @@
 -- só no schema live do Supabase, aplicada manualmente em algum momento não
 -- auditável via git log/git blame (ver docs/claude-context/tarefas-pendentes.md,
 -- seção "Financeiro — RPC não versionada"). Depende das colunas adicionadas
--- em 20260101000047_contas_financeiras_colunas_revisao_conflito.sql.
+-- em 20260101000054_contas_financeiras_colunas_revisao_conflito.sql.
 --
 -- Corpo abaixo é cópia FIEL de pg_get_functiondef(oid) rodado contra o
 -- Postgres real de produção em 2026-09-11 (consulta read-only via pg_proc,
