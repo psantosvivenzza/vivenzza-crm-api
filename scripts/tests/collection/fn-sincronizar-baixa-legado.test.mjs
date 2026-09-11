@@ -1,17 +1,27 @@
 // Cobertura local de fn_sincronizar_baixa_legado (versionada em
-// supabase/migrations/20260101000047_contas_financeiras_colunas_revisao_conflito.sql
-// + 20260101000048_fn_sincronizar_baixa_legado.sql — corpo capturado fielmente
+// supabase/migrations/20260101000054_contas_financeiras_colunas_revisao_conflito.sql
+// + 20260101000055_fn_sincronizar_baixa_legado.sql — corpo capturado fielmente
 // de produção via pg_get_functiondef/pg_proc, 2026-09-11, leitura read-only,
 // nada alterado em produção nessa consulta). A função nunca tinha migration
 // nem teste dedicado (ver docs/claude-context/tarefas-pendentes.md, seção
 // "Financeiro — RPC não versionada"), apesar de ser o coração da sincronização
 // NetVision → CRM (src/jobs/sync-financeiro-legado.js).
 //
-// Roda 100% contra Postgres LOCAL (LOCAL_PG_URL, banco vivenzza_dev) via RPC
-// real (supabase.rpc — mesma chamada que o job de produção faz), nunca contra
-// Supabase/produção. Nenhum dos 15 ajustes reais pendentes em
-// PREVIEW_RESOLUCAO_125_CONFLITOS.md é aplicado aqui — só contas sintéticas
-// (legacy_id 'cr-997%'), criadas e destruídas neste arquivo.
+// Roda 100% contra Postgres LOCAL via RPC real (supabase.rpc — mesma chamada
+// que o job de produção faz), nunca contra Supabase/produção. Nenhum dos 15
+// ajustes reais pendentes em PREVIEW_RESOLUCAO_125_CONFLITOS.md é aplicado
+// aqui — só contas sintéticas (legacy_id 'cr-997%'), criadas e destruídas
+// neste arquivo.
+//
+// CLUSTER EXCLUSIVO OBRIGATÓRIO (ver scripts/tests/unit/README.md, seção
+// "Validação da preparação de fixtures financeiras"): este arquivo RECUSA
+// rodar contra a porta/banco padrão compartilhado (5432/5433,
+// vivenzza_dev/postgres) — outro worktree/sessão pode estar com esse cluster
+// em uso agora mesmo (achado real, 2026-09-11: rodar db:local:reset contra o
+// padrão sem isolar antes é destrutivo pra quem mais estiver usando). Exporte
+// LOCAL_PG_PORT/LOCAL_PG_DATABASE/LOCAL_PG_DATA/LOCAL_PG_LOG com valores
+// exclusivos (ex.: porta 5434, banco vivenzza_fn_sync_baixa_legado) ANTES de
+// rodar db:local:start/db:local:reset e este arquivo.
 //
 // Prova as garantias documentadas no cabeçalho de sync-financeiro-legado.js:
 // idempotência, nunca reverter pagamento, nunca duplicar dinheiro — mais
@@ -21,6 +31,22 @@ import assert from 'node:assert/strict'
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 process.env.NODE_ENV = 'test'
 process.env.LOCAL_PG_URL = `postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DATABASE}`
+
+// Guarda fail-closed: nunca deixar este arquivo rodar contra o cluster
+// padrão compartilhado (porta 5432/5433, banco vivenzza_dev/postgres) — só
+// contra um cluster Postgres exclusivo desta execução. Checa ANTES de
+// importar supabase-admin.server.js (que já abre o pool de conexão na
+// primeira importação).
+const PORTAS_COMPARTILHADAS_PROIBIDAS = new Set(['5432', '5433'])
+const BANCOS_COMPARTILHADOS_PROIBIDOS = new Set(['vivenzza_dev', 'postgres'])
+if (PORTAS_COMPARTILHADAS_PROIBIDAS.has(String(PG_PORT)) || BANCOS_COMPARTILHADOS_PROIBIDOS.has(PG_DATABASE)) {
+  throw new Error(
+    `fn-sincronizar-baixa-legado.test.mjs recusa rodar contra o cluster Postgres padrão/compartilhado ` +
+    `(porta=${PG_PORT}, banco=${PG_DATABASE}). Outro worktree/sessão pode estar usando esse cluster agora. ` +
+    `Exporte LOCAL_PG_PORT/LOCAL_PG_DATABASE (e LOCAL_PG_DATA/LOCAL_PG_LOG) com valores exclusivos antes de ` +
+    `rodar db:local:start/db:local:reset e este teste — ver scripts/tests/unit/README.md.`
+  )
+}
 
 const { supabase } = await import('../../../src/lib/supabase-admin.server.js')
 const { criarContaDeTeste, telefoneDeTeste } = await import('./_setup.mjs')
@@ -67,8 +93,10 @@ async function baixasAtivasDaConta(contaId) {
 // só aos ids desta bateria (nunca um LIKE amplo).
 after(async () => {
   if (!contasCriadas.length) return
-  await supabase.from('baixas_financeiras').delete().in('conta_financeira_id', contasCriadas)
-  await supabase.from('contas_financeiras').delete().in('id', contasCriadas)
+  const { error: erroBaixas } = await supabase.from('baixas_financeiras').delete().in('conta_financeira_id', contasCriadas)
+  if (erroBaixas) throw new Error(`cleanup falhou ao apagar baixas_financeiras de teste: ${erroBaixas.message}`)
+  const { error: erroContas } = await supabase.from('contas_financeiras').delete().in('id', contasCriadas)
+  if (erroContas) throw new Error(`cleanup falhou ao apagar contas_financeiras de teste: ${erroContas.message}`)
 })
 
 test('fn_sincronizar_baixa_legado', async (t) => {

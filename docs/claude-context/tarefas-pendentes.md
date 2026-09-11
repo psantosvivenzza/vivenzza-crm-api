@@ -51,10 +51,19 @@
       cenários, Postgres local real, contas sintéticas `cr-997%`):
       idempotência, nunca reverter pagamento, nunca duplicar dinheiro,
       cancelamento, resolução automática de revisão, encerrado com saldo.
-      **Ressalva:** tipo de `motivo_revisao` (text) e `em_revisao_desde`
-      (timestamptz) foi inferido por convenção do schema, não confirmado
-      contra `information_schema.columns` de produção — ver comentário na
-      migration 000047 antes de tratar como definitivo.
+      **Ressalva 1 (bloqueia PR):** tipo de `motivo_revisao` (text) e
+      `em_revisao_desde` (timestamptz) foi inferido por convenção do schema,
+      não confirmado contra `information_schema.columns` de produção — nem os
+      GRANTs reais da function (`pg_get_functiondef` não os inclui; se
+      exposta sem restrição via PostgREST, contornaria o gate de
+      admin/financeiro do Express). Query read-only exata preparada,
+      aguardando alguém rodar e devolver o resultado — ver comentário na
+      migration 000054 antes de tratar como definitivo.
+      **Ressalva 2:** suíte de teste local rodada num cluster Postgres
+      EXCLUSIVO (porta/banco fora do padrão 5433/vivenzza_dev — ver
+      `scripts/tests/unit/README.md`), nunca o cluster compartilhado. O
+      arquivo de teste recusa (fail-closed) rodar contra porta 5432/5433 ou
+      banco vivenzza_dev/postgres.
 - [ ] Os 15 ajustes reais listados em `PREVIEW_RESOLUCAO_125_CONFLITOS.md`
       (seção AUTO_RESOLVABLE_DETERMINISTIC, ex.: Francisco Freitas Oliveira,
       FABIANO KAMPFF LEITE, THAINA RODRIGUES) continuam **não aplicados** —
