@@ -317,10 +317,24 @@ router.post('/marcacoes', exigirPilotoAtivo, limiteTentativasSensiveis, async (r
   }
 
   try {
+    // Achado da auditoria adversarial de 2026-09-12: esta consulta de
+    // idempotência filtrava só por operacao_id, sem exigir
+    // usuario_id = req.user.id. Como o retorno antecipado abaixo acontece
+    // ANTES da verificação de senha e ANTES de qualquer verificação de
+    // assinatura de equipamento, qualquer usuário autenticado que
+    // descobrisse o operacao_id de outro colaborador (o tipo tem só 4
+    // valores possíveis, fácil de acertar) conseguia ler os dados da
+    // marcação alheia (id, tipo, origem, horário, sinalização) enviando
+    // senha/foto/equipamento/nonce/assinatura completamente arbitrários.
+    // O filtro por usuario_id abaixo garante que a idempotência só nunca
+    // enxerga registros de outro usuário — nesse caso cai no fluxo normal
+    // de validação (senha, depois assinatura), que rejeita corretamente.
+    // Ver scripts/tests/ponto/auditoria-adversarial-equipamento-http.test.mjs.
     const { data: existente, error: erroExistente } = await supabase
       .from('ponto_marcacoes')
       .select('id, tipo, origem, registrado_em, dia_brt, sinalizado_para_revisao')
       .eq('operacao_id', operacao_id)
+      .eq('usuario_id', req.user.id)
       .maybeSingle()
     if (erroExistente) throw erroExistente
     if (existente) {

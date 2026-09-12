@@ -19,7 +19,14 @@ let falhou = false
 for (const arquivo of arquivos) {
   console.log(`\n=== ${arquivo} ===`)
   try {
-    execFileSync('node', ['--test', path.join(dir, arquivo)], {
+    // --experimental-test-module-mocks: usado só por
+    // auditoria-adversarial-equipamento-http.test.mjs, para sobrescrever
+    // EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA como `true` SÓ dentro daquele
+    // processo isolado (nunca no arquivo real em disco), e assim exercitar
+    // o código real da rota HTTP que fica atrás do gate. Passar a flag pra
+    // todos os arquivos é inofensivo — ela só habilita uma API que os
+    // outros arquivos nunca chamam.
+    execFileSync('node', ['--experimental-test-module-mocks', '--test', path.join(dir, arquivo)], {
       stdio: 'inherit',
       env: { ...process.env, NODE_ENV: 'test' },
     })
