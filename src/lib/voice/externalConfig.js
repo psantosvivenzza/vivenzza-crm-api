@@ -53,6 +53,38 @@ export function avaliarLocalBindDiferenteDoRemoto(sipLocalBind, sipPortRemoto) {
   return String(sipLocalBind) !== String(sipPortRemoto)
 }
 
+// 2026-08-17 — Plano B: Twilio Elastic SIP Trunking (Nvoip ficou
+// PROVIDER_AUTH_REJECTED — 401 fatal mesmo com senha SIP redigitada,
+// confirmado também por teste independente com MicroSIP). Config Nvoip
+// acima PRESERVADA, não removida — só deixou de ser o caminho ativo.
+//
+// Diferença arquitetural real (não é copy-paste do padrão Nvoip):
+// documentação oficial da Twilio diz explicitamente "Configure your
+// infrastructure not to register for this trunk" — Elastic SIP Trunking
+// NÃO usa SIP REGISTER. Autenticação é via Credential List (usuário/senha,
+// challenge digest no próprio INVITE) e/ou IP ACL (allowlist de IP
+// configurada NO PAINEL da Twilio, nada a configurar aqui do nosso lado).
+// Por isso não existe sipLocalBind/registration aqui — não se aplica.
+export function lerConfigTwilio() {
+  return {
+    terminationUri: process.env.TWILIO_SIP_TERMINATION_URI || null,
+    sipUsername: process.env.TWILIO_SIP_USERNAME || null,
+    sipPassword: process.env.TWILIO_SIP_PASSWORD || null,
+    callerId: process.env.TWILIO_CALLER_ID || null,
+  }
+}
+
+// Status seguro pra endpoint/log/relatório — nunca inclui a senha.
+export function descreverConfigTwilioSemSegredo() {
+  const cfg = lerConfigTwilio()
+  return {
+    termination_uri_configurado: Boolean(cfg.terminationUri),
+    sip_username_configurado: Boolean(cfg.sipUsername),
+    sip_password_configurado: Boolean(cfg.sipPassword),
+    caller_id_configurado: Boolean(cfg.callerId),
+  }
+}
+
 // Allowlist da primeira homologação pública — formato canônico E.164/BR
 // (mesmo padrão de COLLECTION_TEST_PHONE_ALLOWLIST em dispatchEngine.js):
 // lista separada por vírgula, comparada via telefonesEquivalentes() (nunca

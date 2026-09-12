@@ -1,0 +1,82 @@
+; Voice AI — prontidão de trunk SIP EXTERNO (Twilio Elastic SIP Trunking).
+; TEMPLATE, não config real — nenhum valor aqui é uma credencial real (ainda
+; não existe conta/trunk Twilio criado). NÃO copiar isto direto pra
+; pjsip.conf sem primeiro:
+;   1. criar a conta e o Elastic SIP Trunk no Console Twilio;
+;   2. escolher o nome do Trunk (isso DEFINE a Termination URI, ex.:
+;      vivenzza-homolog.pstn.twilio.com — não existe até você criar);
+;   3. criar uma Credential List (usuário/senha) no Trunk — IP ACL sozinho
+;      NÃO é recomendado pela própria Twilio ("does not protect against
+;      certain types of attacks");
+;   4. verificar o número de destino E o Caller ID no Console (Verified
+;      Caller IDs) — obrigatório em conta trial, sem custo.
+;
+; DIFERENÇA ARQUITETURAL REAL EM RELAÇÃO AO TEMPLATE NVOIP (não é
+; copy-paste): a documentação oficial da Twilio afirma explicitamente
+; "Configure your infrastructure not to register for this trunk" — Elastic
+; SIP Trunking NÃO usa SIP REGISTER. Por isso não existe seção
+; [twilio-registration] aqui, nem "porta remota vs porta local do bind" pra
+; confundir (não há registration nenhum rodando contra a Twilio).
+; Fonte: https://www.twilio.com/docs/sip-trunking (2026-08-17)
+;
+; ADITIVO, nunca substitui: as seções do ramal interno ([7001]/[auth7001]/
+; [transport-vivenzza-udp], já homologadas) e a config Nvoip (preservada,
+; mesmo com registration falhando) continuam INTOCADAS — este arquivo só
+; ACRESCENTA um endpoint/trunk novo, com nomes de seção diferentes.
+;
+; Nomes de placeholder abaixo (${TWILIO_SIP_TERMINATION_URI} etc.)
+; correspondem diretamente às env vars documentadas em .env.example — mas o
+; Asterisk NÃO lê .env do Node: um operador humano substitui cada
+; placeholder pelo valor real, manualmente, no pjsip.conf de verdade (nunca
+; commitado).
+
+; Transport: REUTILIZA o transport interno já existente e comprovadamente
+; funcional no host real (transport-vivenzza-udp, 0.0.0.0:5060) — é o MESMO
+; padrão que a config real da Nvoip no host já usa hoje (confirmado
+; 2026-08-17: pjsip_nvoip.conf real usa transport=transport-vivenzza-udp,
+; não um transport dedicado). Um único transport UDP pode servir múltiplos
+; endpoints — não há necessidade de um transport-twilio dedicado nem de
+; escolher outra porta local, ao contrário do que o primeiro rascunho do
+; template Nvoip presumia. UDP é o padrão documentado pela Twilio; TLS
+; (porta 5061, TLSv1.2+) é suportado oficialmente e pode ser adotado depois,
+; como hardening — não é exigido pra uma primeira homologação.
+
+[twilio-aor]
+type=aor
+; Termination URI da Twilio — formato oficial: {nome-do-trunk}.pstn.twilio.com
+; (a Twilio recomenda hífen em vez de ponto no nome escolhido, por
+; legibilidade). Só existe depois que o Trunk for criado no Console.
+contact=sip:${TWILIO_SIP_TERMINATION_URI}
+
+[twilio-auth]
+type=auth
+auth_type=userpass
+username=${TWILIO_SIP_USERNAME}
+password=${TWILIO_SIP_PASSWORD}  ; NUNCA commitar o pjsip.conf real com isto preenchido — Credential List criada no Console Twilio, não aqui
+
+[twilio-endpoint]
+type=endpoint
+context=voice-ai-external-twilio  ; dialplan SEPARADO do interno (voice-ai-internal) e do Nvoip (voice-ai-external-nvoip) — nunca reusar o mesmo contexto
+disallow=all
+allow=ulaw
+allow=alaw
+transport=transport-vivenzza-udp  ; reaproveita o transport interno já existente — ver nota acima
+outbound_auth=twilio-auth
+aors=twilio-aor
+from_domain=${TWILIO_SIP_TERMINATION_URI}
+; Caller ID: OBRIGATORIAMENTE um número Twilio da conta OU um Verified
+; Caller ID (Console → Phone Numbers → Verified Caller IDs, gratuito, sem
+; comprar DID). Nunca um número inventado — Twilio rejeita Caller ID não
+; verificado.
+callerid=${TWILIO_CALLER_ID}
+
+; SEM seção de registration — Twilio explicitamente pede pra NÃO registrar
+; (ver nota no topo do arquivo). Se algum dia isto mudar (novo produto
+; Twilio, ou confirmação diferente na homologação real), documentar a fonte
+; oficial antes de adicionar uma seção [twilio-registration].
+
+; IP ACL (opcional, ALÉM da Credential List acima, nunca no lugar dela —
+; recomendação oficial da Twilio): não é configurado aqui no Asterisk, é uma
+; allowlist de IP configurada NO PAINEL da Twilio (Trunk → ACL) autorizando
+; o IP público do nosso Asterisk a mandar INVITE pra Termination URI. Nada a
+; fazer neste arquivo por causa disso.
