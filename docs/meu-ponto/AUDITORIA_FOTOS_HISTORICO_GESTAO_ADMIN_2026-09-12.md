@@ -113,9 +113,12 @@ contra um cluster Postgres **exclusivo** deste worktree (não
   corrigido aqui por pertencer a outro arquivo já modificado pelas PRs
   #81/#82/#83 (evitar misturar domínios/PRs, mesma regra que motivou as
   correções anteriores serem PRs separadas).
-- ID malformado (não-UUID) em rotas de `.../:id/foto` retorna 500 (erro
-  genérico do Postgres, `22P02`, sem detalhe vazado) em vez de 400 — nit de
-  validação de entrada, sem impacto de autorização/vazamento confirmado.
+- ~~ID malformado (não-UUID) em rotas de `.../:id/foto` retorna 500 (erro
+  genérico do Postgres, `22P02`, sem detalhe vazado) em vez de 400~~ —
+  **corrigido** em PR posterior (validação de formato compartilhada,
+  `src/lib/ponto/validacao.js`, aplicada nos três routers do módulo antes de
+  qualquer consulta). Ver
+  `docs/meu-ponto/CORRECAO_UUID_MALFORMADO_20260912.md`.
 
 ## Estado preservado (nada mudou aqui)
 

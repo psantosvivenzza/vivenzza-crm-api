@@ -337,17 +337,19 @@ test('payload forjado: modo/status/id enviados no corpo de POST /api/ponto-admin
 
 // --- 7. ID malformado (não-UUID) nunca vaza detalhe interno, nem serve de oráculo ---
 //
-// Achado (severidade baixa, NÃO corrigido nesta PR — ver
+// Achado original (severidade baixa — ver
 // docs/meu-ponto/AUDITORIA_FOTOS_HISTORICO_GESTAO_ADMIN_2026-09-12.md,
-// seção "Risco residual"): um id que não é UUID cai no erro genérico do
+// seção "Risco residual"): um id que não é UUID caía no erro genérico do
 // Postgres (22P02, "invalid input syntax for type uuid"), capturado pelo
-// catch genérico da rota → 500 com mensagem fixa e segura. Não é um
-// vazamento de dado (a mensagem é sempre a mesma, nunca inclui o erro
-// bruto do banco) nem um bypass de autorização — só um status HTTP
-// tecnicamente incorreto (500 em vez de 400/404). O que esta prova garante
-// de fato: NENHUM detalhe interno (SQL, stack, caminho de arquivo) chega
-// na resposta ao cliente, em nenhuma das quatro rotas de foto.
-test('ID malformado (não-UUID) em rotas de foto nunca vaza detalhe interno na resposta', async () => {
+// catch genérico da rota → 500. CORRIGIDO na PR seguinte (validação de
+// formato compartilhada, src/lib/ponto/validacao.js, aplicada ANTES de
+// qualquer consulta) — agora estas quatro rotas respondem 400 de forma
+// consistente. Cobertura completa (as demais rotas parametrizadas dos três
+// routers, e a distinção 400 vs. 404) vive em
+// uuid-malformado-vs-inexistente.test.mjs; este teste permanece aqui só
+// como regressão do achado original, agora endurecido para exigir
+// exatamente 400 em vez de aceitar 500.
+test('ID malformado (não-UUID) em rotas de foto responde 400 e nunca vaza detalhe interno na resposta', async () => {
   const rotasComIdMalformado = [
     ['/api/ponto/marcacoes/nao-e-um-uuid/foto', colaboradorNoEscopo],
     ['/api/ponto/solicitacoes/nao-e-um-uuid/foto', colaboradorNoEscopo],
@@ -356,7 +358,7 @@ test('ID malformado (não-UUID) em rotas de foto nunca vaza detalhe interno na r
   ]
   for (const [rota, usuario] of rotasComIdMalformado) {
     const resposta = await chamar('GET', rota, { token: gerarToken(usuario) })
-    assert.ok([400, 404, 500].includes(resposta.status), `${rota} com id malformado deveria responder de forma controlada (nunca derrubar o processo), veio ${resposta.status}`)
+    assert.equal(resposta.status, 400, `${rota} com id malformado deveria responder 400, veio ${resposta.status}`)
     assert.ok(!resposta.body?.url, `${rota} não pode devolver uma URL assinada para um id malformado`)
     const corpoTexto = JSON.stringify(resposta.body || {})
     assert.ok(!/postgres|pg_|syntax error|stack|at Object|node_modules/i.test(corpoTexto), `${rota} vazou detalhe interno na resposta: ${corpoTexto}`)

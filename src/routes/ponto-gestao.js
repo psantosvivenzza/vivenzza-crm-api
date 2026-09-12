@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { gerarUrlAssinada } from '../lib/ponto/fotoStorage.js'
 import { logarErroPonto } from '../lib/ponto/log.js'
 import { colaboradorNoEscopo } from '../middleware/pontoAuth.js'
+import { isUuidValido, exigirUuidNoParam } from '../lib/ponto/validacao.js'
 
 const router = Router()
 
@@ -58,6 +59,9 @@ router.get('/colaboradores', async (req, res) => {
 router.get('/marcacoes', async (req, res) => {
   try {
     const { colaborador_id } = req.query
+    if (colaborador_id && !isUuidValido(colaborador_id)) {
+      return res.status(400).json({ erro: 'colaborador_id inválido.' })
+    }
     if (colaborador_id && !colaboradorNoEscopo(req, colaborador_id)) {
       return res.status(403).json({ erro: 'Colaborador fora do seu escopo de gestão.' })
     }
@@ -92,7 +96,7 @@ router.get('/marcacoes', async (req, res) => {
 })
 
 // GET /api/ponto-gestao/marcacoes/:id/foto
-router.get('/marcacoes/:id/foto', async (req, res) => {
+router.get('/marcacoes/:id/foto', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data: marcacao, error: erroMarcacao } = await supabase
       .from('ponto_marcacoes')
@@ -137,6 +141,9 @@ router.get('/marcacoes/:id/foto', async (req, res) => {
 router.get('/correcoes', async (req, res) => {
   try {
     const { colaborador_id, status } = req.query
+    if (colaborador_id && !isUuidValido(colaborador_id)) {
+      return res.status(400).json({ erro: 'colaborador_id inválido.' })
+    }
     if (colaborador_id && !colaboradorNoEscopo(req, colaborador_id)) {
       return res.status(403).json({ erro: 'Colaborador fora do seu escopo de gestão.' })
     }
@@ -212,7 +219,7 @@ function mapearErroDecisao(mensagem) {
 // 'pendente'. `FOR UPDATE` dentro da função serializa decisões concorrentes
 // — nunca depende só da checagem prévia em JavaScript abaixo (que existe só
 // pra dar um 404/403 rápido antes de gastar uma chamada RPC).
-router.post('/correcoes/:id/decisao', async (req, res) => {
+router.post('/correcoes/:id/decisao', exigirUuidNoParam('id'), async (req, res) => {
   const { decisao, decisao_justificativa } = req.body || {}
   if (!['aprovada', 'rejeitada'].includes(decisao)) {
     return res.status(400).json({ erro: 'decisao deve ser "aprovada" ou "rejeitada".' })
@@ -273,6 +280,9 @@ router.post('/correcoes/:id/decisao', async (req, res) => {
 router.get('/solicitacoes', async (req, res) => {
   try {
     const { colaborador_id, status } = req.query
+    if (colaborador_id && !isUuidValido(colaborador_id)) {
+      return res.status(400).json({ erro: 'colaborador_id inválido.' })
+    }
     if (colaborador_id && !colaboradorNoEscopo(req, colaborador_id)) {
       return res.status(403).json({ erro: 'Colaborador fora do seu escopo de gestão.' })
     }
@@ -306,7 +316,7 @@ router.get('/solicitacoes', async (req, res) => {
 })
 
 // GET /api/ponto-gestao/solicitacoes/:id/foto
-router.get('/solicitacoes/:id/foto', async (req, res) => {
+router.get('/solicitacoes/:id/foto', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data: solicitacao, error: erroSolicitacao } = await supabase
       .from('ponto_solicitacoes_marcacao')
@@ -352,7 +362,7 @@ router.get('/solicitacoes/:id/foto', async (req, res) => {
 // `FOR UPDATE` na função serializa decisões concorrentes; a checagem de
 // escopo abaixo é só um 404 rápido antes de gastar uma chamada RPC, nunca
 // a única proteção contra corrida.
-router.post('/solicitacoes/:id/decisao', async (req, res) => {
+router.post('/solicitacoes/:id/decisao', exigirUuidNoParam('id'), async (req, res) => {
   const { decisao, decisao_justificativa } = req.body || {}
   if (!['aprovada', 'rejeitada'].includes(decisao)) {
     return res.status(400).json({ erro: 'decisao deve ser "aprovada" ou "rejeitada".' })

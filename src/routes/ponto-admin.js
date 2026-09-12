@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { logarErroPonto } from '../lib/ponto/log.js'
 import { EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA, MENSAGEM_EQUIPAMENTO_NAO_IMPLEMENTADO } from '../lib/ponto/equipamento.js'
 import { iniciarVinculoEquipamento, ErroEquipamento } from '../lib/ponto/equipamentoService.js'
+import { isUuidValido, exigirUuidNoParam } from '../lib/ponto/validacao.js'
 
 const router = Router()
 
@@ -39,7 +40,7 @@ router.get('/habilitacoes', async (req, res) => {
 })
 
 // PATCH /api/ponto-admin/habilitacoes/:usuario_id — { habilitado, observacao }
-router.patch('/habilitacoes/:usuario_id', async (req, res) => {
+router.patch('/habilitacoes/:usuario_id', exigirUuidNoParam('usuario_id'), async (req, res) => {
   const { habilitado, observacao } = req.body || {}
   if (typeof habilitado !== 'boolean') {
     return res.status(400).json({ erro: 'habilitado deve ser true ou false.' })
@@ -113,6 +114,9 @@ router.post('/gestores', async (req, res) => {
   if (!gestor_usuario_id || !colaborador_usuario_id) {
     return res.status(400).json({ erro: 'gestor_usuario_id e colaborador_usuario_id são obrigatórios.' })
   }
+  if (!isUuidValido(gestor_usuario_id) || !isUuidValido(colaborador_usuario_id)) {
+    return res.status(400).json({ erro: 'gestor_usuario_id e colaborador_usuario_id devem ser UUID.' })
+  }
   if (gestor_usuario_id === colaborador_usuario_id) {
     return res.status(400).json({ erro: 'Um colaborador não pode ser gestor de si mesmo.' })
   }
@@ -137,7 +141,7 @@ router.post('/gestores', async (req, res) => {
 })
 
 // DELETE /api/ponto-admin/gestores/:id — revoga (soft, preserva histórico)
-router.delete('/gestores/:id', async (req, res) => {
+router.delete('/gestores/:id', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('ponto_gestores')
@@ -181,6 +185,9 @@ router.post('/equipamentos', async (req, res) => {
   if (!usuario_id || !identificador?.trim()) {
     return res.status(400).json({ erro: 'usuario_id e identificador são obrigatórios.' })
   }
+  if (!isUuidValido(usuario_id)) {
+    return res.status(400).json({ erro: 'usuario_id deve ser um UUID.' })
+  }
 
   try {
     const { data: equipamento, error } = await supabase
@@ -210,7 +217,7 @@ router.post('/equipamentos', async (req, res) => {
 // serviria pra nada (o endpoint que o consome, POST /api/ponto-equipamento/
 // vincular, também está atrás do mesmo gate) — por isso fica bloqueado
 // também, em vez de deixar um código "válido" sem nenhum uso possível.
-router.post('/equipamentos/:id/vinculos', async (req, res) => {
+router.post('/equipamentos/:id/vinculos', exigirUuidNoParam('id'), async (req, res) => {
   if (!EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA) {
     return res.status(501).json({ erro: MENSAGEM_EQUIPAMENTO_NAO_IMPLEMENTADO })
   }
@@ -227,7 +234,7 @@ router.post('/equipamentos/:id/vinculos', async (req, res) => {
 })
 
 // DELETE /api/ponto-admin/equipamentos/:id — revoga (soft, preserva histórico)
-router.delete('/equipamentos/:id', async (req, res) => {
+router.delete('/equipamentos/:id', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data: equipamento, error } = await supabase
       .from('ponto_equipamentos')
