@@ -38,15 +38,86 @@
 
 ## Financeiro — RPC não versionada
 
-- [ ] `fn_sincronizar_baixa_legado` (chamada por `sync-financeiro-legado.js`
-      pra atualizar títulos existentes — cancelamento, encerramento,
-      resolução de `em_revisao_financeira`) não tem migration correspondente
-      em `supabase/migrations/` nem `migrations/`. Existe só no schema live
-      do Supabase, aplicada manualmente em algum momento — não auditável via
-      `git log`/`git blame`. Versionar a definição atual (via
-      `pg_get_functiondef` ou equivalente) antes de qualquer alteração
-      futura no fluxo de baixa financeira, pra não perder a única cópia
-      existente da lógica real.
+- [x] `fn_sincronizar_baixa_legado` versionada em 2026-09-11 — corpo real
+      capturado de produção via `pg_get_functiondef`/`pg_proc` (consulta
+      read-only, nada alterado em produção), commitado fielmente em
+      `supabase/migrations/20260101000055_fn_sincronizar_baixa_legado.sql`
+      (depende de `20260101000054_contas_financeiras_colunas_revisao_conflito.sql`,
+      que versiona 5 colunas de `contas_financeiras` — `motivo_revisao`,
+      `em_revisao_desde`, `conflito_baixa_legado`, `sincronizado_legado_em`,
+      `em_revisao_financeira` — que também nunca tiveram migration, mesmo
+      padrão de drift de `20260101000045`). Coberta por
+      `scripts/tests/collection/fn-sincronizar-baixa-legado.test.mjs` (7
+      cenários, Postgres local real, contas sintéticas `cr-997%`):
+      idempotência, nunca reverter pagamento, nunca duplicar dinheiro,
+      cancelamento, resolução automática de revisão, encerrado com saldo.
+      **Tipos confirmados (2026-09-11):** `motivo_revisao` text,
+      `em_revisao_desde` timestamptz, `conflito_baixa_legado` boolean,
+      `sincronizado_legado_em` timestamptz — consulta read-only real contra
+      `information_schema.columns` de produção bateu exatamente com a
+      inferência original (ver comentário na migration 000054).
+      **GRANTs corrigidos (2026-09-11):** confirmado via painel do Supabase
+      que a function tinha `EXECUTE` concedido a `PUBLIC`, `anon`,
+      `authenticated`, `postgres` e `service_role` — qualquer JWT válido (ou
+      sem login, via chave anon) podia chamá-la direto via PostgREST,
+      contornando o gate adminOuFinanceiro de `src/routes/financeiro.js`/
+      `auth.js`. Corrigido SÓ localmente (nada aplicado em produção) em
+      `supabase/migrations/20260101000056_fn_sincronizar_baixa_legado_revoga_execute_publico.sql`:
+      revoga de `PUBLIC`/`anon`/`authenticated`, mantém só `service_role`
+      (o papel real usado por `supabase-admin.server.js`); `postgres`
+      (owner/superuser) não foi tocado. Função é `SECURITY INVOKER` — além
+      do `EXECUTE`, `service_role` também precisa de `SELECT`/`INSERT`/
+      `UPDATE` direto em `contas_financeiras`/`baixas_financeiras` (já tem
+      isso de verdade em qualquer Supabase real; migration replica só pra
+      ambiente novo/local funcionar). Coberto por
+      `scripts/tests/collection/fn-sincronizar-baixa-legado-grants.test.mjs`
+      (`SET ROLE` real dentro de transação, não apenas documentação):
+      anon/authenticated recusados com `42501`, service_role continua
+      funcionando ponta a ponta. **Ainda não aplicado em produção** —
+      decisão de quando/como aplicar fica pra quem revisar a PR.
+      **Cluster de teste:** suíte de teste local rodada num cluster Postgres
+      EXCLUSIVO (porta/banco fora do padrão 5433/vivenzza_dev — ver
+      `scripts/tests/unit/README.md`), nunca o cluster compartilhado. O
+      arquivo de teste recusa (fail-closed) rodar contra porta 5432/5433 ou
+      banco vivenzza_dev/postgres.
+      **Correção (revisão independente, 2026-09-12):** esta PR não era
+      auto-suficiente — `fn_sincronizar_baixa_legado` também lê/escreve
+      `contas_financeiras.em_revisao_financeira`, coluna que só tinha
+      migration na PR #79 (`20260101000063`). Reproduzido empiricamente
+      (Postgres exclusivo, porta fora de 5432/5433, banco fora de
+      vivenzza_dev): aplicar só 054-056 desta PR contra uma base sem o drift
+      de produção faz a function ser criada sem erro (PL/pgSQL não valida
+      coluna referenciada em SQL embutido na criação), mas a primeira
+      chamada real falha em runtime (`record "v_conta" has no field
+      "em_revisao_financeira"`) — ou seja, mergear #77 sem #79 (ou nessa
+      ordem) quebraria o sync legado em qualquer ambiente novo sem o drift.
+      Corrigido adicionando a coluna também em `20260101000054` (mesmo
+      tipo/default da 000063: `boolean NOT NULL DEFAULT false`,
+      `ADD COLUMN IF NOT EXISTS` — no-op seguro se a 000063 da PR #79 já
+      tiver rodado, em qualquer ordem de merge). Suíte completa
+      (`npm run test:collection`, 69 arquivos/801 casos) revalidada sem
+      regressão após a correção.
+- [ ] Os 15 ajustes reais listados em `PREVIEW_RESOLUCAO_125_CONFLITOS.md`
+      (seção AUTO_RESOLVABLE_DETERMINISTIC, ex.: Francisco Freitas Oliveira,
+      FABIANO KAMPFF LEITE, THAINA RODRIGUES) continuam **não aplicados** —
+      versionar a RPC não é autorização pra rodá-la contra títulos reais.
+      Precisa de decisão explícita antes de aplicar via
+      `decidirAtualizacao()`/`fn_sincronizar_baixa_legado` em produção.
+- [ ] `fn_baixar_titulo`, `fn_estornar_baixa`, `fn_aprovar_estorno`,
+      `fn_rejeitar_estorno` e a tabela `estornos_financeiros` têm o MESMO
+      problema (achado ao investigar esta tarefa, 2026-09-11): não têm
+      migration em `supabase/migrations/`, só existem manualmente aplicadas
+      num cluster Postgres local separado (`.localdev/pgdata_financeiro_20260908`,
+      fora deste repositório versionado — ver comentário em
+      `scripts/tests/collection/pgcompat-embed-fkey-financeiro.test.mjs`).
+      `npm run db:local:reset` no cluster padrão NÃO recria essas 4
+      functions/tabela — os testes que dependem delas
+      (`financeiro-controle-acesso.test.mjs`,
+      `pgcompat-embed-fkey-financeiro.test.mjs`) só passam contra aquele
+      cluster exclusivo, não contra um `db:local:reset` do zero. Mesmo
+      tratamento que `fn_sincronizar_baixa_legado` recebeu aqui: versionar a
+      partir da definição real via `pg_get_functiondef`/`pg_proc` antes de
+      mexer no fluxo de baixa manual/estorno.
 
 ## Concluído (não refazer)
 
