@@ -146,15 +146,16 @@ suficiente" sem inventar um novo sistema de autenticação.
 
 ### 2.3 Idempotência por operação, não por (usuário, tipo, dia)
 
-Cada tentativa (marcação direta, hoje inatingível — ver 2.5 — ou
-solicitação) carrega um `operacao_id` (UUID v4) gerado no cliente no
-momento do toque no botão. O backend garante unicidade real via
-`UNIQUE INDEX` (`ponto_marcacoes.operacao_id`, `ponto_solicitacoes_marcacao.operacao_id`)
-— clique duplo/retry de rede reenvia o mesmo `operacao_id` e recebe de volta
-o registro já existente (idempotente de verdade), mas duas tentativas
-**distintas** do mesmo tipo no mesmo dia (ex.: esqueceu de bater e corrige
-depois) não são descartadas por proximidade de horário — elas geram
-`operacao_id`s diferentes e são persistidas.
+Cada tentativa (marcação direta, hoje inatingível — ver 2.5 —,
+solicitação ou correção) carrega um `operacao_id` (UUID v4) gerado no
+cliente no momento do toque no botão. O backend garante unicidade real via
+`UNIQUE INDEX` (`ponto_marcacoes.operacao_id`, `ponto_solicitacoes_marcacao.operacao_id`,
+`ponto_correcoes.operacao_id`) — clique duplo/retry de rede reenvia o
+mesmo `operacao_id` e recebe de volta o registro já existente (idempotente
+de verdade), mas duas tentativas **distintas** do mesmo tipo no mesmo dia
+(ex.: esqueceu de bater e corrige depois) não são descartadas por
+proximidade de horário — elas geram `operacao_id`s diferentes e são
+persistidas.
 
 Reforço da revisão de 2026-09-10: reenvio do **mesmo** `operacao_id` com
 conteúdo **diferente** (tipo ou justificativa distintos) não é tratado como
@@ -164,6 +165,18 @@ aprovadas via solicitação sempre nascem `sinalizado_para_revisao = true`
 (são uma exceção por construção, dado que não há verificação de
 equipamento); a avaliação de sequência inesperada (`avaliarSequencia`)
 continua existindo no código para quando `POST /marcacoes` reabrir.
+
+**Correção estrutural (auditoria adversarial de 2026-09-12, achado
+independente da PR #78, motivado pela PR frontend #19)**: `POST
+/api/ponto/correcoes` nasceu sem `operacao_id` — única rota de escrita do
+módulo sem nenhuma defesa de banco contra reenvio. Reproduzido contra
+Postgres real antes da correção: retry sequencial idêntico e concorrência
+real sempre geravam uma linha nova por tentativa (nunca colapsavam para
+1). Corrigido com o mesmo padrão desta seção, incluindo o filtro por
+`usuario_id` na consulta de idempotência desde o primeiro commit (a classe
+de vazamento entre usuários corrigida nas PRs #81/#82 para `/marcacoes` e
+`/solicitacoes` nunca chegou a existir aqui). Ver
+`docs/meu-ponto/AUDITORIA_CORRECOES_DUPLICACAO_2026-09-12.md`.
 
 ### 2.4 Fotos: bucket privado + signed URL (sem precedente, construído do zero)
 
@@ -232,7 +245,7 @@ ganha" silenciosamente).
 | `ponto_fotos` | Metadados da foto (path no bucket privado, mime, tamanho); bytes ficam só no Storage. |
 | `ponto_marcacoes` | Registro **imutável** e só criado por aprovação (não por criação direta, hoje — ver 2.5): `operacao_id` único, `tipo`, `registrado_em` do servidor, `dia_brt`, `foto_id`, `origem` (`normal`\|`contingencia`\|`correcao`), `sinalizado_para_revisao`. |
 | `ponto_solicitacoes_marcacao` | **(nova, migration 049)** O caminho operacional real desta etapa: toda tentativa de marcação (com ou sem foto, sempre com justificativa), `status` pendente/aprovada/rejeitada; aprovação gera a linha em `ponto_marcacoes`. |
-| `ponto_correcoes` | Solicitação/justificativa/decisão sobre uma marcação **já confirmada**, nunca edita `ponto_marcacoes` diretamente. |
+| `ponto_correcoes` | Solicitação/justificativa/decisão sobre uma marcação **já confirmada**, nunca edita `ponto_marcacoes` diretamente. `operacao_id` único (ver 2.3, corrigido em 2026-09-12). |
 
 Todas com FK para `usuarios(id)`, índices para as consultas do painel de
 gestão (por colaborador + período), e comentário de contexto no topo de cada

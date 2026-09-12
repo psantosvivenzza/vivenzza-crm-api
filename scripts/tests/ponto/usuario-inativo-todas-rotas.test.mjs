@@ -68,7 +68,7 @@ test('colaborador desativado após emissão do JWT perde acesso a TODA rota de /
 
   const correcao = await chamar('POST', '/api/ponto/correcoes', {
     token,
-    body: { marcacao_id: marcacaoId, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacaoId, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste' },
   })
   assert.equal(correcao.status, 201)
 
@@ -101,7 +101,7 @@ test('colaborador desativado após emissão do JWT perde acesso a TODA rota de /
 
   const corrigirDepois = await chamar('POST', '/api/ponto/correcoes', {
     token,
-    body: { marcacao_id: marcacaoId, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacaoId, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste' },
   })
   assert.equal(corrigirDepois.status, 403)
 })
