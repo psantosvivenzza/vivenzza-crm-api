@@ -135,20 +135,19 @@ test('PATCH /api/usuarios/:id — validação de role + nenhum caminho de auto-e
   })
 
   await tSuite.test('PATCH /api/auth/senha (autoatendimento): mesmo enviando "role" no corpo de propósito, o papel nunca muda', async () => {
-    // ACHADO COLATERAL, FORA DO ESCOPO DESTA TAREFA, NÃO CORRIGIDO AQUI:
-    // src/routes/auth.js monta '/senha' SEM o middleware `auth` (nem inline,
-    // nem via app.use('/api/auth', authRouter) em src/index.js — comentário
-    // "Login — sem autenticação" cobre o router inteiro; só '/me' aplica
-    // `auth` inline). Na prática, toda chamada real a esta rota quebra com
-    // "Cannot read properties of undefined (reading 'id')" — `req.user`
-    // nunca é populado. Isso é diferente de "a rota ignora role
-    // corretamente" — é a rota inteira não funcionando. De qualquer forma,
-    // isso já basta pra responder a pergunta desta tarefa (não existe
-    // caminho de auto-elevação por aqui, nem em teoria: a rota nunca chega a
-    // ler o corpo com `role`, e o destructure em auth.js é só
-    // `{ senha_atual, nova_senha }` — `role` nunca seria lido mesmo que o
-    // bug de autenticação fosse corrigido). Reportado separadamente; não
-    // corrigido, por estar fora do escopo de controle de acesso financeiro.
+    // Histórico (até 2026-09-12): src/routes/auth.js montava '/senha' SEM o
+    // middleware `auth` (nem inline, nem via app.use('/api/auth', authRouter)
+    // em src/index.js — comentário "Login — sem autenticação" cobria o
+    // router inteiro; só '/me' aplicava `auth` inline). Na prática, toda
+    // chamada real a esta rota quebrava com "Cannot read properties of
+    // undefined (reading 'id')" antes mesmo de checar `senha_atual` —
+    // ninguém, nem com token válido, completava a troca. Corrigido em
+    // 2026-09-12 (`router.patch('/senha', auth, ...)`); cobertura adversarial
+    // dedicada em scripts/tests/collection/auth-senha-middleware-ausente-20260912.test.mjs.
+    // Este teste aqui, mesmo antes da correção, já bastava pra responder a
+    // pergunta desta tarefa (controle de acesso financeiro): não existe
+    // caminho de auto-elevação por aqui, nem em teoria — o destructure em
+    // auth.js é só `{ senha_atual, nova_senha }`, `role` nunca é lido.
     const senhaAtualHash = await (await import('bcryptjs')).default.hash('senha-original', 10)
     await supabase.from('usuarios').update({ senha_hash: senhaAtualHash }).eq('id', idVendedorA)
 
@@ -156,8 +155,8 @@ test('PATCH /api/usuarios/:id — validação de role + nenhum caminho de auto-e
       token: tokenVendedorA,
       body: { senha_atual: 'senha-original', nova_senha: 'senha-nova-123', role: 'admin' }, // role enviado de propósito
     })
-    // Não afirmamos o status (rota tem bug pré-existente não relacionado) —
-    // só que, seja qual for o resultado, o papel nunca muda.
+    // Não afirmamos o status aqui (não é o foco deste arquivo) — só que, seja
+    // qual for o resultado, o papel nunca muda.
     const depois = await buscarUsuario(idVendedorA)
     assert.equal(depois.role, 'vendedor', 'papel não pode mudar por esta rota em nenhuma circunstância')
   })
