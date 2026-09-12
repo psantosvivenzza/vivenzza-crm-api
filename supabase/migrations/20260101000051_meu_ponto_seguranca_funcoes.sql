@@ -199,6 +199,21 @@ BEGIN
     IF NOT COALESCE(v_piloto_ativo, false) THEN
       RAISE EXCEPTION 'piloto_desativado' USING ERRCODE = 'P0004';
     END IF;
+
+    -- Correção estrutural (revisão de 2026-09-12): antes desta checagem, um
+    -- valor_proposto sem tipo/registrado_em válidos (deveria ser bloqueado
+    -- na criação por POST /api/ponto/correcoes, mas nunca se pode confiar
+    -- só na checagem em JS — mesma disciplina do resto deste módulo) fazia
+    -- esta função marcar a correção como 'aprovada' e simplesmente pular o
+    -- INSERT da marcação, em silêncio — sem erro, sem marcacao_gerada_id,
+    -- sem qualquer sinal pro gestor de que a aprovação não produziu nada.
+    -- Falhar aqui, ANTES do UPDATE de status, mantém a correção 'pendente'
+    -- (nada commitado) em vez de "aprovada" sem efeito nenhum.
+    v_tipo := v_correcao.valor_proposto->>'tipo';
+    v_registrado_em := NULLIF(v_correcao.valor_proposto->>'registrado_em', '')::timestamptz;
+    IF v_tipo NOT IN ('entrada', 'saida_intervalo', 'retorno_intervalo', 'saida') OR v_registrado_em IS NULL THEN
+      RAISE EXCEPTION 'valor_proposto_invalido' USING ERRCODE = 'P0013';
+    END IF;
   END IF;
 
   UPDATE public.ponto_correcoes
@@ -206,19 +221,14 @@ BEGIN
   WHERE id = p_correcao_id;
 
   IF v_gera_marcacao THEN
-    v_tipo := v_correcao.valor_proposto->>'tipo';
-    v_registrado_em := NULLIF(v_correcao.valor_proposto->>'registrado_em', '')::timestamptz;
+    INSERT INTO public.ponto_marcacoes (
+      operacao_id, usuario_id, tipo, origem, registrado_em, dia_brt, origem_correcao_id, sinalizado_para_revisao
+    ) VALUES (
+      gen_random_uuid(), v_correcao.usuario_id, v_tipo, 'correcao', v_registrado_em,
+      (v_registrado_em AT TIME ZONE 'America/Sao_Paulo')::date, v_correcao.id, false
+    ) RETURNING id INTO v_nova_marcacao_id;
 
-    IF v_tipo IN ('entrada', 'saida_intervalo', 'retorno_intervalo', 'saida') AND v_registrado_em IS NOT NULL THEN
-      INSERT INTO public.ponto_marcacoes (
-        operacao_id, usuario_id, tipo, origem, registrado_em, dia_brt, origem_correcao_id, sinalizado_para_revisao
-      ) VALUES (
-        gen_random_uuid(), v_correcao.usuario_id, v_tipo, 'correcao', v_registrado_em,
-        (v_registrado_em AT TIME ZONE 'America/Sao_Paulo')::date, v_correcao.id, false
-      ) RETURNING id INTO v_nova_marcacao_id;
-
-      UPDATE public.ponto_correcoes SET marcacao_gerada_id = v_nova_marcacao_id WHERE id = p_correcao_id;
-    END IF;
+    UPDATE public.ponto_correcoes SET marcacao_gerada_id = v_nova_marcacao_id WHERE id = p_correcao_id;
   END IF;
 
   RETURN QUERY SELECT 'decidida_agora'::text, p_correcao_id, p_decisao, p_decisor_id, now(), v_nova_marcacao_id;

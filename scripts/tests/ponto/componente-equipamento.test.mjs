@@ -320,6 +320,46 @@ test('recuperação após timeout: mesmo operacao_id devolve a marcação já re
   assert.equal(count, 1, 'nunca deve duplicar a marcação num retry de mesmo operacao_id')
 })
 
+// Correção estrutural (revisão de 2026-09-12): antes desta correção, reenviar
+// o MESMO operacao_id com um TIPO diferente devolvia silenciosamente a
+// marcação antiga com status 200/"ja_registrada_antes" — exatamente o tipo
+// de "aceitar um payload diferente sob a mesma chave de idempotência" que a
+// especificação (seção 2.3) proíbe explicitamente para /solicitacoes, mas
+// que nunca tinha sido replicado aqui (POST /marcacoes real, hoje
+// inatingível via HTTP, mas testado direto na camada de serviço).
+test('idempotência: mesmo operacao_id com tipo DIFERENTE é conflito, nunca devolve a marcação antiga como se fosse a nova', async () => {
+  const { emitirDesafio, registrarMarcacaoAssinada, ErroEquipamento } = await import('../../../src/lib/ponto/equipamentoService.js')
+  const { calcularHashConteudo, payloadAssinaturaEquipamento } = await import('../../../src/lib/ponto/assinaturaEquipamento.js')
+  const { equipamentoId, privateKey } = await montarEquipamentoAssinante()
+
+  const hash1 = calcularHashConteudo(Buffer.from('foto-fake-conflito-1'))
+  const desafio1 = await emitirDesafio({ usuarioId: usuario.id, equipamentoId, tipo: 'entrada', hashConteudo: hash1 })
+  const operacaoId = crypto.randomUUID()
+  const payload1 = payloadAssinaturaEquipamento({ nonce: desafio1.nonce, equipamentoId, usuarioId: usuario.id, operacaoId, tipo: 'entrada', hashConteudo: hash1 })
+  const assinatura1 = assinar(privateKey, payload1)
+
+  const primeira = await registrarMarcacaoAssinada({ usuarioId: usuario.id, equipamentoId, nonce: desafio1.nonce, operacaoId, tipo: 'entrada', hashConteudo: hash1, assinaturaBase64: assinatura1, fotoId: await criarFotoDeTeste() })
+  assert.equal(primeira.resultado, 'registrada_agora')
+  assert.equal(primeira.tipo, 'entrada')
+
+  // Mesmo operacao_id, tipo diferente ('saida') — precisa de um desafio novo
+  // (o primeiro já foi consumido), mas a MESMA operacao_id de antes.
+  const hash2 = calcularHashConteudo(Buffer.from('foto-fake-conflito-2'))
+  const desafio2 = await emitirDesafio({ usuarioId: usuario.id, equipamentoId, tipo: 'saida', hashConteudo: hash2 })
+  const payload2 = payloadAssinaturaEquipamento({ nonce: desafio2.nonce, equipamentoId, usuarioId: usuario.id, operacaoId, tipo: 'saida', hashConteudo: hash2 })
+  const assinatura2 = assinar(privateKey, payload2)
+  const fotoId2 = await criarFotoDeTeste()
+
+  await assert.rejects(
+    () => registrarMarcacaoAssinada({ usuarioId: usuario.id, equipamentoId, nonce: desafio2.nonce, operacaoId, tipo: 'saida', hashConteudo: hash2, assinaturaBase64: assinatura2, fotoId: fotoId2 }),
+    (err) => { assert.ok(err instanceof ErroEquipamento); assert.equal(err.codigoEquipamento, 'operacao_id_conteudo_diferente'); assert.equal(err.status, 409); return true }
+  )
+
+  const { data: marcacoes } = await supabase.from('ponto_marcacoes').select('id, tipo').eq('operacao_id', operacaoId)
+  assert.equal(marcacoes.length, 1, 'a tentativa com tipo diferente nunca cria uma segunda linha')
+  assert.equal(marcacoes[0].tipo, 'entrada', 'a marcação original nunca é substituída/reinterpretada')
+})
+
 test('duas tentativas simultâneas com o mesmo nonce: só uma vence', async () => {
   const { emitirDesafio, registrarMarcacaoAssinada } = await import('../../../src/lib/ponto/equipamentoService.js')
   const { calcularHashConteudo, payloadAssinaturaEquipamento } = await import('../../../src/lib/ponto/assinaturaEquipamento.js')

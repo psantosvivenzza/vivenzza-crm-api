@@ -59,9 +59,16 @@ BEGIN
   -- Idempotência primeiro: mesmo operacao_id já processado devolve o que já
   -- existe, nunca tenta consumir o nonce de novo — é assim que uma
   -- recuperação após timeout de rede (protocolo §1, passo 7) evita
-  -- duplicar a marcação.
+  -- duplicar a marcação. Reenvio do MESMO operacao_id com um tipo
+  -- DIFERENTE nunca é tratado como "a mesma operação" (mesma disciplina de
+  -- POST /solicitacoes, ver especificação seção 2.3) — devolver
+  -- silenciosamente a marcação antiga esconderia do chamador que a
+  -- segunda tentativa, com dado diferente, nunca foi registrada.
   SELECT * INTO v_existente FROM public.ponto_marcacoes WHERE operacao_id = p_operacao_id;
   IF FOUND THEN
+    IF v_existente.tipo IS DISTINCT FROM p_tipo THEN
+      RAISE EXCEPTION 'operacao_id_conteudo_diferente' USING ERRCODE = 'P0014';
+    END IF;
     RETURN QUERY SELECT 'ja_registrada_antes'::text, v_existente.id, v_existente.tipo, v_existente.origem, v_existente.registrado_em, v_existente.dia_brt, v_existente.sinalizado_para_revisao;
     RETURN;
   END IF;

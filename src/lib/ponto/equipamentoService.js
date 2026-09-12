@@ -251,6 +251,7 @@ export function mapearErroRegistro(mensagem) {
     desafio_expirado: 410,
     conteudo_nao_confere: 409,
     equipamento_invalido_ou_revogado: 403,
+    operacao_id_conteudo_diferente: 409,
   }
   const status = mapa[mensagem]
   return status ? { status } : null

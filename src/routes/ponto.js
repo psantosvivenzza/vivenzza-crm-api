@@ -32,6 +32,16 @@ const router = Router()
 const TIPOS_VALIDOS = ['entrada', 'saida_intervalo', 'retorno_intervalo', 'saida']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TIPOS_SOLICITACAO_VALIDOS = ['ajuste_horario', 'ajuste_tipo', 'inclusao_marcacao_faltante', 'outro']
+// Estes três tipos, se aprovados, geram uma NOVA linha em ponto_marcacoes
+// (ver ponto_decidir_correcao, migration 051) a partir de
+// valor_proposto.tipo/registrado_em — 'outro' nunca gera marcação
+// automaticamente. Validar aqui, na criação, evita que uma correção com
+// valor_proposto incompleto fique pendente e só "estoure" (silenciosamente,
+// sem gerar marcação nem avisar ninguém) no momento da aprovação pelo
+// gestor — a função Postgres também revalida isto (nunca confia só nesta
+// checagem em JS), mas o gestor nunca deveria ver uma correção aprovável
+// que na prática não pode produzir nada.
+const TIPOS_CORRECAO_QUE_GERAM_MARCACAO = ['ajuste_horario', 'ajuste_tipo', 'inclusao_marcacao_faltante']
 
 // Proteção contra tentativa repetida de senha (a única coisa que uma
 // marcação/solicitação exige além de estar logado). Chave por usuário, não
@@ -227,6 +237,7 @@ function mensagemAmigavelRegistro(codigo) {
     desafio_ja_usado: 'Este desafio já foi usado. Peça um novo desafio.',
     desafio_expirado: 'Este desafio expirou. Peça um novo desafio.',
     conteudo_nao_confere: 'O conteúdo enviado não corresponde ao desafio assinado. A marcação não foi registrada.',
+    operacao_id_conteudo_diferente: 'Este operacao_id já foi usado com um tipo diferente. Gere uma nova tentativa (novo operacao_id) em vez de reenviar com dados alterados.',
   }
   return mapa[codigo] || 'Não foi possível registrar a marcação.'
 }
@@ -313,6 +324,15 @@ router.post('/marcacoes', exigirPilotoAtivo, limiteTentativasSensiveis, async (r
       .maybeSingle()
     if (erroExistente) throw erroExistente
     if (existente) {
+      // Mesmo reforço do idempotência aplicado em /solicitacoes (seção 2.3
+      // da especificação): reenvio do mesmo operacao_id com um tipo
+      // diferente nunca é tratado como "a mesma operação" — devolveria
+      // silenciosamente a marcação antiga como se fosse sucesso da nova
+      // tentativa. A função Postgres (migration 053) reforça a mesma
+      // checagem para a janela de corrida entre duas chamadas concorrentes.
+      if (existente.tipo !== tipo) {
+        return res.status(409).json({ erro: mensagemAmigavelRegistro('operacao_id_conteudo_diferente') })
+      }
       return res.status(200).json({ ...existente, idempotente: true })
     }
 
@@ -597,6 +617,19 @@ router.post('/correcoes', async (req, res) => {
   }
   if (!justificativa?.trim()) {
     return res.status(400).json({ erro: 'justificativa é obrigatória.' })
+  }
+  if (TIPOS_CORRECAO_QUE_GERAM_MARCACAO.includes(tipo_solicitacao)) {
+    if (!TIPOS_VALIDOS.includes(valor_proposto.tipo)) {
+      return res.status(400).json({
+        erro: `valor_proposto.tipo é obrigatório para "${tipo_solicitacao}" e deve ser um de: ${TIPOS_VALIDOS.join(', ')}`,
+      })
+    }
+    const registradoEmProposto = valor_proposto.registrado_em ? new Date(valor_proposto.registrado_em) : null
+    if (!registradoEmProposto || Number.isNaN(registradoEmProposto.getTime())) {
+      return res.status(400).json({
+        erro: `valor_proposto.registrado_em é obrigatório para "${tipo_solicitacao}" e deve ser uma data/hora válida.`,
+      })
+    }
   }
 
   try {

@@ -91,7 +91,8 @@ nunca influencia `registrado_em`.
 | Requisito | Implementação | Teste | Pendência |
 |---|---|---|---|
 | Mesma operação simultânea → 1 marcação/solicitação | `UNIQUE INDEX` real em `operacao_id` | `solicitacoes-marcacao.test.mjs` ("concorrência real: 3 requisições simultâneas") | — |
-| Mesma operação, conteúdo diferente → conflito | Comparação de `tipo`/`justificativa` contra o registro existente antes de tratar como idempotente | `solicitacoes-marcacao.test.mjs` ("conteúdo DIFERENTE é conflito") | Não implementado no `POST /marcacoes` legado (inatingível hoje, ver seção 1) |
+| Mesma operação, conteúdo diferente → conflito | Comparação de `tipo`/`justificativa` contra o registro existente antes de tratar como idempotente | `solicitacoes-marcacao.test.mjs` ("conteúdo DIFERENTE é conflito") | — |
+| Idem, para `POST /marcacoes` (inatingível hoje, ver seção 1) e `ponto_registrar_marcacao_assinada` | **Corrigido na revisão de 2026-09-12** — antes, reenviar o mesmo `operacao_id` com um `tipo` diferente devolvia silenciosamente a marcação antiga como se fosse sucesso da nova tentativa. Agora comparação de `tipo` em ambas as camadas (rota e função Postgres), erro `operacao_id_conteudo_diferente` → 409 | `componente-equipamento.test.mjs` ("mesmo operacao_id com tipo DIFERENTE é conflito") | — |
 | Operações distintas legítimas preservadas | Sem chave por (usuário, tipo, dia) — só por `operacao_id` | `equipamento-bloqueio.test.mjs`/testes antigos de sequência (removidos do arquivo dedicado, mas o princípio é estrutural: nunca há `UPDATE`/`UPSERT` por tipo+dia) | — |
 | Recuperação após timeout sem nova batida | `GET /solicitacoes/por-operacao/:operacao_id` | `solicitacoes-marcacao.test.mjs` (2 testes: recupera própria, 404 para terceiro) | — |
 | Decisão concorrente → só uma válida | `UPDATE ... WHERE status='pendente'` + `.maybeSingle()` (antes usava `.single()`, que MASCARAVA a corrida como erro 500 — corrigido nesta revisão) | `solicitacoes-decisao.test.mjs`, `correcoes.test.mjs` (2 testes de corrida real, `Promise.all`) | — |
@@ -147,3 +148,25 @@ Fora do escopo desta etapa (não implementado, não instalado em máquina real):
 6. Só depois disso `EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA` deve virar `true` — e mesmo assim, `POST /marcacoes` deve validar a assinatura de verdade antes de aceitar, não apenas checar a constante.
 
 Critério de pronto: um teste de integração que (a) gera um desafio, (b) assina com uma chave real, (c) valida no servidor, (d) prova que um desafio expirado ou reutilizado é rejeitado — só então a constante muda.
+
+## 9. Revisão integrada de 2026-09-12 — dois defeitos concretos corrigidos
+
+Revisão final integrada (backend + frontend, PRs #78/#18) contra Postgres
+real isolado (porta 55491, nunca 5432/5433/vivenzza_dev). Dois defeitos
+concretos encontrados e corrigidos, ambos com teste novo provando o
+comportamento antes-e-depois:
+
+| Defeito | Onde | Correção | Teste |
+|---|---|---|---|
+| Aprovar uma correção (`ajuste_horario`/`ajuste_tipo`/`inclusao_marcacao_faltante`) com `valor_proposto` sem `tipo`/`registrado_em` válidos marcava a correção como `'aprovada'` e simplesmente PULAVA o `INSERT` da marcação — em silêncio, sem erro, sem `marcacao_gerada_id`, sem nenhum sinal pro gestor | `ponto_decidir_correcao` (migration 051) | Validação movida para ANTES do `UPDATE` de status — `valor_proposto` inválido agora levanta `valor_proposto_invalido` (a transação inteira desfaz, a correção continua `'pendente'`), mapeado para HTTP 422; `POST /api/ponto/correcoes` também passou a validar isto na criação (defesa em profundidade — nunca confiar só na checagem em JS) | `correcoes.test.mjs` (criação: 400; aprovação de correção malformada pré-existente: 422, status permanece pendente) |
+| Reenviar o mesmo `operacao_id` com um `tipo` diferente em `POST /marcacoes`/`ponto_registrar_marcacao_assinada` (hoje inatingível via HTTP, ver seção 1, mas código real testado na camada de serviço) devolvia 200 com a marcação ANTIGA, como se a nova tentativa tivesse sido aceita — o mesmo problema que a especificação (seção 2.3) já proibia para `/solicitacoes`, nunca replicado aqui | `src/routes/ponto.js` (rota) + `ponto_registrar_marcacao_assinada` (migration 053) | Comparação de `tipo` contra o registro existente em ambas as camadas; erro `operacao_id_conteudo_diferente` → 409 | `componente-equipamento.test.mjs` ("mesmo operacao_id com tipo DIFERENTE é conflito") |
+
+Achado adicional, fora do backend: `GestaoPonto.jsx` (frontend) exportava
+CSV/PDF com só a primeira página de `GET /api/ponto-gestao/marcacoes`
+(limite 500/página) — com filtro largo, uma vez que o piloto passe de ~1
+mês de uso (3 colaboradores × ~4 marcações/dia já ultrapassa 500), o
+"relatório de conferência" ficava truncado sem nenhum aviso. Corrigido para
+paginar até esgotar `total` antes de gerar o arquivo.
+
+Suíte completa (`npm run test:ponto`, 13 arquivos) permanece verde após as
+correções, incluindo os 3 testes novos.

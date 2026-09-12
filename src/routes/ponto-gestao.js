@@ -169,6 +169,15 @@ function mapearErroDecisao(mensagem) {
   if (mensagem === 'piloto_desativado') return { status: 403, erro: 'O piloto está desativado — aprovações que criariam uma marcação estão bloqueadas. Rejeitar continua disponível.' }
   if (mensagem === 'solicitacao_nao_encontrada' || mensagem === 'correcao_nao_encontrada') return { status: 404, erro: 'Solicitação não encontrada.' }
   if (mensagem === 'decisao_invalida') return { status: 400, erro: 'decisao deve ser "aprovada" ou "rejeitada".' }
+  // valor_proposto_invalido: POST /api/ponto/correcoes já bloqueia isto na
+  // criação (valida tipo/registrado_em quando tipo_solicitacao geraria uma
+  // marcação) — a função Postgres reconfere porque nunca se pode confiar
+  // só na checagem em JS. Não deveria disparar pelo caminho normal; se
+  // disparar, é uma correção antiga (anterior a essa validação) ou uma
+  // chamada direta da função com dado inválido.
+  if (mensagem === 'valor_proposto_invalido') {
+    return { status: 422, erro: 'Esta correção tem um valor_proposto sem tipo/registrado_em válidos e não pode ser aprovada (geraria uma marcação sem dados suficientes). Rejeite e peça um novo pedido de correção.' }
+  }
   // fora_do_escopo/decisor_invalido_ou_inativo: a função Postgres reconfere
   // isso de propósito (migration 051) — não deveria disparar pelo caminho
   // normal (Express já barra antes), só protege contra chamada direta da

@@ -188,6 +188,74 @@ test('decidir a mesma solicitação duas vezes falha na segunda (já decidida)',
   assert.equal(segunda.status, 409)
 })
 
+// Correção estrutural (revisão de 2026-09-12): antes desta validação,
+// POST /api/ponto/correcoes aceitava qualquer objeto como valor_proposto,
+// mesmo para tipo_solicitacao que deveria gerar uma marcação — a correção
+// ficava pendente normalmente e só "estourava" (silenciosamente, sem gerar
+// marcação nem avisar ninguém) no momento em que um gestor aprovava.
+test('ajuste_horario/ajuste_tipo/inclusao_marcacao_faltante exigem valor_proposto.tipo e .registrado_em válidos na criação', async () => {
+  const original = await criarMarcacaoDeTeste(colaborador, 'entrada')
+
+  const semTipo = await chamar('POST', '/api/ponto/correcoes', {
+    token: gerarToken(colaborador),
+    body: { marcacao_id: original.id, tipo_solicitacao: 'ajuste_horario', valor_proposto: { registrado_em: new Date().toISOString() }, justificativa: 'teste' },
+  })
+  assert.equal(semTipo.status, 400)
+  assert.match(semTipo.body.erro, /valor_proposto\.tipo/)
+
+  const semHorario = await chamar('POST', '/api/ponto/correcoes', {
+    token: gerarToken(colaborador),
+    body: { marcacao_id: original.id, tipo_solicitacao: 'ajuste_tipo', valor_proposto: { tipo: 'entrada' }, justificativa: 'teste' },
+  })
+  assert.equal(semHorario.status, 400)
+  assert.match(semHorario.body.erro, /valor_proposto\.registrado_em/)
+
+  const horarioInvalido = await chamar('POST', '/api/ponto/correcoes', {
+    token: gerarToken(colaborador),
+    body: { marcacao_id: original.id, tipo_solicitacao: 'inclusao_marcacao_faltante', valor_proposto: { tipo: 'entrada', registrado_em: 'não-é-uma-data' }, justificativa: 'teste' },
+  })
+  assert.equal(horarioInvalido.status, 400)
+
+  // 'outro' nunca gera marcação — continua aceitando valor_proposto livre.
+  const outroLivre = await chamar('POST', '/api/ponto/correcoes', {
+    token: gerarToken(colaborador),
+    body: { marcacao_id: original.id, tipo_solicitacao: 'outro', valor_proposto: { qualquer: 'coisa' }, justificativa: 'teste' },
+  })
+  assert.equal(outroLivre.status, 201)
+})
+
+// Defesa em profundidade: mesmo que uma correção malformada exista no banco
+// (fixture inserida direto, simulando uma linha anterior a essa validação —
+// nunca se pode confiar só na checagem em JS), a função Postgres
+// (ponto_decidir_correcao, migration 051) recusa aprovar em vez de marcar
+// 'aprovada' sem gerar marcação nenhuma.
+test('aprovar uma correção com valor_proposto inválido falha explicitamente (422), correção continua pendente', async () => {
+  const supabase = obterSupabaseDeTeste()
+  const { data: correcaoMalformada, error } = await supabase
+    .from('ponto_correcoes')
+    .insert({
+      usuario_id: colaborador.id,
+      tipo_solicitacao: 'ajuste_horario',
+      valor_proposto: { tipo: 'entrada' }, // sem registrado_em — nunca deveria existir via a rota real, hoje validada
+      justificativa: 'fixture de teste — bypassa a validação da rota de propósito',
+      solicitado_por: colaborador.id,
+      status: 'pendente',
+    })
+    .select('id')
+    .single()
+  if (error) throw error
+
+  const decidir = await chamar('POST', `/api/ponto-gestao/correcoes/${correcaoMalformada.id}/decisao`, {
+    token: gerarToken(gestor),
+    body: { decisao: 'aprovada' },
+  })
+  assert.equal(decidir.status, 422)
+
+  const { data: depois } = await supabase.from('ponto_correcoes').select('status, marcacao_gerada_id').eq('id', correcaoMalformada.id).single()
+  assert.equal(depois.status, 'pendente', 'a correção NUNCA deve ficar "aprovada" sem gerar a marcação correspondente')
+  assert.equal(depois.marcacao_gerada_id, null)
+})
+
 test('decisão concorrente sobre a mesma correção: duas chamadas simultâneas, só uma vale', async () => {
   const marcacao = await criarMarcacaoDeTeste(colaborador, 'entrada')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
