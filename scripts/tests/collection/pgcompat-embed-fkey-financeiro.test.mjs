@@ -7,11 +7,12 @@
 // MESMA tabela (usuarios) é referenciada mais de uma vez na mesma query por
 // FKs diferentes (o caso que quebrava o parser antigo).
 //
-// Depende das mesmas 5 migrations legadas aplicadas (fora deste repositório
-// versionado, só neste cluster sintético) em financeiro-controle-acesso.test.mjs:
-// estornos_financeiros.sql, fn_baixar_titulo.sql, fn_estornar_baixa.sql,
-// fn_aprovar_estorno.sql, fn_rejeitar_estorno.sql. Precisa rodar depois delas
-// terem sido aplicadas ao cluster (não reaplica sozinho).
+// Depende dos mesmos 5 objetos (estornos_financeiros, fn_baixar_titulo,
+// fn_estornar_baixa, fn_aprovar_estorno, fn_rejeitar_estorno) citados em
+// financeiro-controle-acesso.test.mjs. ATUALIZAÇÃO 2026-09-12: gap de
+// versionamento fechado — agora são supabase/migrations/20260101000057 a
+// 000061, aplicadas automaticamente por `npm run db:local:reset` (não
+// precisa mais de aplicação manual/cluster avulso).
 //
 // Com isso, a limitação documentada em financeiro-controle-acesso.test.mjs
 // (linhas "GET /estornos/pendentes e GET /contas/:contaId/baixas — gate de

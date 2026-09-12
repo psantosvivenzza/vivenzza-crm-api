@@ -46,7 +46,22 @@
       `git log`/`git blame`. Versionar a definição atual (via
       `pg_get_functiondef` ou equivalente) antes de qualquer alteração
       futura no fluxo de baixa financeira, pra não perder a única cópia
-      existente da lógica real.
+      existente da lógica real. (Em andamento separado, PR #77 — não faz
+      parte do item concluído abaixo.)
+- [x] `fn_baixar_titulo`, `fn_estornar_baixa`, `fn_aprovar_estorno`,
+      `fn_rejeitar_estorno` e `estornos_financeiros` tinham o mesmo problema
+      (só existiam em `migrations/` — pasta solta, fora do pipeline real de
+      `scripts/localdb-reset.mjs` — nunca em `supabase/migrations/`; gap
+      citado explicitamente como não tratado na PR #77 e coberto só por
+      aplicação manual/cluster avulso em `financeiro-controle-acesso.test.mjs`/
+      `pgcompat-embed-fkey-financeiro.test.mjs`). Versionado em
+      `supabase/migrations/20260101000057` a `000062` (mesmo texto de
+      `migrations/*.sql`, verbatim, só com guards de idempotência) +
+      hardening de GRANT (achado análogo ao da PR #77: EXECUTE exposto a
+      PUBLIC/anon/authenticated por padrão do Supabase/PostgREST) + novo
+      `estornos-financeiros-grants.test.mjs`. Verificação contra produção
+      real ainda pendente — ver
+      `docs/claude-context/verificacao-producao-estornos-baixar-titulo.md`.
 
 ## Concluído (não refazer)
 
