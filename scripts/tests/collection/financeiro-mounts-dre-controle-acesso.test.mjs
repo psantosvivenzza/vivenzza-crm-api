@@ -232,11 +232,20 @@ test('financeiro acessa os recursos de LEITURA aprovados (os 6 mounts + DRE)', a
     assert.equal(r.status, 200, JSON.stringify(r.body))
   })
 
-  await tSuite.test('GET /api/relatorios/dre?ano=2026 — gate autoriza financeiro (BLOQUEIO DE AMBIENTE conhecido: `nfe`/`nfe_itens` não têm baseline local nem migration versionada — mesmo padrão já documentado pra sdr_conversas/leads.atendimento_humano e pela auditoria NetVision; só existem no Supabase de produção. Não fabricado aqui: fora do escopo desta revisão de acesso. Por isso só provamos o GATE, não o cálculo do DRE)', async () => {
+  await tSuite.test('GET /api/relatorios/dre?ano=2026 — gate autoriza financeiro e o handler executa de verdade', async () => {
+    // ATUALIZAÇÃO (2026-09-12): nfe/nfe_itens/produtos, que até então não
+    // tinham baseline local nem migration versionada (bloqueio de ambiente
+    // documentado no histórico deste arquivo — 500 era o gap de schema, não
+    // um erro de autorização), agora existem via
+    // supabase/migrations/20260101000064-000066 e
+    // scripts/localdb/schema-baseline/007_notas_entrada_dre.sql. O cálculo
+    // completo do DRE é coberto por scripts/tests/collection/relatorios-dre.test.mjs;
+    // aqui só interessa que o GATE deixa financeiro passar e o handler
+    // responde com sucesso (os valores em si dependem de fixtures de outras
+    // suítes rodando no mesmo banco, fora do escopo deste teste de acesso).
     const r = await chamar('GET', '/api/relatorios/dre?ano=2026', { token: tokenFinanceiro })
     assert.notEqual(r.status, 403, `gate precisa deixar financeiro passar pro handler; veio 403 — corpo: ${JSON.stringify(r.body)}`)
-    assert.equal(r.status, 500, JSON.stringify(r.body))
-    assert.match(r.body.erro, /nfe/, 'confirma que o 500 é o gap de schema local (tabela nfe), não um erro de autorização')
+    assert.equal(r.status, 200, JSON.stringify(r.body))
   })
 })
 

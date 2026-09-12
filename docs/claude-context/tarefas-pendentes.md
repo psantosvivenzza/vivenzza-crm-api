@@ -47,6 +47,29 @@
       `pg_get_functiondef` ou equivalente) antes de qualquer alteração
       futura no fluxo de baixa financeira, pra não perder a única cópia
       existente da lógica real.
+- [x] `fn_criar_nota_entrada` (chamada por `POST /api/notas-entrada`) e as
+      tabelas `notas_entrada`/`notas_entrada_itens` nunca tiveram nenhum SQL
+      versionado neste repositório (nem mesmo em `migrations/` solta).
+      `estoque`/`movimentacoes_estoque`/`atualizar_saldo_estoque()` tinham o
+      mesmo problema de `migrations/` solta, mais um drift confirmado
+      (produção real tem `SET search_path` no trigger function, a versão
+      solta não). Versionado em `supabase/migrations/20260101000064`
+      (estoque/movimentacoes_estoque, drift corrigido) e `000065`
+      (notas_entrada/notas_entrada_itens/fn_criar_nota_entrada, verbatim) +
+      hardening de GRANT em `000066` (mesmo achado de EXECUTE exposto a
+      PUBLIC/anon/authenticated) + novos testes
+      `notas-entrada-fn-criar-grants.test.mjs`, `notas-entrada-fluxo.test.mjs`,
+      `relatorios-dre.test.mjs`. `produtos`/`nfe`/`nfe_itens` seguem sem
+      migration própria (pré-existentes, nunca versionadas neste
+      repositório — mesma situação de `usuarios`/`contas_financeiras`); só
+      ganharam baseline de teste em
+      `scripts/localdb/schema-baseline/007_notas_entrada_dre.sql`. Riscos de
+      negócio não corrigidos (conta a pagar de Nota de Entrada some do DRE,
+      `produtos.estoque` dessincronizada, custo do DRE recalculado
+      retroativamente, sem idempotência) documentados em
+      `docs/financeiro/decisoes-e-riscos-notas-entrada-dre.md`. Verificação
+      contra produção real ainda pendente — ver
+      `docs/financeiro/verificacao-producao-notas-entrada-dre.md`.
 
 ## Concluído (não refazer)
 
