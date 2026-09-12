@@ -23,8 +23,28 @@
 --   em_revisao_desde        -> timestamp with time zone, nullable, sem default
 --   motivo_revisao          -> text, nullable, sem default
 --   sincronizado_legado_em  -> timestamp with time zone, nullable, sem default
+--
+-- ACHADO (revisão independente, 2026-09-12, ao integrar esta PR com #79/#80
+-- pra checagem cruzada de dependências de migration): fn_sincronizar_baixa_legado
+-- (20260101000055) também lê e escreve contas_financeiras.em_revisao_financeira
+-- (linhas "em_revisao_financeira = false" no branch de cancelamento e
+-- "v_revisao_resolvida := (v_conta.em_revisao_financeira AND v_status = 'paga')"
+-- no fluxo principal) — mas essa coluna só tinha migration própria na PR #79
+-- (20260101000063_contas_financeiras_em_revisao_financeira.sql), não aqui.
+-- Reproduzido: aplicar só as migrations desta PR (054-056) contra uma base
+-- sem o drift de produção faz `CREATE OR REPLACE FUNCTION` em 000055 passar
+-- silenciosamente (PL/pgSQL não valida coluna referenciada em SQL embutido no
+-- momento da criação da function), mas a PRIMEIRA chamada real de
+-- fn_sincronizar_baixa_legado falha em runtime com `record "v_conta" has no
+-- field "em_revisao_financeira"` — ou seja, esta PR não é auto-suficiente:
+-- depende de uma migration de outra PR pra não quebrar em qualquer ambiente
+-- novo (Supabase novo, staging, CI) que não tenha o drift de produção. Mesmo
+-- tipo/default de 20260101000063 (boolean NOT NULL DEFAULT false) — ADD
+-- COLUMN IF NOT EXISTS torna esta linha um no-op seguro caso a 000063 da PR
+-- #79 já tenha rodado antes (ou depois) desta, em qualquer ordem de merge.
 ALTER TABLE public.contas_financeiras
   ADD COLUMN IF NOT EXISTS motivo_revisao text,
   ADD COLUMN IF NOT EXISTS em_revisao_desde timestamptz,
   ADD COLUMN IF NOT EXISTS conflito_baixa_legado boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS sincronizado_legado_em timestamptz;
+  ADD COLUMN IF NOT EXISTS sincronizado_legado_em timestamptz,
+  ADD COLUMN IF NOT EXISTS em_revisao_financeira boolean NOT NULL DEFAULT false;
