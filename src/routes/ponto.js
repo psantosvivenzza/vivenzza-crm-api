@@ -26,11 +26,11 @@ import { exigirPilotoAtivo, exigirColaboradorHabilitado } from '../middleware/po
 import { EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA, MENSAGEM_EQUIPAMENTO_NAO_IMPLEMENTADO } from '../lib/ponto/equipamento.js'
 import { emitirDesafio, registrarMarcacaoAssinada, ErroEquipamento } from '../lib/ponto/equipamentoService.js'
 import { calcularHashConteudo } from '../lib/ponto/assinaturaEquipamento.js'
+import { UUID_RE, exigirUuidNoParam } from '../lib/ponto/validacao.js'
 
 const router = Router()
 
 const TIPOS_VALIDOS = ['entrada', 'saida_intervalo', 'retorno_intervalo', 'saida']
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TIPOS_SOLICITACAO_VALIDOS = ['ajuste_horario', 'ajuste_tipo', 'inclusao_marcacao_faltante', 'outro']
 // Estes três tipos, se aprovados, geram uma NOVA linha em ponto_marcacoes
 // (ver ponto_decidir_correcao, migration 051) a partir de
@@ -153,7 +153,7 @@ router.get('/marcacoes', async (req, res) => {
 
 // GET /api/ponto/marcacoes/:id/foto — URL assinada de curta duração; só o
 // próprio dono da marcação pode pedir.
-router.get('/marcacoes/:id/foto', async (req, res) => {
+router.get('/marcacoes/:id/foto', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data: marcacao, error: erroMarcacao } = await supabase
       .from('ponto_marcacoes')
@@ -572,7 +572,7 @@ router.get('/solicitacoes/por-operacao/:operacao_id', async (req, res) => {
 })
 
 // GET /api/ponto/solicitacoes/:id/foto
-router.get('/solicitacoes/:id/foto', async (req, res) => {
+router.get('/solicitacoes/:id/foto', exigirUuidNoParam('id'), async (req, res) => {
   try {
     const { data: solicitacao, error: erroSolicitacao } = await supabase
       .from('ponto_solicitacoes_marcacao')
@@ -617,6 +617,9 @@ router.post('/correcoes', async (req, res) => {
   }
   if (!justificativa?.trim()) {
     return res.status(400).json({ erro: 'justificativa é obrigatória.' })
+  }
+  if (marcacao_id !== undefined && marcacao_id !== null && !UUID_RE.test(marcacao_id)) {
+    return res.status(400).json({ erro: 'marcacao_id, se enviado, deve ser um UUID.' })
   }
   if (TIPOS_CORRECAO_QUE_GERAM_MARCACAO.includes(tipo_solicitacao)) {
     if (!TIPOS_VALIDOS.includes(valor_proposto.tipo)) {
