@@ -60,6 +60,26 @@ const limiteTentativasSensiveis = rateLimit({
   message: { erro: 'Muitas tentativas em pouco tempo. Aguarde alguns minutos.' },
 })
 
+// Proteção contra flood de solicitações de correção — mesmo desenho de
+// limiteTentativasSensiveis (chave por usuário, fallback por IP), mas em
+// contador PRÓPRIO. Correção não exige senha (ver comentário acima de
+// POST /correcoes) — compartilhar o orçamento de tentativas de senha de
+// /marcacoes e /solicitacoes penalizaria injustamente quem só está
+// corrigindo registros antigos, sem nenhuma tentativa de senha envolvida.
+// Achado desta auditoria adversarial (2026-09-12): até aqui, POST
+// /correcoes era a única mutação sensível deste router sem NENHUM limite
+// de taxa — um colaborador habilitado podia gerar volume ilimitado de
+// solicitações de correção, inundando a fila de revisão do gestor e a
+// tabela ponto_correcoes.
+const limiteCriacaoCorrecao = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || ipKeyGenerator(req.ip),
+  message: { erro: 'Muitas tentativas em pouco tempo. Aguarde alguns minutos.' },
+})
+
 // Toda rota deste router exige colaborador habilitado (flag própria, não
 // role). exigirPilotoAtivo só bloqueia a CRIAÇÃO de marcação/solicitação —
 // consulta do próprio histórico continua disponível mesmo com o piloto
@@ -606,7 +626,7 @@ router.get('/solicitacoes/:id/foto', exigirUuidNoParam('id'), async (req, res) =
 // justificativa sobre uma marcação JÁ CONFIRMADA (não é o caminho de
 // registrar agora — isso é /solicitacoes). Não exige reautenticação por
 // senha: é um pedido por escrito, não uma alegação de presença no momento.
-router.post('/correcoes', async (req, res) => {
+router.post('/correcoes', limiteCriacaoCorrecao, async (req, res) => {
   const { marcacao_id, tipo_solicitacao, valor_proposto, justificativa } = req.body || {}
 
   if (!TIPOS_SOLICITACAO_VALIDOS.includes(tipo_solicitacao)) {
