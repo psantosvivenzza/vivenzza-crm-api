@@ -5,22 +5,18 @@
 // Requisições que NÃO geram conta a pagar preservam o comportamento anterior
 // (rota não tinha nenhuma restrição de papel).
 //
-// LIMITAÇÃO DE AMBIENTE PRÉ-EXISTENTE, NÃO CRIADA NEM CORRIGIDA NESTA RODADA:
-// fn_criar_nota_entrada() e as tabelas notas_entrada / notas_entrada_itens /
-// movimentacoes_estoque NÃO existem em nenhum SQL versionado do repositório
-// (confirmado por grep exaustivo em migrations/*.sql e
-// supabase/migrations/*.sql) e também não existem no Postgres local
-// (confirmado via `SELECT to_regclass(...)` e `SELECT proname FROM pg_proc
-// WHERE proname = 'fn_criar_nota_entrada'` — todos vazios). Diferente de
-// fn_baixar_titulo/fn_estornar_baixa/fn_aprovar_estorno/fn_rejeitar_estorno
-// (achadas na árvore legada migrations/ e aplicadas neste cluster sintético
-// em financeiro-controle-acesso.test.mjs), aqui não há nenhuma implementação
-// SQL existente para aplicar — e a instrução vigente proíbe inventar RPC.
-// Por isso, os testes de admin/financeiro abaixo só confirmam que o GATE de
-// papel autoriza (não retorna 403) — não que a rota chega a criar a nota de
-// verdade. Essa lacuna já existiria de qualquer forma para QUALQUER papel,
-// antes desta mudança: a rota nunca funcionou localmente, pois a RPC sempre
-// foi inexistente neste ambiente.
+// ATUALIZAÇÃO (2026-09-12): fn_criar_nota_entrada() e as tabelas
+// notas_entrada/notas_entrada_itens/movimentacoes_estoque, que até então não
+// existiam em nenhum SQL versionado do repositório (achado original desta
+// nota, preservado no histórico do arquivo), agora estão versionadas em
+// supabase/migrations/20260101000064-000066 (verbatim, confirmadas contra
+// produção real — ver docs/financeiro/schema-real-producao-dre-notas-entrada.md)
+// e no baseline de teste em scripts/localdb/schema-baseline/007_notas_entrada_dre.sql
+// (produtos/nfe/nfe_itens/stubs). Os testes de admin/financeiro abaixo agora
+// confirmam a execução completa (201 + nota real persistida), não só o gate
+// de papel. Cobertura funcional mais ampla do fluxo (itens, estoque, custo,
+// rollback) vive em notas-entrada-fluxo.test.mjs; grants/RLS de
+// fn_criar_nota_entrada em notas-entrada-fn-criar-grants.test.mjs.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'http'
@@ -28,8 +24,9 @@ import jwt from 'jsonwebtoken'
 import { iniciarAmbienteDeTeste, pararAmbienteDeTeste } from './_setup.mjs'
 
 let supabase, server, porta
-let idAdmin, idFinanceiro, idVendedorA, idTerceiroPapel
+let idAdmin, idFinanceiro, idVendedorA, idTerceiroPapel, idProduto
 let tokenAdmin, tokenFinanceiro, tokenVendedorA, tokenTerceiroPapel, tokenSemRole
+const numerosNotaCriados = []
 
 before(async () => {
   await iniciarAmbienteDeTeste()
@@ -49,6 +46,16 @@ before(async () => {
   idVendedorA = await criarUsuarioDeTeste('vendedor', 'vendedor-a')
   idTerceiroPapel = await criarUsuarioDeTeste('gerente', 'terceiro-papel') // papel desconhecido/não suportado
 
+  // notas_entrada_itens.produto_id é FK NOT NULL real (sem ON DELETE) — as
+  // requisições de escrita real (admin/financeiro) precisam de um produto
+  // existente de verdade, diferente das requisições de negação (403), que
+  // nunca alcançam a RPC (interceptor abaixo prova isso) e por isso ainda
+  // podem usar um produto_id qualquer no corpo.
+  const { data: produto, error: erroProduto } = await supabase.from('produtos')
+    .insert({ nome: `Produto teste nea ${sufixo}` }).select('id').single()
+  if (erroProduto) throw erroProduto
+  idProduto = produto.id
+
   tokenAdmin = jwt.sign({ id: idAdmin, email: 'admin@teste.com', role: 'admin' }, process.env.JWT_SECRET)
   tokenFinanceiro = jwt.sign({ id: idFinanceiro, email: 'financeiro@teste.com', role: 'financeiro' }, process.env.JWT_SECRET)
   tokenVendedorA = jwt.sign({ id: idVendedorA, email: 'a@teste.com', role: 'vendedor' }, process.env.JWT_SECRET)
@@ -66,6 +73,16 @@ before(async () => {
 })
 after(async () => {
   server?.close()
+  if (numerosNotaCriados.length) {
+    await supabase.from('movimentacoes_estoque').delete().in('documento_ref', numerosNotaCriados)
+    const { data: notas } = await supabase.from('notas_entrada').select('id, conta_financeira_id').in('numero_nota', numerosNotaCriados)
+    const idsNota = (notas || []).map((n) => n.id)
+    const idsConta = (notas || []).map((n) => n.conta_financeira_id).filter(Boolean)
+    if (idsNota.length) await supabase.from('notas_entrada_itens').delete().in('nota_entrada_id', idsNota)
+    await supabase.from('notas_entrada').delete().in('numero_nota', numerosNotaCriados)
+    if (idsConta.length) await supabase.from('contas_financeiras').delete().in('id', idsConta)
+  }
+  await supabase.from('produtos').delete().eq('id', idProduto)
   await supabase.from('usuarios').delete().in('id', [idAdmin, idFinanceiro, idVendedorA, idTerceiroPapel])
   await pararAmbienteDeTeste()
 })
@@ -187,68 +204,82 @@ test('POST /api/notas-entrada — gera conta a pagar exige admin/financeiro ante
     assert.equal(depois, antes, 'nenhuma conta_financeira nova após bloqueio')
   })
 
-  await tSuite.test('admin: gate de papel autoriza (não é mais 403) — execução completa tem limitação de ambiente pré-existente (ver comentário do topo do arquivo)', async () => {
+  await tSuite.test('admin: gate de papel autoriza e a nota é criada de verdade (201, conta a pagar gerada)', async () => {
+    const numeroNota = `NEA-ADMIN-${Date.now()}`
     const r = await chamar('POST', '/api/notas-entrada', {
       token: tokenAdmin,
       body: {
-        numero_nota: `NEA-ADMIN-${Date.now()}`, fornecedor_nome: 'Fornecedor Teste NEA',
+        numero_nota: numeroNota, fornecedor_nome: 'Fornecedor Teste NEA',
         data_emissao: new Date().toISOString().slice(0, 10), valor_total: 500,
         gerar_conta_pagar: true, vencimento: new Date().toISOString().slice(0, 10),
-        itens: [{ produto_id: '00000000-0000-0000-0000-000000000000', quantidade: 1, valor_unitario: 500 }],
+        itens: [{ produto_id: idProduto, quantidade: 1, valor_unitario: 500 }],
       },
     })
-    assert.notEqual(r.status, 403, 'gate de papel precisa deixar admin passar — resultado real (500, função inexistente) é limitação de ambiente pré-existente, não de autorização')
+    numerosNotaCriados.push(numeroNota)
+    assert.equal(r.status, 201, JSON.stringify(r.body))
+    assert.ok(r.body.conta_financeira_id, 'gerar_conta_pagar=true precisa gerar conta_financeira_id')
   })
 
-  await tSuite.test('financeiro: gate de papel autoriza (não é mais 403) — mesma limitação de ambiente do teste acima', async () => {
+  await tSuite.test('financeiro: gate de papel autoriza e a nota é criada de verdade (201, conta a pagar gerada)', async () => {
+    const numeroNota = `NEA-FIN-${Date.now()}`
     const r = await chamar('POST', '/api/notas-entrada', {
       token: tokenFinanceiro,
       body: {
-        numero_nota: `NEA-FIN-${Date.now()}`, fornecedor_nome: 'Fornecedor Teste NEA',
+        numero_nota: numeroNota, fornecedor_nome: 'Fornecedor Teste NEA',
         data_emissao: new Date().toISOString().slice(0, 10), valor_total: 500,
         gerar_conta_pagar: true, vencimento: new Date().toISOString().slice(0, 10),
-        itens: [{ produto_id: '00000000-0000-0000-0000-000000000000', quantidade: 1, valor_unitario: 500 }],
+        itens: [{ produto_id: idProduto, quantidade: 1, valor_unitario: 500 }],
       },
     })
-    assert.notEqual(r.status, 403, 'gate de papel precisa deixar financeiro passar — resultado real (500) é limitação de ambiente pré-existente, não de autorização')
+    numerosNotaCriados.push(numeroNota)
+    assert.equal(r.status, 201, JSON.stringify(r.body))
+    assert.ok(r.body.conta_financeira_id, 'gerar_conta_pagar=true precisa gerar conta_financeira_id')
   })
 })
 
 test('POST /api/notas-entrada — sem geração de conta a pagar preserva o comportamento anterior (sem restrição de papel)', async (tSuite) => {
-  await tSuite.test('vendedor NÃO é bloqueado pelo novo gate quando gerar_conta_pagar é false', async () => {
+  await tSuite.test('vendedor NÃO é bloqueado pelo novo gate quando gerar_conta_pagar é false — nota criada normalmente (201)', async () => {
+    const numeroNota = `NEA-SEMFIN-${Date.now()}`
     const r = await chamar('POST', '/api/notas-entrada', {
       token: tokenVendedorA,
       body: {
-        numero_nota: `NEA-SEMFIN-${Date.now()}`, fornecedor_nome: 'Fornecedor Teste NEA',
+        numero_nota: numeroNota, fornecedor_nome: 'Fornecedor Teste NEA',
         data_emissao: new Date().toISOString().slice(0, 10), valor_total: 500,
         gerar_conta_pagar: false,
-        itens: [{ produto_id: '00000000-0000-0000-0000-000000000000', quantidade: 1, valor_unitario: 500 }],
+        itens: [{ produto_id: idProduto, quantidade: 1, valor_unitario: 500 }],
       },
     })
-    assert.notEqual(r.status, 403, 'sem geração de conta a pagar, o novo gate não pode bloquear — mesmo comportamento de antes desta mudança (rota nunca teve restrição de papel)')
+    numerosNotaCriados.push(numeroNota)
+    assert.equal(r.status, 201, 'sem geração de conta a pagar, o novo gate não pode bloquear — mesmo comportamento de antes desta mudança (rota nunca teve restrição de papel)')
   })
 
-  await tSuite.test('vendedor NÃO é bloqueado pelo novo gate quando gerar_conta_pagar está ausente do corpo', async () => {
+  await tSuite.test('vendedor NÃO é bloqueado pelo novo gate quando gerar_conta_pagar está ausente do corpo — nota criada normalmente (201)', async () => {
+    const numeroNota = `NEA-AUSENTE-${Date.now()}`
     const r = await chamar('POST', '/api/notas-entrada', {
       token: tokenVendedorA,
       body: {
-        numero_nota: `NEA-AUSENTE-${Date.now()}`, fornecedor_nome: 'Fornecedor Teste NEA',
+        numero_nota: numeroNota, fornecedor_nome: 'Fornecedor Teste NEA',
         data_emissao: new Date().toISOString().slice(0, 10), valor_total: 500,
-        itens: [{ produto_id: '00000000-0000-0000-0000-000000000000', quantidade: 1, valor_unitario: 500 }],
+        itens: [{ produto_id: idProduto, quantidade: 1, valor_unitario: 500 }],
       },
     })
-    assert.notEqual(r.status, 403, 'gerar_conta_pagar ausente equivale a false via !! — não pode ser bloqueado')
+    numerosNotaCriados.push(numeroNota)
+    assert.equal(r.status, 201, 'gerar_conta_pagar ausente equivale a false via !! — não pode ser bloqueado')
   })
 
-  await tSuite.test('papel desconhecido e token sem role também não são bloqueados pelo novo gate quando não há geração financeira', async () => {
+  await tSuite.test('papel desconhecido e token sem role também não são bloqueados pelo novo gate quando não há geração financeira — notas criadas normalmente (201)', async () => {
     const corpo = (marca) => ({
       numero_nota: `NEA-${marca}-${Date.now()}`, fornecedor_nome: 'Fornecedor Teste NEA',
       data_emissao: new Date().toISOString().slice(0, 10), valor_total: 500,
-      itens: [{ produto_id: '00000000-0000-0000-0000-000000000000', quantidade: 1, valor_unitario: 500 }],
+      itens: [{ produto_id: idProduto, quantidade: 1, valor_unitario: 500 }],
     })
-    const r1 = await chamar('POST', '/api/notas-entrada', { token: tokenTerceiroPapel, body: corpo('GERENTE') })
-    assert.notEqual(r1.status, 403)
-    const r2 = await chamar('POST', '/api/notas-entrada', { token: tokenSemRole, body: corpo('SEMROLE') })
-    assert.notEqual(r2.status, 403)
+    const corpo1 = corpo('GERENTE')
+    const r1 = await chamar('POST', '/api/notas-entrada', { token: tokenTerceiroPapel, body: corpo1 })
+    numerosNotaCriados.push(corpo1.numero_nota)
+    assert.equal(r1.status, 201)
+    const corpo2 = corpo('SEMROLE')
+    const r2 = await chamar('POST', '/api/notas-entrada', { token: tokenSemRole, body: corpo2 })
+    numerosNotaCriados.push(corpo2.numero_nota)
+    assert.equal(r2.status, 201)
   })
 })
