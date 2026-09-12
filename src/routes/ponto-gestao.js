@@ -122,7 +122,18 @@ router.get('/marcacoes/:id/foto', async (req, res) => {
   }
 })
 
-// GET /api/ponto-gestao/correcoes?status=&colaborador_id=
+// GET /api/ponto-gestao/correcoes?status=&colaborador_id=&pagina=&limite=
+//
+// Achado da auditoria adversarial de 2026-09-12 (fotos/histórico/exportação/
+// gestão/admin): esta rota nunca teve NENHUM limite de itens — diferente de
+// GET /marcacoes (pagina/limite, teto de 500), um gestor com escopo amplo ou
+// um admin recebia a tabela ponto_correcoes INTEIRA (dentro do escopo) numa
+// única resposta HTTP, sem paginação nenhuma disponível para conter o
+// volume. limite default (500) é generoso o bastante para não mudar o
+// comportamento observável em qualquer fila de aprovações real — só
+// estabelece um teto para o caso de volume patológico (escopo/tabela muito
+// grandes), com `total` devolvido para o cliente detectar truncamento e
+// paginar se precisar. Mesmo teto de GET /marcacoes (500), nunca mais.
 router.get('/correcoes', async (req, res) => {
   try {
     const { colaborador_id, status } = req.query
@@ -130,23 +141,28 @@ router.get('/correcoes', async (req, res) => {
       return res.status(403).json({ erro: 'Colaborador fora do seu escopo de gestão.' })
     }
 
+    const pagina = Math.max(1, Number(req.query.pagina) || 1)
+    const limite = Math.min(500, Math.max(1, Number(req.query.limite) || 500))
+    const de = (pagina - 1) * limite
+
     let consulta = supabase
       .from('ponto_correcoes')
-      .select('id, marcacao_id, usuario_id, tipo_solicitacao, valor_original, valor_proposto, justificativa, status, solicitado_em, decidido_por, decidido_em, decisao_justificativa')
+      .select('id, marcacao_id, usuario_id, tipo_solicitacao, valor_original, valor_proposto, justificativa, status, solicitado_em, decidido_por, decidido_em, decisao_justificativa', { count: 'exact' })
       .order('solicitado_em', { ascending: false })
+      .range(de, de + limite - 1)
 
     if (colaborador_id) {
       consulta = consulta.eq('usuario_id', colaborador_id)
     } else if (req.pontoEscopoGestor !== null) {
-      if (req.pontoEscopoGestor.length === 0) return res.json({ itens: [] })
+      if (req.pontoEscopoGestor.length === 0) return res.json({ itens: [], total: 0, pagina, limite })
       consulta = consulta.in('usuario_id', req.pontoEscopoGestor)
     }
     if (status) consulta = consulta.eq('status', status)
 
-    const { data, error } = await consulta
+    const { data, error, count } = await consulta
     if (error) throw error
 
-    res.json({ itens: data || [] })
+    res.json({ itens: data || [], total: count || 0, pagina, limite })
   } catch (err) {
     logarErroPonto('gestao_listar_correcoes', err?.code)
     res.status(500).json({ erro: 'Não foi possível carregar as solicitações de correção.' })
@@ -247,11 +263,13 @@ router.post('/correcoes/:id/decisao', async (req, res) => {
   }
 })
 
-// GET /api/ponto-gestao/solicitacoes?status=&colaborador_id= — solicitações
-// de marcação (caminho real enquanto EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA
-// for false — ver src/lib/ponto/equipamento.js). Distintas de /correcoes:
-// aqui é "alguém tentando registrar presença agora", não "peço ajuste de
-// algo já confirmado".
+// GET /api/ponto-gestao/solicitacoes?status=&colaborador_id=&pagina=&limite=
+// — solicitações de marcação (caminho real enquanto
+// EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA for false — ver
+// src/lib/ponto/equipamento.js). Distintas de /correcoes: aqui é "alguém
+// tentando registrar presença agora", não "peço ajuste de algo já
+// confirmado". Mesmo teto de itens de GET /correcoes acima (achado da
+// auditoria de 2026-09-12) — esta rota também não tinha nenhum limite.
 router.get('/solicitacoes', async (req, res) => {
   try {
     const { colaborador_id, status } = req.query
@@ -259,23 +277,28 @@ router.get('/solicitacoes', async (req, res) => {
       return res.status(403).json({ erro: 'Colaborador fora do seu escopo de gestão.' })
     }
 
+    const pagina = Math.max(1, Number(req.query.pagina) || 1)
+    const limite = Math.min(500, Math.max(1, Number(req.query.limite) || 500))
+    const de = (pagina - 1) * limite
+
     let consulta = supabase
       .from('ponto_solicitacoes_marcacao')
-      .select('id, usuario_id, tipo, motivo, justificativa, foto_id, status, criado_em, horario_declarado, decidido_por, decidido_em, decisao_justificativa, marcacao_gerada_id')
+      .select('id, usuario_id, tipo, motivo, justificativa, foto_id, status, criado_em, horario_declarado, decidido_por, decidido_em, decisao_justificativa, marcacao_gerada_id', { count: 'exact' })
       .order('criado_em', { ascending: false })
+      .range(de, de + limite - 1)
 
     if (colaborador_id) {
       consulta = consulta.eq('usuario_id', colaborador_id)
     } else if (req.pontoEscopoGestor !== null) {
-      if (req.pontoEscopoGestor.length === 0) return res.json({ itens: [] })
+      if (req.pontoEscopoGestor.length === 0) return res.json({ itens: [], total: 0, pagina, limite })
       consulta = consulta.in('usuario_id', req.pontoEscopoGestor)
     }
     if (status) consulta = consulta.eq('status', status)
 
-    const { data, error } = await consulta
+    const { data, error, count } = await consulta
     if (error) throw error
 
-    res.json({ itens: data || [] })
+    res.json({ itens: data || [], total: count || 0, pagina, limite })
   } catch (err) {
     logarErroPonto('gestao_listar_solicitacoes', err?.code)
     res.status(500).json({ erro: 'Não foi possível carregar as solicitações de marcação.' })
