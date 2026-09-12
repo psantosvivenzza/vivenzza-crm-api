@@ -60,6 +60,21 @@ ORDER BY p.proname, r.rolname;
 SELECT count(*) FROM public.estornos_financeiros;
 ```
 
+## 5. Coluna contas_financeiras.em_revisao_financeira (comparar com 20260101000063)
+
+`fn_estornar_baixa`/`fn_aprovar_estorno` (000059/000060) leem e escrevem
+esta coluna. Já é usada por várias features reais (paymentGuard,
+nextBestAction, cobranca-whatsapp, sync-financeiro-legado) — deve já
+existir em produção; esta consulta só confirma tipo/nullable/default reais
+antes de aplicar 20260101000063 lá.
+
+```sql
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'contas_financeiras'
+  AND column_name = 'em_revisao_financeira';
+```
+
 ## O que fazer com o resultado
 
 - Se os 4 corpos (#1) e o schema da tabela (#2) baterem com
@@ -73,3 +88,6 @@ SELECT count(*) FROM public.estornos_financeiros;
 - Se `#3` mostrar `anon`/`authenticated` com `tem_execute = true` hoje: confirma
   o achado de segurança descrito em `20260101000062` — aplicar essa migration
   em produção passa a ser prioritário, não só um endurecimento preventivo.
+- Se `#5` não retornar nenhuma linha (coluna não existe): **não aplicar**
+  `fn_estornar_baixa`/`fn_aprovar_estorno` (000059/000060) em produção antes
+  de aplicar `20260101000063` — as duas quebram sem essa coluna.

@@ -1,0 +1,30 @@
+-- GAP DE VERSIONAMENTO — mesmo padrão de 20260101000054 (PR #77): ao
+-- versionar fn_estornar_baixa/fn_aprovar_estorno (20260101000059/000060,
+-- nesta mesma PR), as duas leem e escrevem
+-- contas_financeiras.em_revisao_financeira (pausa a régua de cobrança
+-- automática quando um estorno por "pagamento_nao_confirmado" ou
+-- "devolucao_chargeback" é aprovado), mas nenhuma migration commitada cria
+-- essa coluna — só existia em migrations/contas_financeiras_em_revisao_financeira.sql
+-- (pasta solta, fora do pipeline real) e, por consequência, live em
+-- produção (a coluna já é lida/escrita hoje por várias features reais:
+-- src/lib/collection/paymentGuard.js, src/lib/collection/nextBestAction.js,
+-- src/jobs/cobranca-whatsapp.js, src/jobs/sync-financeiro-legado.js, entre
+-- outras — não seria possível se a coluna não existisse já em produção).
+--
+-- ADD COLUMN IF NOT EXISTS é no-op contra produção (coluna já existe lá);
+-- só passa a existir de fato em ambientes novos criados só a partir de
+-- supabase/migrations/ (sem o baseline local, que já cobria isto só pra
+-- scripts/localdb-reset.mjs — ver scripts/localdb/schema-baseline/002_financeiro.sql).
+-- Sem esta migration, fn_estornar_baixa/fn_aprovar_estorno quebrariam com
+-- "column em_revisao_financeira does not exist" em qualquer Postgres/Supabase
+-- provisionado limpo só a partir das migrations reais.
+--
+-- Corpo idêntico ao de migrations/contas_financeiras_em_revisao_financeira.sql
+-- (já era idempotente por natureza — IF NOT EXISTS já estava lá).
+--
+-- Verificação pendente (não executada aqui — sem acesso a produção real): ver
+-- docs/claude-context/verificacao-producao-estornos-baixar-titulo.md
+-- (consulta #5, adicionada junto desta migration) pra confirmar tipo/default
+-- reais da coluna em produção antes de aplicar esta migration lá.
+ALTER TABLE public.contas_financeiras
+  ADD COLUMN IF NOT EXISTS em_revisao_financeira boolean NOT NULL DEFAULT false;

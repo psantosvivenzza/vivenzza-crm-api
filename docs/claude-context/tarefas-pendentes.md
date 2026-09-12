@@ -59,8 +59,13 @@
       `migrations/*.sql`, verbatim, só com guards de idempotência) +
       hardening de GRANT (achado análogo ao da PR #77: EXECUTE exposto a
       PUBLIC/anon/authenticated por padrão do Supabase/PostgREST) + novo
-      `estornos-financeiros-grants.test.mjs`. Verificação contra produção
-      real ainda pendente — ver
+      `estornos-financeiros-grants.test.mjs`. Revisão independente (2026-09-12)
+      achou gap correlato — mesmo padrão da PR #77/20260101000054:
+      `fn_estornar_baixa`/`fn_aprovar_estorno` leem/escrevem
+      `contas_financeiras.em_revisao_financeira`, coluna sem migration
+      commitada até então (só existia via baseline local de teste + live em
+      produção); fechado em `20260101000063`. Verificação contra produção
+      real ainda pendente para todo o conjunto (000057-000063) — ver
       `docs/claude-context/verificacao-producao-estornos-baixar-titulo.md`.
 
 ## Concluído (não refazer)
