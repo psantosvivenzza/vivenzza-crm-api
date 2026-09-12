@@ -602,13 +602,46 @@ router.get('/solicitacoes/:id/foto', async (req, res) => {
   }
 })
 
+// Comparação estrutural de valor_proposto (JSON arbitrário) ignorando
+// ordem de chaves — necessário porque o valor devolvido pelo Postgres
+// (jsonb) não preserva a ordem de inserção, então uma comparação por
+// string direta entre o corpo recebido e o valor já persistido daria falso
+// negativo (content mismatch) mesmo quando o conteúdo é idêntico.
+function jsonCanonico(valor) {
+  if (Array.isArray(valor)) return valor.map(jsonCanonico)
+  if (valor && typeof valor === 'object') {
+    return Object.keys(valor).sort().reduce((acc, chave) => {
+      acc[chave] = jsonCanonico(valor[chave])
+      return acc
+    }, {})
+  }
+  return valor
+}
+function mesmoValorProposto(a, b) {
+  return JSON.stringify(jsonCanonico(a ?? null)) === JSON.stringify(jsonCanonico(b ?? null))
+}
+
 // POST /api/ponto/correcoes — colaborador solicita correção com
 // justificativa sobre uma marcação JÁ CONFIRMADA (não é o caminho de
 // registrar agora — isso é /solicitacoes). Não exige reautenticação por
 // senha: é um pedido por escrito, não uma alegação de presença no momento.
+//
+// Idempotência real por operacao_id (achado da auditoria adversarial de
+// 2026-09-12 — ver docs/meu-ponto/AUDITORIA_CORRECOES_DUPLICACAO_2026-09-12.md):
+// até esta correção, esta rota não tinha NENHUMA defesa contra reenvio —
+// nem operacao_id, nem UNIQUE no banco — diferente de /marcacoes e
+// /solicitacoes, que já seguem a seção 2.3 da especificação. Retry de
+// rede, timeout ambíguo, duplo clique ou reenvio concorrente sempre
+// geravam uma nova linha em ponto_correcoes. Mesmo padrão das duas rotas
+// irmãs agora, incluindo o filtro por usuario_id na consulta de
+// idempotência desde o início (classe de vazamento entre usuários já
+// corrigida nas PRs #81/#82 para /marcacoes e /solicitacoes).
 router.post('/correcoes', async (req, res) => {
-  const { marcacao_id, tipo_solicitacao, valor_proposto, justificativa } = req.body || {}
+  const { operacao_id, marcacao_id, tipo_solicitacao, valor_proposto, justificativa } = req.body || {}
 
+  if (!operacao_id || !UUID_RE.test(operacao_id)) {
+    return res.status(400).json({ erro: 'operacao_id é obrigatório e deve ser um UUID.' })
+  }
   if (!TIPOS_SOLICITACAO_VALIDOS.includes(tipo_solicitacao)) {
     return res.status(400).json({ erro: `tipo_solicitacao deve ser um de: ${TIPOS_SOLICITACAO_VALIDOS.join(', ')}` })
   }
@@ -633,6 +666,24 @@ router.post('/correcoes', async (req, res) => {
   }
 
   try {
+    const { data: existente, error: erroExistente } = await supabase
+      .from('ponto_correcoes')
+      .select('id, marcacao_id, tipo_solicitacao, valor_proposto, justificativa, status, solicitado_em')
+      .eq('operacao_id', operacao_id)
+      .eq('usuario_id', req.user.id)
+      .maybeSingle()
+    if (erroExistente) throw erroExistente
+    if (existente) {
+      const mesmoConteudo = (existente.marcacao_id || null) === (marcacao_id || null)
+        && existente.tipo_solicitacao === tipo_solicitacao
+        && existente.justificativa === justificativa.trim()
+        && mesmoValorProposto(existente.valor_proposto, valor_proposto)
+      if (!mesmoConteudo) {
+        return res.status(409).json({ erro: mensagemAmigavelRegistro('operacao_id_conteudo_diferente') })
+      }
+      return res.status(200).json({ id: existente.id, status: existente.status, solicitado_em: existente.solicitado_em, idempotente: true })
+    }
+
     let valorOriginal = null
     if (marcacao_id) {
       const { data: marcacao, error: erroMarcacao } = await supabase
@@ -650,6 +701,7 @@ router.post('/correcoes', async (req, res) => {
     const { data, error } = await supabase
       .from('ponto_correcoes')
       .insert({
+        operacao_id,
         marcacao_id: marcacao_id || null,
         usuario_id: req.user.id,
         tipo_solicitacao,
@@ -661,9 +713,27 @@ router.post('/correcoes', async (req, res) => {
       })
       .select('id, status, solicitado_em')
       .single()
-    if (error) throw error
+    if (error) {
+      // Corrida real: outra requisição com o mesmo operacao_id (mesmo
+      // usuário — retry/duplo clique/concorrência) venceu entre o SELECT
+      // de idempotência acima e este INSERT. UNIQUE real do Postgres
+      // (migration 048) garante que só uma vence; devolve a vencedora em
+      // vez de um 500 espúrio para o caso legítimo mais comum.
+      if (error.code === '23505') {
+        const { data: vencedora, error: erroVencedora } = await supabase
+          .from('ponto_correcoes')
+          .select('id, status, solicitado_em')
+          .eq('operacao_id', operacao_id)
+          .eq('usuario_id', req.user.id)
+          .maybeSingle()
+        if (!erroVencedora && vencedora) {
+          return res.status(200).json({ ...vencedora, idempotente: true })
+        }
+      }
+      throw error
+    }
 
-    res.status(201).json(data)
+    res.status(201).json({ ...data, idempotente: false })
   } catch (err) {
     logarErroPonto('criar_correcao', err?.code)
     res.status(500).json({ erro: 'Não foi possível registrar a solicitação de correção.' })
