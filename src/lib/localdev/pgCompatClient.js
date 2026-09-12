@@ -216,6 +216,22 @@ class QueryBuilder {
   // .not(col, 'is', null) e .not(col, 'in', '(a,b,c)') — mesmo espírito
   // "adaptador estreito, não PostgREST genérico" do resto deste arquivo.
   not(col, operator, val) { this._filters.push({ col: assertIdent(col, 'coluna'), op: `not.${operator}`, val }); return this }
+  // CORREÇÃO 2026-09-10 (achado do módulo "Meu Ponto") — mesmo problema do
+  // .not() acima: .is(col, null) é o jeito idiomático do supabase-js real
+  // de filtrar IS NULL (ex.: "linhas ainda não revogadas"), usado em
+  // src/middleware/pontoAuth.js, mas não existia suporte nenhum aqui —
+  // qualquer teste local que passasse por esse caminho quebrava com
+  // "TypeError: ...is is not a function". Só cobre .is(col, null)/.is(col,
+  // true)/.is(col, false), que é o que supabase-js realmente aceita nesse
+  // método (nunca uma coluna arbitrária) — mesmo adaptador estreito do
+  // resto deste arquivo, não um PostgREST genérico.
+  is(col, val) {
+    if (val !== null && val !== true && val !== false) {
+      throw new Error(`compat client local: .is('${col}', ...) só suporta null/true/false, recebeu ${JSON.stringify(val)}`)
+    }
+    this._filters.push({ col: assertIdent(col, 'coluna'), op: 'is', val })
+    return this
+  }
 
   order(col, { ascending = true } = {}) { this._order.push(`${assertIdent(col, 'coluna')} ${ascending ? 'ASC' : 'DESC'}`); return this }
   range(from, to) { this._range = [from, to]; return this }
@@ -239,6 +255,9 @@ class QueryBuilder {
       } else if (f.op === 'not.is' && f.val === null) {
         // Sem parâmetro — "IS NOT NULL" nunca é bind param no Postgres.
         clauses.push(`${f.col} IS NOT NULL`)
+      } else if (f.op === 'is') {
+        // Sem parâmetro — IS [NOT] NULL/TRUE/FALSE nunca é bind param.
+        clauses.push(f.val === null ? `${f.col} IS NULL` : `${f.col} IS ${f.val ? 'TRUE' : 'FALSE'}`)
       } else if (f.op === 'not.in') {
         // supabase-js aceita a lista já formatada estilo PostgREST: '(a,b,c)'.
         const itens = String(f.val).replace(/^\(|\)$/g, '').split(',').map((v) => v.trim()).filter(Boolean)

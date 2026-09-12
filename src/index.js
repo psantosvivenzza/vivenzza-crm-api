@@ -83,6 +83,16 @@ import aiSuggestionsRouter from './routes/ai-suggestions.js'
 // de usuário comum. Ver src/lib/collection/ai/jobQueue.js.
 import aiWorkerRouter from './routes/ai-worker.js'
 import { aiWorkerAuth } from './middleware/aiWorkerAuth.js'
+// Piloto "Meu Ponto" (2026-09-10) — controle de ponto interno para
+// funcionários presenciais, DESATIVADO por padrão via ponto_config.piloto_ativo
+// (ver src/middleware/pontoAuth.js e docs/meu-ponto/ESPECIFICACAO_MEU_PONTO.md).
+// Não é REP-P, não é reconhecimento facial. Gestor de ponto é escopo próprio
+// (ponto_gestores) — nunca reaproveita adminOuFinanceiro.
+import pontoRouter from './routes/ponto.js'
+import pontoGestaoRouter from './routes/ponto-gestao.js'
+import pontoAdminRouter from './routes/ponto-admin.js'
+import pontoEquipamentoRouter from './routes/ponto-equipamento.js'
+import { exigirGestorOuAdmin, exigirUsuarioAtivo } from './middleware/pontoAuth.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -217,6 +227,25 @@ app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 // sender legado (executarReguaCobranca) continua sendo o único caminho real.
 app.use('/api/collection-whatsapp', auth, adminOuFinanceiro, collectionWhatsappMonitorRouter)
 app.use('/api/collection-contact-review', auth, adminOuFinanceiro, collectionContactReviewRouter)
+
+// Piloto "Meu Ponto" (2026-09-10, desativado por padrão — ver
+// ponto_config.piloto_ativo). /api/ponto exige apenas login + habilitação
+// própria (checada dentro do router); gestão/admin têm middleware de escopo
+// dedicado, nunca adminOuFinanceiro.
+// exigirUsuarioAtivo (usuarios.ativo, reconsultado a cada requisição) é
+// aplicado nos três mounts — cobre histórico, fotos, correções,
+// solicitações, gestão e administração de uma vez só (achado da revisão de
+// 2026-09-11: checar isso só nas rotas de decisão era insuficiente).
+app.use('/api/ponto', auth, exigirUsuarioAtivo, pontoRouter)
+app.use('/api/ponto-gestao', auth, exigirUsuarioAtivo, exigirGestorOuAdmin, pontoGestaoRouter)
+app.use('/api/ponto-admin', auth, exigirUsuarioAtivo, adminOnly, pontoAdminRouter)
+// SEM auth de propósito: o serviço local de equipamento nunca deve
+// carregar/usar o JWT do colaborador (ver
+// docs/meu-ponto/PROTOCOLO_COMPONENTE_WINDOWS.md). A única credencial deste
+// router é o código de vínculo de uso único, validado dentro da rota. Fica
+// atrás do mesmo gate estrutural EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA que
+// POST /api/ponto/marcacoes (ver src/routes/ponto-equipamento.js).
+app.use('/api/ponto-equipamento', pontoEquipamentoRouter)
 
 // Health check
 app.get('/health', (req, res) => {
