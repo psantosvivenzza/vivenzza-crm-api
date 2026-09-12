@@ -56,7 +56,7 @@ router.get('/me', auth, async (req, res) => {
 })
 
 // PATCH /api/auth/senha — troca senha do usuário logado
-router.patch('/senha', async (req, res) => {
+router.patch('/senha', auth, async (req, res) => {
   try {
     const { senha_atual, nova_senha } = req.body
     if (!senha_atual || !nova_senha) {
