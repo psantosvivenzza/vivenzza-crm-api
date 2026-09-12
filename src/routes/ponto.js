@@ -458,10 +458,26 @@ router.post('/solicitacoes', exigirPilotoAtivo, limiteTentativasSensiveis, async
   }
 
   try {
+    // Achado relacionado à auditoria adversarial de 2026-09-12 (documentado
+    // na PR #81 para POST /marcacoes, mesmo padrão aqui): esta consulta de
+    // idempotência filtrava só por operacao_id, sem exigir
+    // usuario_id = req.user.id. Como o retorno antecipado abaixo acontece
+    // ANTES da verificação de senha, um atacante autenticado que
+    // descobrisse o operacao_id de outro colaborador (log, captura de
+    // tela, URL) conseguia, sem senha correta: (1) ler id/status da
+    // solicitação alheia quando tipo+justificativa coincidissem
+    // exatamente, tratada como se fosse a própria solicitação do
+    // atacante; ou (2) confirmar via 409 que aquele operacao_id já existe
+    // para outra pessoa, mesmo com conteúdo divergente. O filtro por
+    // usuario_id abaixo garante que a idempotência só nunca enxerga
+    // registros de outro usuário — nesse caso cai no fluxo normal de
+    // validação (senha), que rejeita corretamente. Ver
+    // scripts/tests/ponto/auditoria-solicitacoes-idor-http.test.mjs.
     const { data: existente, error: erroExistente } = await supabase
       .from('ponto_solicitacoes_marcacao')
       .select('id, tipo, justificativa, status, criado_em')
       .eq('operacao_id', operacao_id)
+      .eq('usuario_id', req.user.id)
       .maybeSingle()
     if (erroExistente) throw erroExistente
     if (existente) {
