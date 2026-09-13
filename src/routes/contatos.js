@@ -15,6 +15,20 @@ router.get('/', async (req, res) => {
       .order('nome', { ascending: true })
       .range(offset, offset + Number(limit) - 1)
 
+    // Contato pertence a um lead (lead_id), e lead é escopado por vendedor em
+    // leads.js/tarefas.js — vendedor só vê contatos dos próprios leads. Mesma
+    // técnica de leadIdsBusca em tarefas.js (resolve pra uma lista de ids antes
+    // de filtrar, evita depender de filtro em recurso aninhado no PostgREST).
+    if (req.user.role === 'vendedor') {
+      const { data: leadsDoVendedor, error: erroLeads } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('responsavel_id', req.user.id)
+      if (erroLeads) throw erroLeads
+      const leadIds = leadsDoVendedor.map((l) => l.id)
+      query = query.in('lead_id', leadIds.length ? leadIds : ['__nenhum__'])
+    }
+
     if (lead_id) query = query.eq('lead_id', lead_id)
     if (busca) query = query.or(`nome.ilike.%${busca}%,email.ilike.%${busca}%,telefone.ilike.%${busca}%`)
 
@@ -39,6 +53,13 @@ router.get('/:id', async (req, res) => {
 
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Contato não encontrado' })
+
+    if (req.user.role === 'vendedor') {
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', data.lead_id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para acessar este contato' })
+      }
+    }
 
     res.json(data)
   } catch (err) {
@@ -70,6 +91,15 @@ router.post('/', async (req, res) => {
 // PUT /api/contatos/:id
 router.put('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: contato } = await supabase.from('contatos').select('lead_id').eq('id', req.params.id).single()
+      if (!contato) return res.status(404).json({ erro: 'Contato não encontrado' })
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', contato.lead_id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar este contato' })
+      }
+    }
+
     const campos = req.body
     delete campos.id
     delete campos.created_at
@@ -93,6 +123,15 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/contatos/:id
 router.delete('/:id', async (req, res) => {
   try {
+    if (req.user.role === 'vendedor') {
+      const { data: contato } = await supabase.from('contatos').select('lead_id').eq('id', req.params.id).single()
+      if (!contato) return res.status(404).json({ erro: 'Contato não encontrado' })
+      const { data: lead } = await supabase.from('leads').select('responsavel_id').eq('id', contato.lead_id).single()
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para remover este contato' })
+      }
+    }
+
     const { error } = await supabase
       .from('contatos')
       .delete()
