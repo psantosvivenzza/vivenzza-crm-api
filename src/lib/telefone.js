@@ -70,9 +70,16 @@ export function telefonesEquivalentes(a, b) {
 
 // Mascara um telefone pra log/relatório — nunca imprimir número completo
 // desnecessariamente (achado da revisão C.3A). Mostra só os últimos 4
-// dígitos, ex: "*********0001".
+// dígitos, ex: "*********0001". `<= 4` (não `< 4`) é proposital: achado da
+// revisão adversarial da PR #96 (2026-09-13) — com exatamente 4 dígitos,
+// `digitos.length - 4` dava 0 asteriscos e a função devolvia o número
+// inteiro sem nenhuma máscara, quebrando a garantia que webhook-handler.js
+// depende dela pra cumprir (nenhum telefone completo em log). Um telefone
+// real (nacional ou internacional) nunca tem só 4 dígitos, então isso não
+// muda o comportamento pra nenhum caso legítimo — só fecha o caso
+// degenerado/adversarial (ex: payload malformado de um webhook público).
 export function mascararTelefone(telefone) {
   const digitos = normalizarTelefone(telefone)
-  if (!digitos || digitos.length < 4) return '****'
+  if (!digitos || digitos.length <= 4) return '****'
   return `${'*'.repeat(digitos.length - 4)}${digitos.slice(-4)}`
 }
