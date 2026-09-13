@@ -233,6 +233,28 @@ async function enviarMensagemReativacao(lead) {
   }
 }
 
+// Trava de reentrância — impede duas execuções de verificarElegiveis() em paralelo
+// (duplo clique em "Executar agora", retry de rede do frontend, ou disparo manual
+// coincidindo com o cron diário das 09h). MAX_ENVIOS_POR_DIA e o circuito de
+// entrega (ver comentário do incidente de 2026-08-04 acima) são contados
+// por-execução, não globalmente — duas execuções simultâneas dobrariam o volume
+// real de mensagens no dia e poderiam mandar a mesma mensagem duas vezes pro
+// mesmo lead, o mesmo tipo de rajada que já derrubou a taxa de entrega do
+// número comercial uma vez. Trava simples em memória — suficiente porque roda
+// num único processo (mesmo padrão de noOverlap:true usado nos crons de
+// varredura em src/index.js).
+let execucaoEmAndamento = false
+
+export function tentarIniciarExecucao() {
+  if (execucaoEmAndamento) return false
+  execucaoEmAndamento = true
+  return true
+}
+
+export function finalizarExecucao() {
+  execucaoEmAndamento = false
+}
+
 export async function verificarElegiveis() {
   if (!(await reativacaoEstaAtiva())) {
     console.log('[reativacao] automação desativada em /automacoes — pulando job de hoje')
@@ -520,8 +542,14 @@ router.post('/toggle', async (req, res) => {
 // Com as travas de ritmo (30-60s entre envios), uma execução com o backlog cheio
 // pode levar bem mais que o timeout de uma requisição HTTP — dispara em background
 // e responde na hora; acompanhar o andamento pela tela de Automações (GET /status).
+// 409 quando já há uma execução em andamento — ver tentarIniciarExecucao acima.
 router.post('/executar-agora', async (req, res) => {
-  verificarElegiveis().catch((err) => console.error('[reativacao] erro na execução manual:', err.message))
+  if (!tentarIniciarExecucao()) {
+    return res.status(409).json({ erro: 'Já existe uma execução de reativação em andamento.' })
+  }
+  verificarElegiveis()
+    .catch((err) => console.error('[reativacao] erro na execução manual:', err.message))
+    .finally(finalizarExecucao)
   res.json({ sucesso: true, iniciado: true })
 })
 
@@ -530,7 +558,13 @@ router.post('/executar-agora', async (req, res) => {
 // sair sozinho, homologação 2026-08-12).
 if (process.env.NODE_ENV !== 'test') {
   cron.schedule('0 9 * * 1-5', () => {
-    verificarElegiveis().catch((err) => console.error('[reativacao] erro no job agendado:', err.message))
+    if (!tentarIniciarExecucao()) {
+      console.log('[reativacao] execução agendada pulada — já existe uma em andamento (provavelmente disparo manual)')
+      return
+    }
+    verificarElegiveis()
+      .catch((err) => console.error('[reativacao] erro no job agendado:', err.message))
+      .finally(finalizarExecucao)
   }, { timezone: 'America/Sao_Paulo' })
 }
 

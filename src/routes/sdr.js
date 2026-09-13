@@ -42,6 +42,18 @@ const evolutionApi = axios.create({
   timeout: 20000,
 })
 
+// Achado do incidente "IA comercial não responde" (2026-09-13): nenhuma chamada
+// Supabase deste arquivo tinha limite de espera — um try/catch não pega uma
+// promise que nunca resolve nem rejeita, então uma instabilidade pontual do
+// Postgres/PostgREST podia travar o processamento de UM cliente por tempo
+// indefinido, sem nenhum log (o cliente simplesmente nunca recebia resposta).
+// `.abortSignal(AbortSignal.timeout(...))` só limita a ESPERA: passado o tempo
+// configurado, a chamada resolve com `{ data: null, error }` — o mesmo formato
+// de qualquer outro erro do postgrest-js — então todo o tratamento de erro já
+// existente continua funcionando sem alteração nenhuma de comportamento no
+// caminho de sucesso. Configurável só pra teste (produção sempre usa o default).
+const SDR_QUERY_TIMEOUT_MS = Number(process.env.SDR_QUERY_TIMEOUT_MS) || 8000
+
 const ACOES_CATALOGO = ['ENVIAR_CATALOGO_PRO', 'ENVIAR_CATALOGO_HOME', 'ENVIAR_APRESENTACAO_B2B']
 
 // Tabela de decisão determinística da cadência: cada etapa tem um formato fixo,
@@ -580,6 +592,7 @@ async function aplicarPacingLara() {
       .select('id', { count: 'exact', head: true })
       .eq('direcao', 'saida')
       .gte('created_at', desde)
+      .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     if (error) throw error
     if ((count ?? 0) >= LARA_LIMITE_JANELA) {
       const espera = LARA_PACING_DELAY_MIN_MS + Math.random() * (LARA_PACING_DELAY_MAX_MS - LARA_PACING_DELAY_MIN_MS)
@@ -587,7 +600,14 @@ async function aplicarPacingLara() {
       await new Promise((resolve) => setTimeout(resolve, espera))
     }
   } catch (err) {
-    console.error('[sdr:pacing] erro ao checar volume de envio (seguindo sem pacing):', err.message)
+    // Não dá pra confirmar o volume recente de envio — aplica o atraso mínimo
+    // por precaução (mesmo atraso que já existiria se o volume estivesse alto)
+    // em vez de seguir sem nenhum pacing. Falha pro lado cauteloso (mais
+    // devagar), nunca pro lado rápido — protege a reputação do número
+    // compartilhado exatamente no tipo de instabilidade em que mais importa.
+    const esperaPadrao = LARA_PACING_DELAY_MIN_MS + Math.random() * (LARA_PACING_DELAY_MAX_MS - LARA_PACING_DELAY_MIN_MS)
+    console.error(`[sdr:pacing] erro ao checar volume de envio — aplicando atraso padrão de ${Math.round(esperaPadrao / 1000)}s por precaução:`, err.message)
+    await new Promise((resolve) => setTimeout(resolve, esperaPadrao))
   }
 }
 
@@ -627,9 +647,21 @@ const CODIGO_ERRO_PERMITIDO_RE = /^[A-Z0-9]{2,10}$/
 // 'consulta_lead' | 'insert_saida' — nunca dado do usuário) + o código de
 // erro, só se bater no formato permitido acima. NUNCA loga `err.message`,
 // `err.detail`, `err.hint` nem o objeto de erro bruto, em nenhuma hipótese.
+function codigoErroSeguro(codigoErro) {
+  return (typeof codigoErro === 'string' && CODIGO_ERRO_PERMITIDO_RE.test(codigoErro)) ? codigoErro : 'nao_informado'
+}
+
 function logarFalhaDePersistenciaLocal(etapa, codigoErro) {
-  const codigoSeguro = (typeof codigoErro === 'string' && CODIGO_ERRO_PERMITIDO_RE.test(codigoErro)) ? codigoErro : 'nao_informado'
-  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoSeguro}) — sem reenvio automático`)
+  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — sem reenvio automático`)
+}
+
+// Mesma disciplina de log de logarFalhaDePersistenciaLocal (nunca err.message/
+// detail/hint bruto — só etapa fixa + código de erro em formato permitido).
+// Usado nas checagens de leitura abaixo (config/handoff/histórico) que, até
+// esta correção, falhavam em total silêncio — nenhum log em nenhuma hipótese,
+// mesmo quando o resultado prático já era "a Lara não vai responder isto direito".
+function logarFalhaDeVerificacao(etapa, codigoErro) {
+  console.error(`[sdr] não foi possível concluir a verificação (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — seguindo com o mesmo comportamento padrão de antes desta checagem`)
 }
 
 async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
@@ -639,7 +671,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
   let etapaAtual = 'consulta_lead'
   try {
     const candidatos = candidatosTelefone(telefone)
-    const { data: leads, error: erroLeads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1)
+    const { data: leads, error: erroLeads } = await supabase.from('leads').select('id').in('telefone', candidatos).limit(1).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     if (erroLeads) {
       // Deliberadamente NÃO há reenvio/retry aqui em nenhuma hipótese: esta
       // função só é chamada DEPOIS de evolutionApi.post já ter retornado
@@ -660,7 +692,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_url: mediaUrl,
-    })
+    }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     if (erroInsert) {
       logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code)
       return
@@ -808,7 +840,13 @@ async function processarLara(event) {
 
   // Interruptor geral da Lara, controlado pela página /automacoes — quando desativado,
   // a Lara não responde nada, em nenhum status_atendimento (pausa total do bot).
-  const { data: configAutomacoes } = await supabase.from('automacoes_config').select('sdr_ativo, voz_ativa').eq('id', 1).maybeSingle()
+  const { data: configAutomacoes, error: erroConfig } = await supabase
+    .from('automacoes_config')
+    .select('sdr_ativo, voz_ativa')
+    .eq('id', 1)
+    .maybeSingle()
+    .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if (erroConfig) logarFalhaDeVerificacao('ler_config_automacoes', erroConfig.code)
   if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
 
   // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
@@ -859,20 +897,24 @@ async function processarLara(event) {
   const candidatosConversa = candidatosTelefone(telefone)
 
   // S1-4: Se a vendedora assumiu o atendimento, Lara não responde nem faz follow-up.
-  const { data: leadsHandoff } = await supabase
+  const { data: leadsHandoff, error: erroHandoff } = await supabase
     .from('leads')
     .select('id')
     .in('telefone', candidatosConversa)
     .eq('atendimento_humano', true)
     .limit(1)
+    .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if (erroHandoff) logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code)
   if (leadsHandoff && leadsHandoff.length > 0) return null
 
-  const { data: conversasExistentes } = await supabase
+  const { data: conversasExistentes, error: erroHistorico } = await supabase
     .from('sdr_conversas')
     .select('*')
     .in('telefone', candidatosConversa)
     .order('ultimo_contato', { ascending: false })
     .limit(1)
+    .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if (erroHistorico) logarFalhaDeVerificacao('ler_historico_conversa', erroHistorico.code)
 
   const conversa = conversasExistentes?.[0] ?? null
   // Mantém o telefone já salvo como chave canônica, para não fragmentar o
@@ -907,7 +949,7 @@ async function processarLara(event) {
         ultimo_contato: new Date().toISOString(),
       },
       { onConflict: 'telefone' }
-    )
+    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     return null
   }
 
@@ -922,7 +964,7 @@ async function processarLara(event) {
     await supabase.from('sdr_conversas').upsert(
       { telefone: telefoneConversa, historico: historicoParaSalvar, ultimo_contato: new Date().toISOString() },
       { onConflict: 'telefone' }
-    )
+    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     return null
   }
   ultimoProcessamentoPorTelefone.set(telefoneConversa, Date.now())
@@ -944,7 +986,7 @@ async function processarLara(event) {
         ultimo_contato: new Date().toISOString(),
       },
       { onConflict: 'telefone' }
-    )
+    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     return null
   }
 
@@ -1022,16 +1064,28 @@ async function processarLara(event) {
 
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
 
-  await supabase.from('sdr_conversas').upsert({
-    telefone: telefoneConversa,
-    estado: parsed.proximo_estado,
-    tipo_lead: parsed.tipo_lead,
-    temperatura: parsed.temperatura || temperatura,
-    etapa_cadencia: parsed.etapa_cadencia || etapaCadencia,
-    historico: historicoRecente,
-    status_atendimento: 'ia_atendendo',
-    ultimo_contato: new Date().toISOString(),
-  }, { onConflict: 'telefone' })
+  // Achado do incidente 2026-09-13: este upsert nunca teve timeout nem checagem
+  // de erro — sem isso, uma instabilidade aqui travava (ou abortava sem log) o
+  // fluxo INTEIRO antes de chegar no envio de texto logo abaixo, mesmo com a
+  // resposta da Claude já pronta. Agora nunca bloqueia o envio: em erro/timeout,
+  // loga (sanitizado) e segue para tentar enviar a resposta mesmo assim —
+  // preferimos arriscar reprocessar o histórico no próximo turno a deixar de
+  // tentar enviar uma resposta já gerada.
+  try {
+    const { error: erroSalvarEstado } = await supabase.from('sdr_conversas').upsert({
+      telefone: telefoneConversa,
+      estado: parsed.proximo_estado,
+      tipo_lead: parsed.tipo_lead,
+      temperatura: parsed.temperatura || temperatura,
+      etapa_cadencia: parsed.etapa_cadencia || etapaCadencia,
+      historico: historicoRecente,
+      status_atendimento: 'ia_atendendo',
+      ultimo_contato: new Date().toISOString(),
+    }, { onConflict: 'telefone' }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if (erroSalvarEstado) logarFalhaDeVerificacao('salvar_estado_conversa', erroSalvarEstado.code)
+  } catch (err) {
+    logarFalhaDeVerificacao('salvar_estado_conversa', err?.code)
+  }
 
   // Tabela determinística decide o formato — não fica a critério do Claude a
   // cada turno, garantindo que etapas como "lead sumiu" ou "preço" nunca saem em áudio.

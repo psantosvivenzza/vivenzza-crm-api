@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { candidatosTelefone } from '../lib/telefone.js'
+import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
 import { proximoVendedor } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
@@ -277,7 +277,11 @@ export async function processWhatsappEvent(payload) {
 
     const direcao = fromMe ? 'saida' : 'entrada'
     const status = fromMe ? 'enviado' : 'recebido'
-    console.log('[webhook]', direcao, '| tel:', telefone, '| tipo:', mediaTipo ?? 'texto', '|', texto.slice(0, 50))
+    // Nunca logar o telefone completo nem o conteúdo da mensagem (achado de
+    // segurança 2026-09-13) — mascararTelefone() já é o padrão usado pra isso
+    // no motor de cobrança (ver lib/telefone.js); aqui só o tamanho do texto
+    // é logado, nunca o texto em si.
+    console.log('[webhook]', direcao, '| tel:', mascararTelefone(telefone), '| tipo:', mediaTipo ?? 'texto', '| tamanho:', texto.length)
 
     // 2026-08-17 — bug real corrigido: instância FINANCEIRA (cobrança/atendimento
     // financeiro) nunca deve tocar o CRM comercial — nunca casa com lead
@@ -339,7 +343,11 @@ export async function processWhatsappEvent(payload) {
 
       if (!error && novoLead) {
         lead = novoLead
-        console.log('[webhook] novo lead criado:', novoLead.nome, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
+        // novoLead.nome embute o telefone completo (`Lead WhatsApp ${semPrefixo}`,
+        // acima) — nunca logar esse campo aqui; o id já identifica o lead pra
+        // quem for investigar, sem repetir o telefone completo no log (mesmo
+        // achado de segurança 2026-09-13 do log operacional logo acima).
+        console.log('[webhook] novo lead criado:', novoLead.id, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
 
         // Tenta vincular ao cadastro do ERP pelo telefone — não bloqueia a criação do lead se falhar.
         try {
@@ -443,7 +451,18 @@ export async function processWhatsappEvent(payload) {
       )
     }
   } catch (err) {
-    console.error('[webhook] erro:', err.message, '| body:', JSON.stringify(payload).slice(0, 200))
+    // 2026-09-13 — AJUSTE DE SEGURANÇA: a versão anterior deste log incluía
+    // `JSON.stringify(payload).slice(0, 200)` — o payload bruto da Evolution
+    // sempre traz telefone completo (key.remoteJid) e, na maioria dos
+    // eventos, o conteúdo da própria mensagem (message.conversation) bem
+    // dentro dos primeiros 200 caracteres do JSON. Nenhum dos catches
+    // internos desta função relança erro (todos tratam `{error}` e
+    // retornam/seguem localmente), então o que chega aqui é sempre uma
+    // exceção de runtime sobre payload malformado — `err.message` nesses
+    // casos é texto fixo do próprio JS (ex: "Cannot read properties of
+    // undefined"), nunca eco de dado do usuário. Mantém só isso e o tipo do
+    // evento (literal fixo mandado pela Evolution) — nunca o payload bruto.
+    console.error('[webhook] erro ao processar evento:', err.message, '| event:', payload?.event ?? 'desconhecido')
   }
 }
 

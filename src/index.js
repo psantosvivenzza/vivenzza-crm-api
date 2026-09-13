@@ -59,6 +59,7 @@ import { runSincronizacaoDistribuicaoDFe } from './jobs/nfe-distribuicao-sync.js
 import { runPaymentReconciliationSweep } from './jobs/payment-reconciliation-sweep.js'
 import { runPromiseExpirySweep } from './jobs/promise-expiry-sweep.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
+import adminMetaReportRouter from './routes/admin-meta-report.js'
 // FASE B.1 (homologação, shadow mínimo) — SOMENTE observação read-only de
 // Recovery Score/Priority Score/Next Best Action, nunca despacha nada.
 // nba_shadow_mode/score_shadow_mode nascem OFF nesta migration; ligar é uma
@@ -83,6 +84,16 @@ import aiSuggestionsRouter from './routes/ai-suggestions.js'
 // de usuário comum. Ver src/lib/collection/ai/jobQueue.js.
 import aiWorkerRouter from './routes/ai-worker.js'
 import { aiWorkerAuth } from './middleware/aiWorkerAuth.js'
+// Piloto "Meu Ponto" (2026-09-10) — controle de ponto interno para
+// funcionários presenciais, DESATIVADO por padrão via ponto_config.piloto_ativo
+// (ver src/middleware/pontoAuth.js e docs/meu-ponto/ESPECIFICACAO_MEU_PONTO.md).
+// Não é REP-P, não é reconhecimento facial. Gestor de ponto é escopo próprio
+// (ponto_gestores) — nunca reaproveita adminOuFinanceiro.
+import pontoRouter from './routes/ponto.js'
+import pontoGestaoRouter from './routes/ponto-gestao.js'
+import pontoAdminRouter from './routes/ponto-admin.js'
+import pontoEquipamentoRouter from './routes/ponto-equipamento.js'
+import { exigirGestorOuAdmin, exigirUsuarioAtivo } from './middleware/pontoAuth.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -197,7 +208,7 @@ app.use('/api/ligacoes', auth, ligacoesRouter)
 app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
-app.use('/api/blog', auth, blogRouter)
+app.use('/api/blog', auth, adminOnly, blogRouter)
 // Achado da auditoria adversarial de 2026-09-13: faltava `adminOnly` aqui —
 // diferente de TODO outro /api/admin/* (campanhas, google-ads,
 // evolution-health, erp), esta rota exigia só `auth` e o próprio router
@@ -224,27 +235,32 @@ app.use('/api/ai-worker', aiWorkerAuth, aiWorkerRouter)
 app.use('/api/collection-whatsapp', auth, adminOuFinanceiro, collectionWhatsappMonitorRouter)
 app.use('/api/collection-contact-review', auth, adminOuFinanceiro, collectionContactReviewRouter)
 
+// Piloto "Meu Ponto" (2026-09-10, desativado por padrão — ver
+// ponto_config.piloto_ativo). /api/ponto exige apenas login + habilitação
+// própria (checada dentro do router); gestão/admin têm middleware de escopo
+// dedicado, nunca adminOuFinanceiro.
+// exigirUsuarioAtivo (usuarios.ativo, reconsultado a cada requisição) é
+// aplicado nos três mounts — cobre histórico, fotos, correções,
+// solicitações, gestão e administração de uma vez só (achado da revisão de
+// 2026-09-11: checar isso só nas rotas de decisão era insuficiente).
+app.use('/api/ponto', auth, exigirUsuarioAtivo, pontoRouter)
+app.use('/api/ponto-gestao', auth, exigirUsuarioAtivo, exigirGestorOuAdmin, pontoGestaoRouter)
+app.use('/api/ponto-admin', auth, exigirUsuarioAtivo, adminOnly, pontoAdminRouter)
+// SEM auth de propósito: o serviço local de equipamento nunca deve
+// carregar/usar o JWT do colaborador (ver
+// docs/meu-ponto/PROTOCOLO_COMPONENTE_WINDOWS.md). A única credencial deste
+// router é o código de vínculo de uso único, validado dentro da rota. Fica
+// atrás do mesmo gate estrutural EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA que
+// POST /api/ponto/marcacoes (ver src/routes/ponto-equipamento.js).
+app.use('/api/ponto-equipamento', pontoEquipamentoRouter)
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
 // Disparo manual do relatório Meta Ads (antes do 404 para ser alcançada)
-app.post('/api/admin/meta-report', async (req, res) => {
-  const { authorization } = req.headers
-  if (authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
-    return res.status(401).json({ erro: 'Não autorizado' })
-  }
-  try {
-    const daysAgo = Number(req.query.daysAgo) || 1
-    const resultado = await runMetaReport({ daysAgo })
-    res.json({ ok: true, ...resultado })
-  } catch (err) {
-    const detail = err.response?.data ?? err.message
-    console.error('[meta-report manual] Erro:', JSON.stringify(detail))
-    res.status(500).json({ erro: err.message, detail })
-  }
-})
+app.use('/api/admin/meta-report', adminMetaReportRouter)
 
 // 404
 app.use((req, res) => {
