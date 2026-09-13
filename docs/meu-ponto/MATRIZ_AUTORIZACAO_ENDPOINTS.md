@@ -23,7 +23,7 @@ Todos exigem `auth` (JWT válido) + `exigirUsuarioAtivo` (revalida
 | `GET /solicitacoes` | idem | idem | — |
 | `GET /solicitacoes/por-operacao/:operacao_id` | idem | Verifica `usuario_id === req.user.id`, senão 404 | — |
 | `GET /solicitacoes/:id/foto` | idem | Verifica dono, senão 404 | — |
-| `POST /correcoes` | idem | `usuario_id`/`solicitado_por` sempre `req.user.id` | — |
+| `POST /correcoes` | idem | `usuario_id`/`solicitado_por` sempre `req.user.id` | Rate limit 8/5min por usuário — orçamento próprio (`limiteCriacaoCorrecao`), separado do de `/solicitacoes`; achado da auditoria adversarial de rate limiting/abuso de 2026-09-12, ver `AUDITORIA_RATE_LIMIT_ABUSO_REAUTENTICACAO_20260912.md` |
 | `GET /correcoes` | idem | Só os próprios | — |
 
 ## 2. Endpoints — `/api/ponto-gestao/*` (gestor/admin)
