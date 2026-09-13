@@ -59,6 +59,7 @@ import { runSincronizacaoDistribuicaoDFe } from './jobs/nfe-distribuicao-sync.js
 import { runPaymentReconciliationSweep } from './jobs/payment-reconciliation-sweep.js'
 import { runPromiseExpirySweep } from './jobs/promise-expiry-sweep.js'
 import evolutionHealthRouter from './routes/evolution-health.js'
+import adminMetaReportRouter from './routes/admin-meta-report.js'
 // FASE B.1 (homologação, shadow mínimo) — SOMENTE observação read-only de
 // Recovery Score/Priority Score/Next Best Action, nunca despacha nada.
 // nba_shadow_mode/score_shadow_mode nascem OFF nesta migration; ligar é uma
@@ -224,21 +225,7 @@ app.get('/health', (req, res) => {
 })
 
 // Disparo manual do relatório Meta Ads (antes do 404 para ser alcançada)
-app.post('/api/admin/meta-report', async (req, res) => {
-  const { authorization } = req.headers
-  if (authorization !== `Bearer ${process.env.API_SECRET_KEY}`) {
-    return res.status(401).json({ erro: 'Não autorizado' })
-  }
-  try {
-    const daysAgo = Number(req.query.daysAgo) || 1
-    const resultado = await runMetaReport({ daysAgo })
-    res.json({ ok: true, ...resultado })
-  } catch (err) {
-    const detail = err.response?.data ?? err.message
-    console.error('[meta-report manual] Erro:', JSON.stringify(detail))
-    res.status(500).json({ erro: err.message, detail })
-  }
-})
+app.use('/api/admin/meta-report', adminMetaReportRouter)
 
 // 404
 app.use((req, res) => {
