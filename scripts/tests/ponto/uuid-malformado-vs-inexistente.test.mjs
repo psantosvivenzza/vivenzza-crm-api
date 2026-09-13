@@ -130,6 +130,7 @@ async function criarCorrecaoPendenteDeTeste(usuario, marcacaoId) {
   const { data, error } = await supabase
     .from('ponto_correcoes')
     .insert({
+      operacao_id: crypto.randomUUID(),
       marcacao_id: marcacaoId,
       usuario_id: usuario.id,
       tipo_solicitacao: 'outro',
@@ -199,7 +200,7 @@ test('POST /api/ponto/correcoes — marcacao_id malformado no corpo é 400; marc
   for (const idMalformado of IDS_MALFORMADOS) {
     const resposta = await chamar('POST', '/api/ponto/correcoes', {
       token: gerarToken(colaboradorNoEscopo),
-      body: { marcacao_id: idMalformado, tipo_solicitacao: 'outro', valor_proposto: { nota: 'x' }, justificativa: 'teste' },
+      body: { operacao_id: crypto.randomUUID(), marcacao_id: idMalformado, tipo_solicitacao: 'outro', valor_proposto: { nota: 'x' }, justificativa: 'teste' },
     })
     assert.equal(resposta.status, 400, `marcacao_id "${idMalformado}" deveria ser 400, veio ${resposta.status}`)
     corpoNaoVazaDetalheInterno(resposta)
@@ -208,7 +209,7 @@ test('POST /api/ponto/correcoes — marcacao_id malformado no corpo é 400; marc
   const marcacaoDeOutro = await criarMarcacaoDeTeste(outroColaborador)
   const respostaValidaNaoDoUsuario = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaboradorNoEscopo),
-    body: { marcacao_id: marcacaoDeOutro, tipo_solicitacao: 'outro', valor_proposto: { nota: 'x' }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacaoDeOutro, tipo_solicitacao: 'outro', valor_proposto: { nota: 'x' }, justificativa: 'teste' },
   })
   assert.equal(respostaValidaNaoDoUsuario.status, 404, 'marcacao_id válido de outro usuário deveria ser 404, não 400/403')
 })

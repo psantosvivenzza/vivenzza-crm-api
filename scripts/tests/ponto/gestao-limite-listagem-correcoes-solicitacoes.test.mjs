@@ -88,6 +88,7 @@ async function criarCorrecaoPendente(usuario, marcacaoId) {
   const { data, error } = await supabase
     .from('ponto_correcoes')
     .insert({
+      operacao_id: crypto.randomUUID(),
       marcacao_id: marcacaoId,
       usuario_id: usuario.id,
       tipo_solicitacao: 'outro',

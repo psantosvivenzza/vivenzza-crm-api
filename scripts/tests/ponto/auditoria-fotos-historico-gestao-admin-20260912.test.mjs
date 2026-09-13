@@ -159,13 +159,16 @@ async function criarSolicitacaoPendenteComFotoDeTeste(usuario, tipo = 'saida') {
   return data.id
 }
 
-// ponto_correcoes.operacao_id só existe a partir da PR #83 (fora do escopo
-// desta PR, baseada só em #78) — não incluído aqui de propósito.
+// ponto_correcoes.operacao_id é NOT NULL a partir da PR #83 — esta PR
+// (baseada só em #78) originalmente não incluía a coluna aqui; adicionado
+// na integração da release (2026-09-13) porque a branch combinada já traz
+// a migration da #83.
 async function criarCorrecaoPendenteDeTeste(usuario, marcacaoId) {
   const supabase = obterSupabaseDeTeste()
   const { data, error } = await supabase
     .from('ponto_correcoes')
     .insert({
+      operacao_id: crypto.randomUUID(),
       marcacao_id: marcacaoId,
       usuario_id: usuario.id,
       tipo_solicitacao: 'outro',
