@@ -241,9 +241,20 @@ router.put('/:id/devolver-lara', async (req, res) => {
 })
 
 // DELETE /api/leads/:id — remover (admin only)
+//
+// Achado da auditoria adversarial de mounts/autorização de 2026-09-13: era
+// `if (req.user.role === 'vendedor')` — uma denylist que só bloqueava
+// 'vendedor', deixando passar qualquer outro papel, inclusive 'financeiro'
+// (introduzido em 2026-09-07 só para /api/financeiro — ver comentário em
+// routes/usuarios.js). Mesmo antipadrão que middleware/auth.js já documenta
+// ter sido abandonado nas rotas financeiras ("diferente do gate de posse
+// anterior (role==='vendedor')..."), nunca corrigido aqui. Todo outro "admin
+// only" do código (pedidos.js, cobrancas.js, comissoes.js, nfe-entradas.js,
+// notifications.js, usuarios.js, relatorios.js) já usa `role !== 'admin'`
+// ou o middleware `adminOnly`.
 router.delete('/:id', async (req, res) => {
   try {
-    if (req.user.role === 'vendedor') {
+    if (req.user.role !== 'admin') {
       return res.status(403).json({ erro: 'Apenas administradores podem remover leads' })
     }
 
