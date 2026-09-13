@@ -23,7 +23,8 @@ router.get('/busca', async (req, res) => {
     if (error) throw error
     res.json(data)
   } catch (err) {
-    res.status(500).json({ erro: err.message })
+    console.error('[clientes-erp/busca] erro ao buscar clientes:', err.message)
+    res.status(500).json({ erro: 'Erro ao buscar clientes. Tente novamente.' })
   }
 })
 
