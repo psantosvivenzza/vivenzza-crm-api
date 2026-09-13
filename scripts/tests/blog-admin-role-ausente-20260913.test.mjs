@@ -134,3 +134,25 @@ test('admin — gate deixa passar pro handler (não 403); corpo vazio de propós
   assert.equal(r2.status, 503, JSON.stringify(r2.body))
   assert.match(r2.body.erro, /WordPress/)
 })
+
+// Achado da revisão adversarial (2026-09-13): os 4 testes acima montam seu
+// próprio app Express repetindo `auth, adminOnly, blogRouter` — o mesmo
+// padrão usado no resto da suíte (ex.: avaliacoes-admin-role-ausente), já
+// que importar src/index.js de verdade dispara app.listen + vários
+// cron.schedule + dependências externas. Isso prova que o MIDDLEWARE
+// funciona, mas não prova que src/index.js de fato usa esse middleware no
+// mount de produção: revertendo só a linha do mount em src/index.js (tirando
+// `adminOnly`) os 4 testes acima continuam verdes, porque nunca leem esse
+// arquivo. Este teste fecha esse gap com uma asserção estática mínima,
+// específica desta correção.
+test('src/index.js monta /api/blog com adminOnly (guarda contra regressão da correção)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const conteudo = readFileSync(new URL('../../src/index.js', import.meta.url), 'utf8')
+  const linhaMount = conteudo.split('\n').find((l) => l.includes("app.use('/api/blog'"))
+  assert.ok(linhaMount, 'mount de /api/blog não encontrado em src/index.js')
+  assert.match(
+    linhaMount,
+    /adminOnly/,
+    `mount de /api/blog em src/index.js não inclui adminOnly (regressão da correção desta PR): ${linhaMount}`
+  )
+})
