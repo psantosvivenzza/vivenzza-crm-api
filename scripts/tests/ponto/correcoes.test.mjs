@@ -95,6 +95,7 @@ test('correção aprovada gera nova marcação (origem=correcao) e NUNCA edita a
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
     body: {
+      operacao_id: crypto.randomUUID(),
       marcacao_id: original.id,
       tipo_solicitacao: 'ajuste_horario',
       valor_proposto: { tipo: 'entrada', registrado_em: horaCorrigida },
@@ -127,7 +128,7 @@ test('correção rejeitada não gera nenhuma marcação nova', async () => {
   const original = await criarMarcacaoDeTeste(colaborador, 'saida_intervalo')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: original.id, tipo_solicitacao: 'ajuste_horario', valor_proposto: { tipo: 'saida_intervalo', registrado_em: new Date().toISOString() }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: original.id, tipo_solicitacao: 'ajuste_horario', valor_proposto: { tipo: 'saida_intervalo', registrado_em: new Date().toISOString() }, justificativa: 'teste' },
   })
 
   const decidir = await chamar('POST', `/api/ponto-gestao/correcoes/${solicitar.body.id}/decisao`, {
@@ -147,7 +148,7 @@ test('admin não pode decidir sobre a própria solicitação (bloqueio de autoap
   const marcacaoDoAdmin = await criarMarcacaoDeTeste(admin, 'entrada')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(admin),
-    body: { marcacao_id: marcacaoDoAdmin.id, tipo_solicitacao: 'outro', valor_proposto: { nota: 'teste' }, justificativa: 'teste autoaprovação' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacaoDoAdmin.id, tipo_solicitacao: 'outro', valor_proposto: { nota: 'teste' }, justificativa: 'teste autoaprovação' },
   })
   assert.equal(solicitar.status, 201)
 
@@ -163,7 +164,7 @@ test('gestor não pode decidir correção de colaborador fora do seu escopo', as
   const marcacaoTerceiro = await criarMarcacaoDeTeste(terceiroColaborador, 'entrada')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(terceiroColaborador),
-    body: { marcacao_id: marcacaoTerceiro.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste escopo' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacaoTerceiro.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste escopo' },
   })
   assert.equal(solicitar.status, 201)
 
@@ -178,7 +179,7 @@ test('decidir a mesma solicitação duas vezes falha na segunda (já decidida)',
   const marcacao = await criarMarcacaoDeTeste(colaborador, 'saida')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: marcacao.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste dupla decisão' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacao.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste dupla decisão' },
   })
 
   const primeira = await chamar('POST', `/api/ponto-gestao/correcoes/${solicitar.body.id}/decisao`, { token: gerarToken(gestor), body: { decisao: 'rejeitada' } })
@@ -198,28 +199,28 @@ test('ajuste_horario/ajuste_tipo/inclusao_marcacao_faltante exigem valor_propost
 
   const semTipo = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: original.id, tipo_solicitacao: 'ajuste_horario', valor_proposto: { registrado_em: new Date().toISOString() }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: original.id, tipo_solicitacao: 'ajuste_horario', valor_proposto: { registrado_em: new Date().toISOString() }, justificativa: 'teste' },
   })
   assert.equal(semTipo.status, 400)
   assert.match(semTipo.body.erro, /valor_proposto\.tipo/)
 
   const semHorario = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: original.id, tipo_solicitacao: 'ajuste_tipo', valor_proposto: { tipo: 'entrada' }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: original.id, tipo_solicitacao: 'ajuste_tipo', valor_proposto: { tipo: 'entrada' }, justificativa: 'teste' },
   })
   assert.equal(semHorario.status, 400)
   assert.match(semHorario.body.erro, /valor_proposto\.registrado_em/)
 
   const horarioInvalido = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: original.id, tipo_solicitacao: 'inclusao_marcacao_faltante', valor_proposto: { tipo: 'entrada', registrado_em: 'não-é-uma-data' }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: original.id, tipo_solicitacao: 'inclusao_marcacao_faltante', valor_proposto: { tipo: 'entrada', registrado_em: 'não-é-uma-data' }, justificativa: 'teste' },
   })
   assert.equal(horarioInvalido.status, 400)
 
   // 'outro' nunca gera marcação — continua aceitando valor_proposto livre.
   const outroLivre = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: original.id, tipo_solicitacao: 'outro', valor_proposto: { qualquer: 'coisa' }, justificativa: 'teste' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: original.id, tipo_solicitacao: 'outro', valor_proposto: { qualquer: 'coisa' }, justificativa: 'teste' },
   })
   assert.equal(outroLivre.status, 201)
 })
@@ -234,6 +235,7 @@ test('aprovar uma correção com valor_proposto inválido falha explicitamente (
   const { data: correcaoMalformada, error } = await supabase
     .from('ponto_correcoes')
     .insert({
+      operacao_id: crypto.randomUUID(),
       usuario_id: colaborador.id,
       tipo_solicitacao: 'ajuste_horario',
       valor_proposto: { tipo: 'entrada' }, // sem registrado_em — nunca deveria existir via a rota real, hoje validada
@@ -260,7 +262,7 @@ test('decisão concorrente sobre a mesma correção: duas chamadas simultâneas,
   const marcacao = await criarMarcacaoDeTeste(colaborador, 'entrada')
   const solicitar = await chamar('POST', '/api/ponto/correcoes', {
     token: gerarToken(colaborador),
-    body: { marcacao_id: marcacao.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste decisão concorrente' },
+    body: { operacao_id: crypto.randomUUID(), marcacao_id: marcacao.id, tipo_solicitacao: 'outro', valor_proposto: {}, justificativa: 'teste decisão concorrente' },
   })
   assert.equal(solicitar.status, 201)
 

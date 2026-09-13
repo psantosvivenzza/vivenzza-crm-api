@@ -167,8 +167,21 @@ CREATE INDEX IF NOT EXISTS idx_ponto_marcacoes_sinalizadas
   WHERE sinalizado_para_revisao;
 
 -- 8. Correções — solicitação + decisão, nunca edita ponto_marcacoes direto.
+--
+-- Correção estrutural (auditoria adversarial de 2026-09-12, achado
+-- independente da PR #78 original): ao contrário de ponto_marcacoes e
+-- ponto_solicitacoes_marcacao, esta tabela nasceu sem operacao_id — POST
+-- /api/ponto/correcoes não tinha nenhuma defesa contra retry de rede,
+-- duplo clique ou reenvio concorrente, cada tentativa idêntica sempre
+-- virava uma linha nova. Reproduzido contra Postgres real antes desta
+-- correção: 2 chamadas HTTP sequenciais idênticas geravam 2 linhas; 5
+-- chamadas simultâneas idênticas geravam 5. Ver
+-- docs/meu-ponto/AUDITORIA_CORRECOES_DUPLICACAO_2026-09-12.md. operacao_id
+-- aqui segue exatamente o mesmo padrão das duas tabelas irmãs (UNIQUE real
+-- no banco, não só checagem em JS).
 CREATE TABLE IF NOT EXISTS public.ponto_correcoes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  operacao_id uuid NOT NULL UNIQUE,
   marcacao_id uuid REFERENCES public.ponto_marcacoes(id),
   usuario_id uuid NOT NULL REFERENCES public.usuarios(id),
   tipo_solicitacao text NOT NULL CHECK (
