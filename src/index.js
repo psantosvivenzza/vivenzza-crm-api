@@ -198,7 +198,13 @@ app.use('/api/automacoes', auth, automacoesRouter)
 app.use('/api/reativacao', auth, adminOnly, reativacaoRouter)
 app.use('/api/admin/erp', auth, adminOnly, erpRouter)
 app.use('/api/blog', auth, blogRouter)
-app.use('/api/admin/avaliacoes', auth, avaliacoesAdminRouter)
+// Achado da auditoria adversarial de 2026-09-13: faltava `adminOnly` aqui —
+// diferente de TODO outro /api/admin/* (campanhas, google-ads,
+// evolution-health, erp), esta rota exigia só `auth` e o próprio router
+// (avaliacoes-admin.js) não checava role nenhuma. Qualquer usuário
+// autenticado (vendedor, financeiro etc.) conseguia aprovar/apagar
+// avaliações da loja, que alimentam o widget público em /api/avaliacoes.
+app.use('/api/admin/avaliacoes', auth, adminOnly, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOuFinanceiro, cobrancasRouter)
 app.use('/api/notifications', auth, notificationsRouter)
 // FASE B.1 (homologação) — shadow mínimo, só leitura + PATCH de 3 flags
