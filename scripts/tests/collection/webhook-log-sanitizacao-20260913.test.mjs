@@ -134,3 +134,34 @@ test('processWhatsappEvent: catch geral nunca dumpa o payload bruto (telefone/co
   assert.ok(linhaErro, 'esperava o log sanitizado de erro do catch geral')
   assert.match(linhaErro, /event:\s*messages\.upsert/, 'deveria reportar o tipo do evento, nunca o payload bruto')
 })
+
+test('processWhatsappEvent: telefone curto (4 dígitos) nunca aparece 100% desmascarado no log — achado da revisão adversarial 2026-09-13', async () => {
+  // remoteJid curto é alcançável por um payload adversarial no webhook público
+  // (entrada não validada) — não depende de nenhum número de telefone real.
+  // mascararTelefone() tinha uma degenerescência: com exatamente 4 dígitos,
+  // 'digitos.length - 4' dava 0 asteriscos e o número voltava 100% intacto,
+  // quebrando a garantia de "nunca telefone completo em log" que este mesmo
+  // log operacional (linha [webhook] .. | tel: ..) depende dela pra cumprir.
+  const TELEFONE_CURTO = '1234'
+  const evolutionId = `sanit-curto-${Date.now()}`
+  evolutionIdsCriados.push(evolutionId)
+
+  await processWhatsappEvent({
+    event: 'messages.upsert',
+    instance: 'vivenzza',
+    data: {
+      key: { remoteJid: `${TELEFONE_CURTO}@s.whatsapp.net`, fromMe: false, id: evolutionId },
+      message: { conversation: 'oi' },
+    },
+  })
+
+  const linhaWebhook = linhasLog.find((l) => l.includes('[webhook]') && l.includes('entrada'))
+  assert.ok(linhaWebhook, 'esperava a linha de log operacional [webhook] .. entrada')
+  assert.ok(
+    !linhaWebhook.includes(`tel: ${TELEFONE_CURTO} `) && !linhaWebhook.endsWith(`tel: ${TELEFONE_CURTO}`),
+    `log não deveria conter o telefone curto 100% desmascarado, mas encontrado em: ${linhaWebhook}`,
+  )
+
+  const { data: leads } = await supabase.from('leads').select('id').eq('telefone', TELEFONE_CURTO)
+  for (const l of leads ?? []) idsLeadsCriados.push(l.id)
+})
