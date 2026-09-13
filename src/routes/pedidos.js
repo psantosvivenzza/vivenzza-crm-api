@@ -520,12 +520,22 @@ router.post('/', async (req, res) => {
 
     const total = subtotal - Number(desconto) + Number(valor_frete)
 
+    // Vendedor só pode criar pedido atribuído a si mesmo — nunca aceita
+    // vendedor_id de outro usuário vindo do corpo da requisição (mass
+    // assignment: permitiria atribuir a venda, e a comissão gerada depois
+    // do faturamento em lib/comissoes.js, a outro vendedor sem consentimento
+    // nem checagem nenhuma). Mesmo modelo de posse já aplicado a TODO outro
+    // endpoint deste arquivo (GET /, GET /:id, PUT /:id, POST /:id/duplicar:
+    // vendedor só age sobre pedido.vendedor_id === req.user.id) — só faltava
+    // na criação. Admin continua podendo atribuir vendedor_id explicitamente.
+    const vendedorIdFinal = req.user.role === 'vendedor' ? req.user.id : (vendedor_id || null)
+
     const { data: pedido, error: errPedido } = await supabase
       .from('pedidos')
       .insert({
         cliente_erp_id, usuario_id, total, desconto: Number(desconto), observacoes, status: 'rascunho',
         condicao_pagamento, forma_pagamento, lista_preco,
-        vendedor_id: vendedor_id || null, vendedor_nome,
+        vendedor_id: vendedorIdFinal, vendedor_nome,
         valor_frete: Number(valor_frete), tipo_frete,
         peso_bruto: peso_bruto != null ? Number(peso_bruto) : null,
         peso_liquido: peso_liquido != null ? Number(peso_liquido) : null,
