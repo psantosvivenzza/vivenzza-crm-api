@@ -28,6 +28,13 @@ de venda.
   pro detalhe completo.
 - **Série 99 entra em vendas gerenciais** — é venda gerencial real, **não
   é documento fiscal SEFAZ**. Nunca excluir Série 99 da visão gerencial.
+- **Hipótese "SEM REPRESENTANTE" (14/09/2026)**: auditada e NÃO confirmada
+  contra a produção — zero linhas com `Representante` em branco existem em
+  `EN_NotasRepres` (filial 001); `EN_NotasRepres` e `EN_RepresMensal`
+  concordam exatamente pro período corrente. Defeito latente real
+  encontrado e corrigido: `DataEmissao IS NULL` era excluído
+  implicitamente (sem log) — agora explícito + aviso sanitizado quando
+  ocorre. Ver `AUDITORIA_SEM_REPRESENTANTE_DATA_EMISSAO_NULA_20260914.md`.
 - O card "Vendas do Mês" do dashboard consome `vendas_gerenciais_mes`
   (fonte gerencial), não a fonte fiscal.
 

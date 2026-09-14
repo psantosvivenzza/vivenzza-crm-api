@@ -81,10 +81,15 @@ async function seedMirror({ filial = FILIAL, representante = 'REP1', serie = '1'
 // Pool fake do NetVision (E01) — nunca uma conexão real. `notasRepres` é a
 // leitura "atual" da origem simulada por teste; `representantes` cobre o
 // mapa de nomes (irrelevante pro comportamento de reconciliação, mas
-// exigido pelo job).
+// exigido pelo job). A checagem companion de "DataEmissao IS NULL"
+// (auditoria 14/09/2026, ver scripts/tests/vendas-gerenciais-data-emissao-nula-20260914.test.mjs)
+// é verificada ANTES do match genérico "EN_NotasRepres" — o SQL dela também
+// contém essa substring — e sempre reporta zero aqui, irrelevante pro
+// comportamento de reconciliação de órfãos exercitado nesta suíte.
 function criarPoolFake({ notasRepres = [], falharLeitura = false }) {
   return {
     async query(sql) {
+      if (sql.includes('COUNT(*) AS quantidade')) return { rows: [{ quantidade: '0', valor_total: '0' }] }
       if (sql.includes('EN_NotasRepres')) {
         if (falharLeitura) throw new Error('falha simulada de leitura da origem (E01 indisponível)')
         return { rows: notasRepres }

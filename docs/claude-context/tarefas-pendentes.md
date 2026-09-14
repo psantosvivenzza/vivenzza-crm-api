@@ -27,6 +27,16 @@
 - [ ] Equipe do Financeiro corrigir os telefones inválidos identificados
       em `/revisao-contatos`, diretamente no NetVision.
 
+## Vendas gerenciais — migration de reconciliação pendente em produção
+
+- [ ] Aplicar `supabase/migrations/20260101000054_sincronizacoes_vendas_gerenciais_reconciliacao.sql`
+      no Supabase de produção (mergeada na PR #101, ainda ausente do schema
+      live conforme handoff de 14/09). Puramente aditiva, sem downtime. Sem
+      ela, `sincronizacoes_vendas_gerenciais` fica presa em
+      `status='executando'` (dado seguro, só rastro de auditoria
+      incompleto). Ver `AUDITORIA_SEM_REPRESENTANTE_DATA_EMISSAO_NULA_20260914.md`
+      pra ordem completa de rollout.
+
 ## Higiene de repositório (auditoria em andamento)
 
 - [ ] Sincronizar checkouts locais desatualizados com `origin/main`
