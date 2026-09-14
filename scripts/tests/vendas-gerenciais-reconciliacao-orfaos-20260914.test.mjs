@@ -89,7 +89,7 @@ async function seedMirror({ filial = FILIAL, representante = 'REP1', serie = '1'
 function criarPoolFake({ notasRepres = [], falharLeitura = false }) {
   return {
     async query(sql) {
-      if (sql.includes('COUNT(*) AS quantidade')) return { rows: [{ quantidade: '0', valor_total: '0' }] }
+      if (sql.includes('COUNT(*) AS quantidade')) return { rows: [{ quantidade: '0', valor_total: '0', quantidade_valor_nao_zero: '0' }] }
       if (sql.includes('EN_NotasRepres')) {
         if (falharLeitura) throw new Error('falha simulada de leitura da origem (E01 indisponível)')
         return { rows: notasRepres }

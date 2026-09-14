@@ -202,13 +202,22 @@ export async function executarSincronizacaoVendasGerenciais({
     // visibilidade (nunca inclusão forçada — jamais fabricamos uma data pra
     // uma linha que a origem não forneceu).
     const { rows: semDataEmissao } = await pool.query(
-      `SELECT COUNT(*) AS quantidade, COALESCE(SUM("ValorDocumento"), 0) AS valor_total
+      `SELECT COUNT(*) AS quantidade, COALESCE(SUM("ValorDocumento"), 0) AS valor_total,
+              COUNT(*) FILTER (WHERE "ValorDocumento" <> 0) AS quantidade_valor_nao_zero
        FROM "EN_NotasRepres"
        WHERE "CodigoFilial" = $1 AND "DataEmissao" IS NULL`,
       [filial]
     )
     const qtdSemDataEmissao = Number(semDataEmissao[0]?.quantidade || 0)
     const valorSemDataEmissao = Number(semDataEmissao[0]?.valor_total || 0)
+    // Gatilho por CONTAGEM de linha com valor individual != 0, nunca pela
+    // SOMA líquida (achado da revisão adversarial desta PR, 14/09/2026): um
+    // estorno/correção com ValorDocumento negativo poderia compensar
+    // exatamente uma linha positiva e zerar a soma total, mascarando as
+    // duas linhas reais atrás de um `valor_total = 0` que pareceria seguro.
+    // `valor_total` continua reportado no aviso (contexto), mas nunca decide
+    // se o aviso dispara.
+    const qtdComValorNaoZero = Number(semDataEmissao[0]?.quantidade_valor_nao_zero || 0)
     // Só gera aviso quando há valor monetário real em jogo — a auditoria de
     // 14/09/2026 confirmou 224 linhas históricas (filial 001, 2019-2020)
     // com DataEmissao NULL e valor SEMPRE zero, permanentes e já conhecidas
@@ -217,11 +226,11 @@ export async function executarSincronizacaoVendasGerenciais({
     // puro pra uma condição inofensiva e já documentada — o objetivo aqui é
     // sinalizar o dia em que isso passar a acontecer com valor != 0, nunca
     // repetir pra sempre um achado histórico sem impacto.
-    if (valorSemDataEmissao !== 0) {
+    if (qtdComValorNaoZero > 0) {
       avisos.push({ tipo: 'data_emissao_nula_nunca_sincronizavel', filial, quantidade: qtdSemDataEmissao, valor_total: valorSemDataEmissao })
       log(
         `[sync-vendas-gerenciais-legado] aviso: ${qtdSemDataEmissao} linha(s) em EN_NotasRepres (filial ${filial}) têm DataEmissao NULL e nunca são ` +
-        `sincronizadas por nenhuma janela de período (valor total: ${valorSemDataEmissao.toFixed(2)}, != 0) — revisão manual na origem recomendada`
+        `sincronizadas por nenhuma janela de período (${qtdComValorNaoZero} com valor individual != 0, valor total líquido: ${valorSemDataEmissao.toFixed(2)}) — revisão manual na origem recomendada`
       )
     }
 

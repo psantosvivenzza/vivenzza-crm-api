@@ -79,11 +79,13 @@ Correção mínima aplicada em `src/jobs/sync-vendas-gerenciais-legado.js`:
   — o objetivo é só visibilidade pra decisão manual futura, nunca inclusão
   forçada (não inventamos representante nem alteramos regra comercial).
 - Testes adversariais novos (`scripts/tests/vendas-gerenciais-data-emissao-nula-20260914.test.mjs`,
-  6 casos) provam: detecção/log do aviso, sanitização do aviso, ausência de
+  8 casos — 7 originais desta PR + 1 da revisão independente abaixo) provam:
+  detecção/log do aviso, sanitização do aviso, ausência de
   falso positivo, comportamento idêntico em dry-run, que uma linha com
   `Representante` em branco **mas `DataEmissao` válida** já era e continua
   sendo incluída normalmente (nenhuma lógica de representante jamais
-  excluiu uma linha aqui — provado, não só assumido), e regressão do
+  excluiu uma linha aqui — provado, não só assumido), gatilho por linha
+  (não soma) mesmo com estorno compensando o total líquido, e regressão do
   comportamento de leitura normal.
 - Suíte de reconciliação de órfãos da PR #101
   (`vendas-gerenciais-reconciliacao-orfaos-20260914.test.mjs`) ajustada
@@ -123,6 +125,79 @@ nova. Ainda assim, a coluna existente é usada por código já em produção
    real de que a hipótese original passou a se manifestar, e aí sim caberia
    decidir uma correção de inclusão (nunca automática, sempre com decisão
    humana sobre qual data usar).
+
+## Revisão adversarial independente (14/09/2026, sessão separada)
+
+Revisão independente desta PR (draft, sem merge/deploy) — confirmou GitHub
+head `6b15e1f`/base `14972a7` (= `origin/main` atual), `MERGEABLE`, diff
+conferido linha a linha, e reproduziu as 18 suítes (7+11) em Postgres
+isolado (porta/banco dedicados desta tarefa, nunca 5432/5433/vivenzza_dev):
+18/18 verde antes de qualquer alteração.
+
+**Defeito real encontrado e corrigido nesta revisão**: o gatilho do aviso
+usava `SOMA("ValorDocumento") != 0`, não uma contagem de linha individual
+com valor != 0. Uma linha positiva e uma negativa (ex.: estorno/correção —
+padrão já documentado nesta mesma tabela, ver docstring do módulo) com
+`DataEmissao NULL` poderiam se compensar exatamente e zerar a soma líquida,
+suprimindo o aviso mesmo havendo duas linhas reais com valor individual
+diferente de zero — exatamente o cenário que este aviso existe pra pegar.
+Corrigido: o gatilho agora conta `COUNT(*) FILTER (WHERE "ValorDocumento"
+<> 0)`, nunca a soma. `valor_total` continua reportado no aviso como
+contexto (pode legitimamente aparecer como `0,00` líquido mesmo com o
+aviso disparado). Teste de regressão novo cobre exatamente esse caso
+(8º caso da suíte de `DataEmissao NULL`, agora 8/8; suíte de órfãos segue
+11/11 sem mudança de comportamento). Nenhuma mudança de escopo, migration
+ou regra comercial.
+
+**Ressalva sobre a linha de base usada por esta auditoria (não corrigida —
+fora do escopo de uma PR mínima, só documentada aqui)**: a conclusão
+"zero divergência monetária ativa" desta auditoria apoia-se em
+`EN_NotasRepres` concordar com `EN_RepresMensal` para o período corrente.
+Dois achados no próprio repositório enfraquecem essa base como prova da
+divergência de R$37.179,77 (print oficial que motivou a PR #101, mesma
+filial/período, 24 vendas) contra o R$36.931,67 lido por esta auditoria
+(também 24 documentos):
+
+1. `VENDAS_DO_MES_RECONCILIACAO.md` (14/08/2026, domínio fiscal) documenta
+   que **`EN_RepresMensal` "tem bug comprovado"** e que a tela
+   `RE_Consulta02` — mesmo nome de relatório citado no docstring do módulo
+   de sync como fonte do "oficial" — é **baseada em PEDIDO**
+   (`StatusPedido=5`/`Cancelado=0`, menos pedidos cujo(s) documento(s)
+   fiscal(is) são só CFOP não-venda), **não** em soma de linhas de
+   nota/documento por representante. É uma fórmula estruturalmente
+   diferente de somar `EN_NotasRepres`/`EN_RepresMensal`.
+2. A afirmação no docstring de `sync-vendas-gerenciais-legado.js` e no
+   commit da PR #53 ("comprovado por reconciliação exata: bateu
+   Ana/Diego/Nicole/Tais... até o centavo, ver
+   `VENDAS_DO_MES_RECONCILIACAO.md`") **não tem lastro no conteúdo atual
+   desse arquivo** — ele foi escrito em 14/08/2026, treze dias antes de
+   `EN_NotasRepres` ser sequer descoberto (PR #53, 27/08/2026), e não
+   menciona essa tabela em nenhum lugar. Não encontrei, em `git log
+   --all`, nenhum outro documento com essa reconciliação específica
+   (`Nicole` não aparece em nenhum arquivo do repositório fora do próprio
+   comentário de código).
+
+**Conclusão desta ressalva**: a concordância `EN_NotasRepres` ×
+`EN_RepresMensal` encontrada nesta auditoria prova consistência **entre
+essas duas fontes**, mas não prova (nem esta auditoria, nem a citação no
+código, afirmam prova reproduzível) que qualquer uma delas bate com o
+número que o usuário efetivamente viu na tela (`RE_Consulta02`/"Consulta
+Vendas por Representante") no momento do `print oficial` de R$37.179,77.
+A diferença de R$248,10 com contagem de documentos idêntica (24 = 24)
+permanece **não explicada por nenhuma evidência lida nesta revisão** — é
+compatível tanto com (a) deriva transacional normal do legado entre os
+dois momentos de observação (hipótese já levantada pela auditoria
+original) quanto com (b) um descasamento de metodologia entre
+`RE_Consulta02` (pedido) e `EN_NotasRepres` (documento/representante) que
+nunca foi reconciliado registro a registro para este read-model
+específico, ao contrário do que foi feito para o indicador fiscal em
+`VENDAS_DO_MES_RECONCILIACAO.md`. Nenhuma das duas hipóteses foi testada
+com dados de produção nesta revisão (sem acesso ao E01/Supabase de
+produção neste ambiente). Próximo passo seguro: repetir, com autorização
+explícita e acesso à produção, a mesma ponte documento-a-documento feita
+em `scripts/ponte-pedido-nota.mjs` (mas para `EN_NotasRepres`, não
+`EN_Notas`) contra `RE_Consulta02` ao vivo, no mesmo instante — nunca
+comparar leitura ao vivo com número de tela antigo.
 
 ## Fora de escopo (não tocado nesta PR)
 

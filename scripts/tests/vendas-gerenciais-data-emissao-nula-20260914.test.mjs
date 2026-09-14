@@ -74,7 +74,12 @@ function criarPoolFake({ notasRepres = [], falharLeitura = false, semDataEmissao
   return {
     async query(sql) {
       if (sql.includes('COUNT(*) AS quantidade')) {
-        return { rows: [{ quantidade: String(semDataEmissao.quantidade), valor_total: String(semDataEmissao.valorTotal) }] }
+        // `quantidadeValorNaoZero` é explícito quando o teste precisa simular
+        // valores individuais != 0 que se compensam na soma (ex.: estorno);
+        // por padrão, inferido a partir de valorTotal pra não exigir que
+        // todo teste existente passe esse campo à parte.
+        const qtdValorNaoZero = semDataEmissao.quantidadeValorNaoZero ?? (semDataEmissao.valorTotal !== 0 ? semDataEmissao.quantidade : 0)
+        return { rows: [{ quantidade: String(semDataEmissao.quantidade), valor_total: String(semDataEmissao.valorTotal), quantidade_valor_nao_zero: String(qtdValorNaoZero) }] }
       }
       if (sql.includes('EN_NotasRepres')) {
         if (falharLeitura) throw new Error('falha simulada de leitura da origem (E01 indisponível)')
@@ -177,6 +182,23 @@ test('linha com Representante em branco MAS DataEmissao válida é incluída nor
   assert.equal(restantes.length, 1)
   assert.equal(restantes[0].representante_codigo, '', 'representante_codigo vazio é persistido tal como veio da origem, nunca inventado')
   assert.equal(Number(restantes[0].valor_documento), 250.5)
+})
+
+test('REVISÃO ADVERSARIAL: linhas com DataEmissao NULL cujo valor individual é != 0 mas a SOMA neta é zero (ex.: estorno) ainda geram aviso — nunca mascaradas por um total líquido zero', async () => {
+  const logs = []
+  const poolE01 = criarPoolFake({
+    notasRepres: [linhaFonte({ numeroDocumento: 1, valor: 100 })],
+    // Duas linhas reais com DataEmissao NULL, +50 e -50 (estorno) — soma
+    // líquida exatamente zero, mas ambas têm valor individual != 0.
+    semDataEmissao: { quantidade: 2, valorTotal: 0, quantidadeValorNaoZero: 2 },
+  })
+  const r = await executarSincronizacaoVendasGerenciais({ dryRun: false, filial: FILIAL, desde: DESDE, ate: ATE, poolE01, log: (msg) => logs.push(msg) })
+
+  const avisoDataNula = r.avisos.find((a) => a.tipo === 'data_emissao_nula_nunca_sincronizavel')
+  assert.ok(avisoDataNula, 'soma líquida zero não deveria suprimir o aviso quando existem linhas com valor individual != 0')
+  assert.equal(avisoDataNula.quantidade, 2)
+  assert.equal(avisoDataNula.valor_total, 0)
+  assert.ok(logs.some((l) => l.includes('DataEmissao NULL')), 'deveria logar mesmo com valor total líquido zero')
 })
 
 test('filtro explícito de DataEmissao IS NOT NULL não muda o comportamento de leitura normal (regressão)', async () => {
