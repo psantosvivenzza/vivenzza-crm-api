@@ -27,6 +27,32 @@
  * combinação de 4 colunas (ver comentário na migration
  * 20260101000043_vendas_gerenciais_netvision.sql pro racional completo).
  * Upsert, nunca duplica. Varredura completa por padrão (não incremental).
+ *
+ * RECONCILIAÇÃO (achado real, 14/09/2026): até esta correção o job só
+ * criava/atualizava — nunca removia uma linha que sumiu da origem dentro do
+ * período já lido (cancelamento/estorno/correção no NetVision). O espelho
+ * só crescia, nunca encolhia, e o indicador GERENCIAL ficava
+ * permanentemente "vazado" com órfãos (divergência real observada: 24
+ * vendas/R$37.179,77 no NetVision x 26 vendas/R$50.476,67 no CRM, filial
+ * 001, mês corrente — exatamente 2 órfãos). A remoção abaixo:
+ *   - só considera candidato um `legacy_id` que existe no espelho DENTRO do
+ *     escopo exato filial+período já lido nesta execução e que NÃO veio na
+ *     leitura atual da origem (a origem manda, sempre);
+ *   - só roda depois que a leitura completa da origem terminou sem erro
+ *     (está dentro do mesmo `try`, após `pool.query` de EN_NotasRepres ter
+ *     retornado — se a query falhar, o `catch` já intercepta antes de
+ *     chegar aqui, e a exclusão nunca acontece);
+ *   - nunca dispara sobre leitura vazia da origem (`total_lido === 0`) —
+ *     tratado sempre como leitura suspeita, nunca como "zero vendas real",
+ *     mesma convenção fail-safe do resto do domínio fiscal/gerencial;
+ *   - tem um segundo freio de sanidade (percentual dos candidatos sobre o
+ *     total já espelhado no escopo) pra nunca apagar em massa por causa de
+ *     uma leitura parcial/truncada que "parecesse" bem-sucedida;
+ *   - o DELETE em si repete o filtro filial+período (defesa em profundidade
+ *     — mesmo que o cálculo em memória tivesse um bug, a query no Postgres
+ *     não alcança linha fora do escopo);
+ *   - é idempotente: depois de remover um órfão, a próxima execução não o
+ *     encontra mais no espelho, então não há efeito colateral repetido.
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
@@ -64,22 +90,46 @@ function montarVenda(row, mapaRepresentantes) {
   }
 }
 
+// Freios de sanidade da reconciliação — nunca aplicar remoção em massa só
+// porque o cálculo "parece" consistente. `MIN_ABS`: abaixo desse número de
+// candidatos, o percentual nem é avaliado (a divergência real que motivou
+// isto foi 2 candidatos — nunca queremos bloquear um caso desses por
+// percentual). `MAX_PCT`: acima do mínimo absoluto, se os candidatos forem
+// mais que essa fração do que já está espelhado no escopo, a reconciliação
+// inteira é bloqueada (nenhuma linha removida) e fica só registrada pra
+// revisão manual — sintoma típico de leitura parcial/truncada da origem
+// disfarçada de sucesso.
+function lerLimiarReconciliacao(nomeEnv, padrao) {
+  const valor = Number(process.env[nomeEnv])
+  return Number.isFinite(valor) && valor >= 0 ? valor : padrao
+}
+
 /**
- * `dryRun: true` (padrão) só reporta o que seria criado/atualizado, nenhuma
- * escrita — inclusive no log de sincronização, que só registra execuções
- * reais (dry_run nunca conta pro indicador de frescor em
+ * `dryRun: true` (padrão) só reporta o que seria criado/atualizado/removido,
+ * nenhuma escrita — inclusive no log de sincronização, que só registra
+ * execuções reais (dry_run nunca conta pro indicador de frescor em
  * vendaGerencialSyncStatus.js, mesma convenção do fiscal/financeiro).
  * Filtro obrigatório `filial` (default '001') e opcional `desde`/`ate`
  * (default: mês corrente) — varredura completa não faz sentido pra uma
  * tabela com anos de histórico (8.202+ linhas e crescendo); o dashboard só
  * precisa do mês corrente, então o sync varre só a janela relevante.
+ *
+ * `reconciliar: true` (padrão) liga a remoção de órfãos descrita no
+ * docstring do módulo — pode ser desligada por chamada (nunca via Task
+ * Scheduler, que sempre roda com o default) pra investigação pontual sem
+ * tocar o resto do sync.
  */
 export async function executarSincronizacaoVendasGerenciais({
   dryRun = true, filial = '001', desde = null, ate = null, poolE01 = null, log = console.log,
+  reconciliar = true,
 } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_lido: 0, total_criado: 0, total_atualizado: 0, total_com_erro: 0 }
+  const contadores = { total_lido: 0, total_criado: 0, total_atualizado: 0, total_removido: 0, total_com_erro: 0 }
   const erros = []
+  const avisos = []
+
+  const limiarMinAbsoluto = lerLimiarReconciliacao('VENDAS_GERENCIAIS_RECONCILIACAO_MIN_ABS', 5)
+  const limiarMaxPercentual = lerLimiarReconciliacao('VENDAS_GERENCIAIS_RECONCILIACAO_MAX_PCT', 0.5)
 
   const agora = new Date()
   const desdeReal = desde ?? new Date(agora.getFullYear(), agora.getMonth(), 1).toISOString().slice(0, 10)
@@ -120,9 +170,31 @@ export async function executarSincronizacaoVendasGerenciais({
       if (data.length < 1000) break
     }
 
+    // Espelho JÁ existente, mas só DENTRO do escopo exato filial+período
+    // desta execução — usado exclusivamente pra calcular candidatos a
+    // remoção (nunca pra decidir criar/atualizar, isso continua usando o
+    // mapa `existentes` acima, sem regressão de comportamento). Campos
+    // mínimos de propósito: o suficiente pra auditoria sanitizada
+    // (amostra_remover/logs), nunca dado pessoal de cliente (esta tabela não
+    // guarda nome/CPF de cliente — só documento comercial + código/nome de
+    // representante interno).
+    const existentesNoEscopo = new Map()
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase.from('vendas_gerenciais_netvision')
+        .select('legacy_id, valor_documento, data_emissao')
+        .eq('codigo_filial', filial)
+        .gte('data_emissao', desdeReal).lte('data_emissao', ateReal)
+        .range(offset, offset + 999)
+      if (error) throw error
+      for (const r of data) existentesNoEscopo.set(r.legacy_id, r)
+      if (data.length < 1000) break
+    }
+
     const paraCriar = [], paraAtualizar = []
+    const idsFonte = new Set()
     for (const row of rows) {
       const venda = montarVenda(row, mapaRepresentantes)
+      idsFonte.add(venda.legacy_id)
       const atual = existentes.get(venda.legacy_id)
       if (!atual) { paraCriar.push(venda); continue }
       if (Number(atual.valor_documento) !== venda.valor_documento || atual.pagamento_a_vista !== venda.pagamento_a_vista) {
@@ -130,10 +202,43 @@ export async function executarSincronizacaoVendasGerenciais({
       }
     }
 
+    // Órfãos: legacy_id que está espelhado dentro do escopo lido mas não
+    // veio na leitura atual da origem — a origem manda, então sumiu de lá
+    // (cancelamento/estorno/correção). Ver docstring do módulo.
+    const paraRemover = [...existentesNoEscopo.keys()].filter((id) => !idsFonte.has(id))
+
+    // Guardas de segurança da reconciliação — nunca remover em leitura
+    // suspeita, mesmo com reconciliar=true. Ver comentário de
+    // lerLimiarReconciliacao acima pro racional dos limiares.
+    let motivoBloqueioReconciliacao = null
+    if (!reconciliar) {
+      motivoBloqueioReconciliacao = 'desligada_por_parametro'
+    } else if (contadores.total_lido === 0) {
+      // Leitura vazia da origem pro período nunca é motivo pra apagar o que
+      // já está espelhado — tratada sempre como leitura suspeita, mesma
+      // convenção fail-safe do resto do domínio (nunca "zero vendas real").
+      motivoBloqueioReconciliacao = 'leitura_origem_vazia'
+    } else if (paraRemover.length > limiarMinAbsoluto && existentesNoEscopo.size > 0) {
+      const percentualRemocao = paraRemover.length / existentesNoEscopo.size
+      if (percentualRemocao > limiarMaxPercentual) motivoBloqueioReconciliacao = 'percentual_remocao_suspeito'
+    }
+    const reconciliacaoAplicada = paraRemover.length > 0 && !motivoBloqueioReconciliacao
+    if (motivoBloqueioReconciliacao && paraRemover.length > 0) {
+      avisos.push({ tipo: 'reconciliacao_bloqueada', motivo: motivoBloqueioReconciliacao, candidatos: paraRemover.length, escopo_total: existentesNoEscopo.size })
+      log(`[sync-vendas-gerenciais-legado] reconciliação bloqueada (${motivoBloqueioReconciliacao}) — ${paraRemover.length} candidato(s) a remoção NÃO removidos, revisão manual necessária`)
+    }
+
     if (dryRun) {
       contadores.total_criado = paraCriar.length
       contadores.total_atualizado = paraAtualizar.length
-      return { ...contadores, dry_run: true, periodo: { desde: desdeReal, ate: ateReal }, amostra_criar: paraCriar.slice(0, 10), amostra_atualizar: paraAtualizar.slice(0, 10) }
+      contadores.total_removido = reconciliacaoAplicada ? paraRemover.length : 0
+      return {
+        ...contadores, dry_run: true, periodo: { desde: desdeReal, ate: ateReal },
+        amostra_criar: paraCriar.slice(0, 10), amostra_atualizar: paraAtualizar.slice(0, 10),
+        amostra_remover: paraRemover.slice(0, 10).map((id) => ({ legacy_id: id, valor_documento: existentesNoEscopo.get(id)?.valor_documento ?? null, data_emissao: existentesNoEscopo.get(id)?.data_emissao ?? null })),
+        reconciliacao: { aplicada: reconciliacaoAplicada, motivo_bloqueio: motivoBloqueioReconciliacao, candidatos: paraRemover.length, escopo_total: existentesNoEscopo.size },
+        avisos,
+      }
     }
 
     for (let i = 0; i < paraCriar.length; i += 500) {
@@ -148,6 +253,25 @@ export async function executarSincronizacaoVendasGerenciais({
       else contadores.total_atualizado++
     }
 
+    // Remoção de órfãos — só se a reconciliação passou nos dois freios acima
+    // (reconciliar=true, leitura não-vazia, percentual dentro do limiar). O
+    // filtro filial+período é repetido aqui no próprio DELETE como defesa em
+    // profundidade: mesmo que `paraRemover` tivesse um bug de cálculo, a
+    // query no Postgres não alcança linha fora do escopo desta execução.
+    if (reconciliacaoAplicada) {
+      for (let i = 0; i < paraRemover.length; i += 500) {
+        const lote = paraRemover.slice(i, i + 500)
+        const { data, error } = await supabase.from('vendas_gerenciais_netvision')
+          .delete()
+          .eq('codigo_filial', filial)
+          .gte('data_emissao', desdeReal).lte('data_emissao', ateReal)
+          .in('legacy_id', lote)
+          .select('legacy_id')
+        if (error) { contadores.total_com_erro += lote.length; erros.push({ mensagem: error.message, primeiro: lote[0] }); log(`[sync-vendas-gerenciais-legado] erro remover lote (primeiro ${lote[0]}): ${error.message}`) }
+        else contadores.total_removido += data?.length ?? lote.length
+      }
+    }
+
     if (syncLogId) {
       await supabase.from('sincronizacoes_vendas_gerenciais').update({
         status: contadores.total_com_erro > 0 ? 'concluido_com_erros' : 'concluido',
@@ -156,10 +280,16 @@ export async function executarSincronizacaoVendasGerenciais({
         total_criado: contadores.total_criado,
         total_atualizado: contadores.total_atualizado,
         total_com_erro: contadores.total_com_erro,
+        total_removido: contadores.total_removido,
+        reconciliacao_candidatos: paraRemover.length,
+        reconciliacao_motivo_bloqueio: motivoBloqueioReconciliacao,
       }).eq('id', syncLogId)
     }
 
-    return { ...contadores, dry_run: false, periodo: { desde: desdeReal, ate: ateReal }, erros }
+    return {
+      ...contadores, dry_run: false, periodo: { desde: desdeReal, ate: ateReal }, erros, avisos,
+      reconciliacao: { aplicada: reconciliacaoAplicada, motivo_bloqueio: motivoBloqueioReconciliacao, candidatos: paraRemover.length, escopo_total: existentesNoEscopo.size },
+    }
   } catch (err) {
     if (syncLogId) {
       await supabase.from('sincronizacoes_vendas_gerenciais').update({

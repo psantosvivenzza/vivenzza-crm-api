@@ -279,6 +279,15 @@ router.get('/', async (req, res) => {
     // existem". Mesmo padrão fail-closed de disponibilidade do bloco
     // fiscal — nunca confunde "nunca sincronizou"/"desatualizado" com "zero
     // vendas real".
+    //
+    // Revisão 14/09/2026 (divergência real com o relatório oficial): este
+    // bloco em si nunca misturou fonte com pedidos_mes/vendas_fiscais_mes —
+    // a divergência era o espelho vendas_gerenciais_netvision acumulando
+    // órfãos (linhas que sumiram da origem e nunca eram removidas). Corrigido
+    // na reconciliação do sync (ver fiscal-e-vendas.md), não aqui — este
+    // SELECT já era simplesmente "soma o que está no espelho pro
+    // filial+período", que passa a bater com a origem assim que o espelho
+    // reconcilia.
     safe(
       verificarStatusSyncGerencial().then((statusSync) => {
         if (!statusSync.disponivel) {
