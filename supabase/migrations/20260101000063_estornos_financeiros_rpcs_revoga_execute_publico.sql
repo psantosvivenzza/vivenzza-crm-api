@@ -15,7 +15,7 @@
 -- completo — mesma classe de achado da PR #77.
 --
 -- Não mexe no corpo funcional de nenhuma das 4 functions (migrations
--- 000058-000061) — só ajusta GRANT/REVOKE. service_role mantém EXECUTE (é o
+-- 000059-000062) — só ajusta GRANT/REVOKE. service_role mantém EXECUTE (é o
 -- papel real usado por src/lib/supabase-admin.server.js via
 -- SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY). postgres (owner/superuser)
 -- não é tocado — revogar dele não teria efeito (superuser ignora ACL).
@@ -47,7 +47,7 @@ END $$;
 
 -- As 4 functions são SECURITY INVOKER — EXECUTE na function sozinho não
 -- basta, o papel chamador também precisa de privilégio direto nas tabelas
--- que o corpo toca (ver 000058-000061: SELECT/INSERT/UPDATE em
+-- que o corpo toca (ver 000059-000062: SELECT/INSERT/UPDATE em
 -- baixas_financeiras e estornos_financeiros, SELECT/UPDATE em
 -- contas_financeiras). Em qualquer projeto Supabase real, service_role JÁ
 -- TEM esse acesso — bootstrap do próprio Supabase, independente de migration

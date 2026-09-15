@@ -1,4 +1,4 @@
--- GAP DE VERSIONAMENTO — mesma situação de 20260101000058_fn_baixar_titulo.sql
+-- GAP DE VERSIONAMENTO — mesma situação de 20260101000059_fn_baixar_titulo.sql
 -- (ver esse arquivo para o contexto completo). Corpo abaixo é o mesmo texto de
 -- migrations/fn_rejeitar_estorno.sql, nenhuma linha de lógica alterada.
 

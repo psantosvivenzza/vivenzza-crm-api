@@ -15,10 +15,10 @@
 // scripts/localdb-reset.mjs.
 //
 // ATUALIZAÇÃO 2026-09-12: gap fechado — os mesmos 5 objetos (verbatim, mesma
-// lógica) agora são supabase/migrations/20260101000057 a 000061, aplicadas
+// lógica) agora são supabase/migrations/20260101000058 a 000062, aplicadas
 // automaticamente por `npm run db:local:reset` como qualquer outra migration
 // real, em qualquer cluster (não precisa mais de psql manual nem de porta
-// fixa). 20260101000062 revoga EXECUTE de PUBLIC/anon/authenticated nas 4
+// fixa). 20260101000063 revoga EXECUTE de PUBLIC/anon/authenticated nas 4
 // RPCs (mesmo achado de segurança da PR #77 pra fn_sincronizar_baixa_legado)
 // — ver cobertura dedicada em estornos-financeiros-grants.test.mjs.
 import { test, before, after } from 'node:test'
@@ -48,7 +48,17 @@ before(async () => {
   idAdmin = await criarUsuarioDeTeste('admin', 'admin')
   idFinanceiro = await criarUsuarioDeTeste('financeiro', 'financeiro')
   idVendedorA = await criarUsuarioDeTeste('vendedor', 'vendedor-a')
-  idTerceiroPapel = await criarUsuarioDeTeste('gerente', 'terceiro-papel') // papel desconhecido/não suportado
+  // ACHADO REAL (2026-09-09): usuarios_role_check em produção só aceita
+  // admin/vendedor/financeiro — reproduzido fielmente no baseline local
+  // desde então (ver scripts/localdb/schema-baseline/001_core.sql). Um
+  // INSERT direto com role='gerente' agora FALHA de verdade (antes,
+  // "funcionava" só porque o baseline local não tinha a constraint real).
+  // O papel "desconhecido" testado aqui é sobre o CLAIM do token — é só
+  // isso que auth() lê (nunca reconsulta o banco) — não sobre a linha em
+  // si, que só existe como âncora de FK. Por isso reaproveita o id de um
+  // usuário JÁ válido (idVendedorA), exatamente como tokenSemRole já
+  // reaproveita idAdmin logo abaixo.
+  idTerceiroPapel = idVendedorA
 
   tokenAdmin = jwt.sign({ id: idAdmin, email: 'admin@teste.com', role: 'admin' }, process.env.JWT_SECRET)
   tokenFinanceiro = jwt.sign({ id: idFinanceiro, email: 'financeiro@teste.com', role: 'financeiro' }, process.env.JWT_SECRET)

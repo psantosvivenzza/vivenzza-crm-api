@@ -5,7 +5,7 @@
 // fn_sincronizar_baixa_legado: Supabase concede EXECUTE em toda function nova
 // de public a PUBLIC por padrão, e PostgREST expõe isso pra anon/authenticated
 // salvo REVOKE explícito. Corrigido em
-// 20260101000062_estornos_financeiros_rpcs_revoga_execute_publico.sql.
+// 20260101000063_estornos_financeiros_rpcs_revoga_execute_publico.sql.
 //
 // O client admin local (pgCompatClient, via src/lib/supabase-admin.server.js)
 // sempre conecta como PG_USER=postgres (superuser) — superuser ignora ACL,

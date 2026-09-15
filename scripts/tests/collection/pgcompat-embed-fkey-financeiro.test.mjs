@@ -10,8 +10,8 @@
 // Depende dos mesmos 5 objetos (estornos_financeiros, fn_baixar_titulo,
 // fn_estornar_baixa, fn_aprovar_estorno, fn_rejeitar_estorno) citados em
 // financeiro-controle-acesso.test.mjs. ATUALIZAÇÃO 2026-09-12: gap de
-// versionamento fechado — agora são supabase/migrations/20260101000057 a
-// 000061, aplicadas automaticamente por `npm run db:local:reset` (não
+// versionamento fechado — agora são supabase/migrations/20260101000058 a
+// 000062, aplicadas automaticamente por `npm run db:local:reset` (não
 // precisa mais de aplicação manual/cluster avulso).
 //
 // Com isso, a limitação documentada em financeiro-controle-acesso.test.mjs

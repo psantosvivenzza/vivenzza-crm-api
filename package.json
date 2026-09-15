@@ -11,6 +11,7 @@
     "db:local:stop": "node scripts/localdb-stop.mjs",
     "db:local:reset": "node scripts/localdb-reset.mjs",
     "test:collection": "node scripts/run-collection-tests.mjs",
+    "test:ponto": "node scripts/run-ponto-tests.mjs",
     "test:meta-budget-guard": "node scripts/teste-meta-budget-guard.mjs",
     "ai:worker": "node scripts/ai-worker.mjs",
     "voice:service": "node scripts/voice/run-voice-service.mjs",
@@ -32,7 +33,9 @@
     "ponte:pedido-nota": "node scripts/ponte-pedido-nota.mjs",
     "snapshot:vendas": "node scripts/snapshot-vendas.mjs",
     "sync:vendas-fiscais:legado:dry-run": "node scripts/sync-vendas-fiscais-legado.mjs --dry-run",
-    "sync:vendas-fiscais:legado": "node scripts/sync-vendas-fiscais-legado.mjs"
+    "sync:vendas-fiscais:legado": "node scripts/sync-vendas-fiscais-legado.mjs",
+    "sync:vendas-gerenciais:legado:dry-run": "node scripts/sync-vendas-gerenciais-legado.mjs --dry-run",
+    "sync:vendas-gerenciais:legado": "node scripts/sync-vendas-gerenciais-legado.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
