@@ -1,6 +1,6 @@
 // Cobertura local de fn_sincronizar_baixa_legado (versionada em
-// supabase/migrations/20260101000054_contas_financeiras_colunas_revisao_conflito.sql
-// + 20260101000055_fn_sincronizar_baixa_legado.sql — corpo capturado fielmente
+// supabase/migrations/20260101000055_contas_financeiras_colunas_revisao_conflito.sql
+// + 20260101000056_fn_sincronizar_baixa_legado.sql — corpo capturado fielmente
 // de produção via pg_get_functiondef/pg_proc, 2026-09-11, leitura read-only,
 // nada alterado em produção nessa consulta). A função nunca tinha migration
 // nem teste dedicado (ver docs/claude-context/tarefas-pendentes.md, seção

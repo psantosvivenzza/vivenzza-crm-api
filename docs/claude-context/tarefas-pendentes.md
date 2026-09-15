@@ -41,8 +41,8 @@
 - [x] `fn_sincronizar_baixa_legado` versionada em 2026-09-11 — corpo real
       capturado de produção via `pg_get_functiondef`/`pg_proc` (consulta
       read-only, nada alterado em produção), commitado fielmente em
-      `supabase/migrations/20260101000055_fn_sincronizar_baixa_legado.sql`
-      (depende de `20260101000054_contas_financeiras_colunas_revisao_conflito.sql`,
+      `supabase/migrations/20260101000056_fn_sincronizar_baixa_legado.sql`
+      (depende de `20260101000055_contas_financeiras_colunas_revisao_conflito.sql`,
       que versiona 5 colunas de `contas_financeiras` — `motivo_revisao`,
       `em_revisao_desde`, `conflito_baixa_legado`, `sincronizado_legado_em`,
       `em_revisao_financeira` — que também nunca tiveram migration, mesmo
@@ -55,14 +55,14 @@
       `em_revisao_desde` timestamptz, `conflito_baixa_legado` boolean,
       `sincronizado_legado_em` timestamptz — consulta read-only real contra
       `information_schema.columns` de produção bateu exatamente com a
-      inferência original (ver comentário na migration 000054).
+      inferência original (ver comentário na migration 000055).
       **GRANTs corrigidos (2026-09-11):** confirmado via painel do Supabase
       que a function tinha `EXECUTE` concedido a `PUBLIC`, `anon`,
       `authenticated`, `postgres` e `service_role` — qualquer JWT válido (ou
       sem login, via chave anon) podia chamá-la direto via PostgREST,
       contornando o gate adminOuFinanceiro de `src/routes/financeiro.js`/
       `auth.js`. Corrigido SÓ localmente (nada aplicado em produção) em
-      `supabase/migrations/20260101000056_fn_sincronizar_baixa_legado_revoga_execute_publico.sql`:
+      `supabase/migrations/20260101000057_fn_sincronizar_baixa_legado_revoga_execute_publico.sql`:
       revoga de `PUBLIC`/`anon`/`authenticated`, mantém só `service_role`
       (o papel real usado por `supabase-admin.server.js`); `postgres`
       (owner/superuser) não foi tocado. Função é `SECURITY INVOKER` — além
@@ -85,18 +85,28 @@
       `contas_financeiras.em_revisao_financeira`, coluna que só tinha
       migration na PR #79 (`20260101000063`). Reproduzido empiricamente
       (Postgres exclusivo, porta fora de 5432/5433, banco fora de
-      vivenzza_dev): aplicar só 054-056 desta PR contra uma base sem o drift
-      de produção faz a function ser criada sem erro (PL/pgSQL não valida
-      coluna referenciada em SQL embutido na criação), mas a primeira
+      vivenzza_dev): aplicar só as migrations desta PR contra uma base sem o
+      drift de produção faz a function ser criada sem erro (PL/pgSQL não
+      valida coluna referenciada em SQL embutido na criação), mas a primeira
       chamada real falha em runtime (`record "v_conta" has no field
       "em_revisao_financeira"`) — ou seja, mergear #77 sem #79 (ou nessa
       ordem) quebraria o sync legado em qualquer ambiente novo sem o drift.
-      Corrigido adicionando a coluna também em `20260101000054` (mesmo
-      tipo/default da 000063: `boolean NOT NULL DEFAULT false`,
-      `ADD COLUMN IF NOT EXISTS` — no-op seguro se a 000063 da PR #79 já
-      tiver rodado, em qualquer ordem de merge). Suíte completa
+      Corrigido adicionando a coluna também na migration que cria as colunas
+      de revisão/conflito (mesmo tipo/default da 000063: `boolean NOT NULL
+      DEFAULT false`, `ADD COLUMN IF NOT EXISTS` — no-op seguro se a 000063
+      da PR #79 já tiver rodado, em qualquer ordem de merge). Suíte completa
       (`npm run test:collection`, 69 arquivos/801 casos) revalidada sem
       regressão após a correção.
+      **Renumerado (revisão de fechamento, 2026-09-15):** as 3 migrations
+      desta PR usavam originalmente `20260101000054-056`; a PR #101 (vendas
+      gerenciais, mergeada em `origin/main` em 2026-09-14) já ocupou
+      `20260101000054` com um arquivo diferente (tabela
+      `sincronizacoes_vendas_gerenciais`, sem overlap semântico — só colisão
+      de número de sequência, achado ao reconstruir o estado atual da PR
+      contra `origin/main` antes do merge). Renumerado para
+      `20260101000055-057` (ver caminhos atualizados acima) antes do merge;
+      nenhuma mudança de conteúdo/lógica/grants nesta renumeração — suíte
+      revalidada de novo após renomear.
 - [ ] Os 15 ajustes reais listados em `PREVIEW_RESOLUCAO_125_CONFLITOS.md`
       (seção AUTO_RESOLVABLE_DETERMINISTIC, ex.: Francisco Freitas Oliveira,
       FABIANO KAMPFF LEITE, THAINA RODRIGUES) continuam **não aplicados** —

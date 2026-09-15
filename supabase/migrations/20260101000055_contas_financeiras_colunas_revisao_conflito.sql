@@ -8,7 +8,7 @@
 -- existem no schema live de produção. ADD COLUMN IF NOT EXISTS é no-op lá;
 -- só passa a existir em ambientes novos (local/CI), que precisam delas pra
 -- rodar fn_sincronizar_baixa_legado (ver
--- 20260101000055_fn_sincronizar_baixa_legado.sql) de ponta a ponta nos
+-- 20260101000056_fn_sincronizar_baixa_legado.sql) de ponta a ponta nos
 -- testes. sincronizado_legado_em em particular já é lida por scripts reais
 -- (scripts/analise-duplicados-financeiro.mjs,
 -- scripts/preview-duplicados-financeiro.mjs) e escrita também na criação de
@@ -26,13 +26,20 @@
 --
 -- ACHADO (revisão independente, 2026-09-12, ao integrar esta PR com #79/#80
 -- pra checagem cruzada de dependências de migration): fn_sincronizar_baixa_legado
--- (20260101000055) também lê e escreve contas_financeiras.em_revisao_financeira
+-- (20260101000056) também lê e escreve contas_financeiras.em_revisao_financeira
 -- (linhas "em_revisao_financeira = false" no branch de cancelamento e
 -- "v_revisao_resolvida := (v_conta.em_revisao_financeira AND v_status = 'paga')"
 -- no fluxo principal) — mas essa coluna só tinha migration própria na PR #79
 -- (20260101000063_contas_financeiras_em_revisao_financeira.sql), não aqui.
--- Reproduzido: aplicar só as migrations desta PR (054-056) contra uma base
--- sem o drift de produção faz `CREATE OR REPLACE FUNCTION` em 000055 passar
+--
+-- RENUMERADO (revisão de fechamento, 2026-09-15): esta PR usava originalmente
+-- 20260101000054-056, mas a PR #101 (vendas gerenciais, mergeada em
+-- 2026-09-14) já ocupou 20260101000054 em origin/main com um arquivo
+-- diferente (tabela sincronizacoes_vendas_gerenciais, sem overlap semântico —
+-- só colisão de número de sequência). Renumerado para 055-057 antes do
+-- merge; nenhuma mudança de conteúdo/lógica/grants nesta renumeração.
+-- Reproduzido: aplicar só as migrations desta PR (055-057) contra uma base
+-- sem o drift de produção faz `CREATE OR REPLACE FUNCTION` em 000056 passar
 -- silenciosamente (PL/pgSQL não valida coluna referenciada em SQL embutido no
 -- momento da criação da function), mas a PRIMEIRA chamada real de
 -- fn_sincronizar_baixa_legado falha em runtime com `record "v_conta" has no

@@ -5,7 +5,7 @@
 // anon, authenticated, postgres e service_role — qualquer JWT válido (ou
 // até sem login, com a chave anon) podia chamá-la direto via PostgREST,
 // contornando o gate adminOuFinanceiro do Express. Corrigido em
-// 20260101000056_fn_sincronizar_baixa_legado_revoga_execute_publico.sql.
+// 20260101000057_fn_sincronizar_baixa_legado_revoga_execute_publico.sql.
 //
 // O client admin local (pgCompatClient, via src/lib/supabase-admin.server.js)
 // sempre conecta como PG_USER=postgres (superuser) — superuser ignora ACL,

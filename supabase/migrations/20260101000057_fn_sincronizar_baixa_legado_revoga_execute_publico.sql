@@ -9,7 +9,7 @@
 -- PostgREST por padrão, salvo REVOKE explícito — nunca foi revogado aqui.
 --
 -- Esta migration NÃO toca o corpo funcional da function (ver
--- 20260101000055_fn_sincronizar_baixa_legado.sql, cópia fiel de produção) —
+-- 20260101000056_fn_sincronizar_baixa_legado.sql, cópia fiel de produção) —
 -- só ajusta privilégios. Escopo pedido: revogar de PUBLIC/anon/authenticated,
 -- conceder só a service_role (o papel que src/lib/supabase-admin.server.js
 -- usa via SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY — é exatamente como
