@@ -1,13 +1,32 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import rateLimit from 'express-rate-limit'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { auth } from '../middleware/auth.js'
 
 const router = Router()
 
+// Login é a única rota pública deste router (diferente de /api/public/leads
+// e /api/public/alerta-whatsapp, em src/index.js, que já tinham rate limit
+// próprio desde a criação) sem NENHUM limite de taxa — achado da auditoria
+// adversarial de rate limiting/abuso de 2026-09-12 (auditoria do piloto
+// "Meu Ponto", que depende deste endpoint pra emitir o JWT usado em toda
+// rota autenticada do módulo). Sem isso, dava pra tentar senha de qualquer
+// conta do sistema (inclusive gestor/admin) sem qualquer contenção. Mesmo
+// desenho de publicLeadsLimit/publicAlertLimit (chave padrão por IP do
+// próprio express-rate-limit — rota sem autenticação, não há req.user.id
+// pra preferir).
+const limiteLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Muitas tentativas de login em pouco tempo. Aguarde alguns minutos.' },
+})
+
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', limiteLogin, async (req, res) => {
   try {
     const { email, senha } = req.body
     if (!email || !senha) {
