@@ -144,6 +144,39 @@
       produção real ainda pendente para o conjunto completo (`000055` da PR
       #77 + `000058-000063` desta PR) — ver
       `docs/claude-context/verificacao-producao-estornos-baixar-titulo.md`.
+- [x] `fn_criar_nota_entrada` (chamada por `POST /api/notas-entrada`) e as
+      tabelas `notas_entrada`/`notas_entrada_itens` nunca tiveram nenhum SQL
+      versionado neste repositório (nem mesmo em `migrations/` solta).
+      `estoque`/`movimentacoes_estoque`/`atualizar_saldo_estoque()` tinham o
+      mesmo problema de `migrations/` solta, mais um drift confirmado
+      (produção real tem `SET search_path` no trigger function, a versão
+      solta não). Versionado na PR #80 em `supabase/migrations/20260101000064`
+      (estoque/movimentacoes_estoque, drift corrigido) e `000065`
+      (notas_entrada/notas_entrada_itens/fn_criar_nota_entrada, verbatim) +
+      hardening de GRANT em `000066` (mesmo achado de EXECUTE exposto a
+      PUBLIC/anon/authenticated) + novos testes
+      `notas-entrada-fn-criar-grants.test.mjs`, `notas-entrada-fluxo.test.mjs`,
+      `relatorios-dre.test.mjs`. `produtos`/`nfe`/`nfe_itens` seguem sem
+      migration própria (pré-existentes, nunca versionadas neste
+      repositório — mesma situação de `usuarios`/`contas_financeiras`); só
+      ganharam baseline de teste em
+      `scripts/localdb/schema-baseline/007_notas_entrada_dre.sql`. Riscos de
+      negócio não corrigidos (conta a pagar de Nota de Entrada some do DRE,
+      `produtos.estoque` dessincronizada, custo do DRE recalculado
+      retroativamente, sem idempotência, sem cancelamento/reversão)
+      documentados em `docs/financeiro/decisoes-e-riscos-notas-entrada-dre.md`.
+      **Revisão de fechamento (2026-09-15):** numeração `000064-000066` já
+      nasceu correta (sem colisão com `000058-000063` da PR #79); único
+      conflito de merge com `origin/main` foi neste próprio arquivo
+      (documentação, resolvido por concatenação). Colunas de
+      `notas_entrada`/`notas_entrada_itens`/`estoque`/`movimentacoes_estoque`/
+      `produtos` confirmadas via leitura read-only real de produção (Supabase
+      REST, `service_role`, só `SELECT`, nenhuma escrita) — batem
+      exatamente com as migrations. Corpo de função/trigger e GRANT reais
+      **não puderam ser confirmados nesta sessão** (sem acesso Postgres
+      direto a produção, só REST) — verificação formal via SQL Editor
+      (`docs/financeiro/verificacao-producao-notas-entrada-dre.md`) continua
+      pendente antes de aplicar `000064-000066` no Supabase real.
 
 ## Concluído (não refazer)
 
