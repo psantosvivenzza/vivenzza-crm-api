@@ -113,21 +113,37 @@
       versionar a RPC não é autorização pra rodá-la contra títulos reais.
       Precisa de decisão explícita antes de aplicar via
       `decidirAtualizacao()`/`fn_sincronizar_baixa_legado` em produção.
-- [ ] `fn_baixar_titulo`, `fn_estornar_baixa`, `fn_aprovar_estorno`,
-      `fn_rejeitar_estorno` e a tabela `estornos_financeiros` têm o MESMO
-      problema (achado ao investigar esta tarefa, 2026-09-11): não têm
-      migration em `supabase/migrations/`, só existem manualmente aplicadas
-      num cluster Postgres local separado (`.localdev/pgdata_financeiro_20260908`,
-      fora deste repositório versionado — ver comentário em
-      `scripts/tests/collection/pgcompat-embed-fkey-financeiro.test.mjs`).
-      `npm run db:local:reset` no cluster padrão NÃO recria essas 4
-      functions/tabela — os testes que dependem delas
-      (`financeiro-controle-acesso.test.mjs`,
-      `pgcompat-embed-fkey-financeiro.test.mjs`) só passam contra aquele
-      cluster exclusivo, não contra um `db:local:reset` do zero. Mesmo
-      tratamento que `fn_sincronizar_baixa_legado` recebeu aqui: versionar a
-      partir da definição real via `pg_get_functiondef`/`pg_proc` antes de
-      mexer no fluxo de baixa manual/estorno.
+- [x] `fn_baixar_titulo`, `fn_estornar_baixa`, `fn_aprovar_estorno`,
+      `fn_rejeitar_estorno` e `estornos_financeiros` tinham o mesmo problema
+      (só existiam em `migrations/` — pasta solta, fora do pipeline real de
+      `scripts/localdb-reset.mjs` — nunca em `supabase/migrations/`; gap
+      citado explicitamente como não tratado na PR #77 e coberto só por
+      aplicação manual/cluster avulso em `financeiro-controle-acesso.test.mjs`/
+      `pgcompat-embed-fkey-financeiro.test.mjs`). Versionado na PR #79 em
+      `supabase/migrations/20260101000058` a `000063` (mesmo texto de
+      `migrations/*.sql`, verbatim, só com guards de idempotência) +
+      hardening de GRANT (achado análogo ao da PR #77: EXECUTE exposto a
+      PUBLIC/anon/authenticated por padrão do Supabase/PostgREST) + novo
+      `estornos-financeiros-grants.test.mjs`. Revisão independente (2026-09-12)
+      achou gap correlato — mesmo padrão da PR #77/`20260101000055`:
+      `fn_estornar_baixa`/`fn_aprovar_estorno` leem/escrevem
+      `contas_financeiras.em_revisao_financeira`, coluna sem migration
+      commitada até então.
+      **Renumerado e consolidado (revisão de fechamento, 2026-09-15):** a
+      PR #79 usava originalmente `20260101000057-000063`; a PR #77 (mergeada
+      em `origin/main` em 2026-09-15) já ocupou `20260101000057` com um
+      arquivo diferente (`fn_sincronizar_baixa_legado_revoga_execute_publico.sql`,
+      sem overlap semântico — só colisão de número de sequência). Renumerado
+      para `20260101000058-000063`. A migration
+      `20260101000063_contas_financeiras_em_revisao_financeira.sql` desta PR
+      foi removida por redundância: a PR #77 já fecha essa mesma dependência
+      em `20260101000055_contas_financeiras_colunas_revisao_conflito.sql`
+      (mesma coluna, mesmo tipo/default), então a numeração final desta PR é
+      6 arquivos (`000058-000063`), não 7. Nenhuma mudança de
+      conteúdo/lógica/grants nas 6 migrations restantes. Verificação contra
+      produção real ainda pendente para o conjunto completo (`000055` da PR
+      #77 + `000058-000063` desta PR) — ver
+      `docs/claude-context/verificacao-producao-estornos-baixar-titulo.md`.
 
 ## Concluído (não refazer)
 
