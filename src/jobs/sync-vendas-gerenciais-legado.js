@@ -53,6 +53,44 @@
  *     não alcança linha fora do escopo);
  *   - é idempotente: depois de remover um órfão, a próxima execução não o
  *     encontra mais no espelho, então não há efeito colateral repetido.
+ *
+ * DATA_EMISSAO NULA (auditoria 14/09/2026, hipótese "SEM REPRESENTANTE"
+ * investigada e NÃO confirmada como causa de divergência monetária ativa):
+ * a hipótese original era que linhas SEM REPRESENTANTE seriam excluídas por
+ * tratamento implícito de NULL em "DataEmissao". Confirmado por consulta
+ * read-only e sanitizada à origem (filial 001): (a) NÃO existe, hoje, nenhuma
+ * linha com `Representante` em branco em EN_NotasRepres — o campo é NOT NULL
+ * e sempre populado com um código válido presente em EN_Representantes;
+ * (b) EN_NotasRepres e EN_RepresMensal (tabela pré-agregada mensal,
+ * independente) concordam exatamente — R$36.931,67/24 documentos, filial 001,
+ * setembro/2026 — zero divergência, zero linha "sem representante" em
+ * nenhuma das duas fontes; (c) EXISTEM 224 linhas históricas (filial 001,
+ * 2019–2020, `ValorDocumento = 0,00`) com `DataEmissao IS NULL` — mas nenhuma
+ * tem valor monetário, então não explicam divergência nenhuma hoje.
+ *
+ * Apesar de a hipótese específica não se confirmar, o padrão de código em si
+ * é um defeito latente real: `"DataEmissao" >= $2 AND "DataEmissao" <= $3`
+ * exclui qualquer linha com `DataEmissao IS NULL` por lógica trivalorada do
+ * SQL (NULL nunca satisfaz uma comparação `>=`/`<=`), SEM NENHUM log ou
+ * sinal — se o NetVision um dia emitir um documento REAL (valor != 0) sem
+ * `DataEmissao`, ele desapareceria de "Vendas do Mês" pra sempre, em
+ * silêncio (já aconteceu 224 vezes no passado, sempre com valor zero, mas
+ * nada impede que aconteça de novo com valor real). A correção abaixo:
+ *   - torna o filtro de `DataEmissao IS NOT NULL` EXPLÍCITO na query (mesmo
+ *     comportamento de hoje, mas autodocumentado, não mais implícito);
+ *   - adiciona uma checagem read-only companion (mesmo pool, mesma
+ *     transação lógica) que conta/soma linhas com `DataEmissao IS NULL` no
+ *     escopo da filial — sem filtro de período, porque essas linhas nunca
+ *     têm um período válido por definição — e gera um aviso sanitizado
+ *     (quantidade + valor total + amostra doc/série, nunca nome/código de
+ *     representante) sempre que existir alguma com valor != 0;
+ *   - NUNCA fabrica uma data pra essas linhas nem as inclui no espelho —
+ *     fazer isso seria inventar dado que a origem não fornece. O objetivo é
+ *     só visibilidade (log claro) pra decisão manual, nunca inclusão forçada;
+ *   - linhas com `Representante` em branco MAS `DataEmissao` válida (não
+ *     observadas na produção atual, mas permitidas pelo schema) já eram e
+ *     continuam sendo incluídas normalmente — nenhuma lógica de
+ *     representante jamais excluiu uma linha aqui, testado explicitamente.
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
@@ -152,10 +190,49 @@ export async function executarSincronizacaoVendasGerenciais({
               "PagamentoAVista","CondicaoPagamento","NumeroTitulo","NroRegistro","Emitente","CodigoPDV",
               "StatusRepresentante"
        FROM "EN_NotasRepres"
-       WHERE "CodigoFilial" = $1 AND "DataEmissao" >= $2 AND "DataEmissao" <= $3`,
+       WHERE "CodigoFilial" = $1 AND "DataEmissao" >= $2 AND "DataEmissao" <= $3 AND "DataEmissao" IS NOT NULL`,
       [filial, desdeReal, ateReal]
     )
     contadores.total_lido = rows.length
+
+    // Checagem companion read-only (ver docstring do módulo, seção "DATA_EMISSAO
+    // NULA"): `DataEmissao IS NULL` nunca satisfaz o filtro de período acima —
+    // essas linhas não têm data válida, então NENHUMA janela as alcançaria,
+    // não só a desta execução. Sem filtro de período de propósito. Isso é só
+    // visibilidade (nunca inclusão forçada — jamais fabricamos uma data pra
+    // uma linha que a origem não forneceu).
+    const { rows: semDataEmissao } = await pool.query(
+      `SELECT COUNT(*) AS quantidade, COALESCE(SUM("ValorDocumento"), 0) AS valor_total,
+              COUNT(*) FILTER (WHERE "ValorDocumento" <> 0) AS quantidade_valor_nao_zero
+       FROM "EN_NotasRepres"
+       WHERE "CodigoFilial" = $1 AND "DataEmissao" IS NULL`,
+      [filial]
+    )
+    const qtdSemDataEmissao = Number(semDataEmissao[0]?.quantidade || 0)
+    const valorSemDataEmissao = Number(semDataEmissao[0]?.valor_total || 0)
+    // Gatilho por CONTAGEM de linha com valor individual != 0, nunca pela
+    // SOMA líquida (achado da revisão adversarial desta PR, 14/09/2026): um
+    // estorno/correção com ValorDocumento negativo poderia compensar
+    // exatamente uma linha positiva e zerar a soma total, mascarando as
+    // duas linhas reais atrás de um `valor_total = 0` que pareceria seguro.
+    // `valor_total` continua reportado no aviso (contexto), mas nunca decide
+    // se o aviso dispara.
+    const qtdComValorNaoZero = Number(semDataEmissao[0]?.quantidade_valor_nao_zero || 0)
+    // Só gera aviso quando há valor monetário real em jogo — a auditoria de
+    // 14/09/2026 confirmou 224 linhas históricas (filial 001, 2019-2020)
+    // com DataEmissao NULL e valor SEMPRE zero, permanentes e já conhecidas
+    // (ver AUDITORIA_SEM_REPRESENTANTE_DATA_EMISSAO_NULA_20260914.md).
+    // Alertar sobre elas a cada ciclo (30 min, indefinidamente) seria ruído
+    // puro pra uma condição inofensiva e já documentada — o objetivo aqui é
+    // sinalizar o dia em que isso passar a acontecer com valor != 0, nunca
+    // repetir pra sempre um achado histórico sem impacto.
+    if (qtdComValorNaoZero > 0) {
+      avisos.push({ tipo: 'data_emissao_nula_nunca_sincronizavel', filial, quantidade: qtdSemDataEmissao, valor_total: valorSemDataEmissao })
+      log(
+        `[sync-vendas-gerenciais-legado] aviso: ${qtdSemDataEmissao} linha(s) em EN_NotasRepres (filial ${filial}) têm DataEmissao NULL e nunca são ` +
+        `sincronizadas por nenhuma janela de período (${qtdComValorNaoZero} com valor individual != 0, valor total líquido: ${valorSemDataEmissao.toFixed(2)}) — revisão manual na origem recomendada`
+      )
+    }
 
     const { rows: representantes } = await pool.query(
       `SELECT TRIM("Representante") AS codigo, "Nome" AS nome FROM "EN_Representantes" WHERE TRIM("Representante") <> ''`
