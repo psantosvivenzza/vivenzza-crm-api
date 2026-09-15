@@ -17,6 +17,15 @@ de venda.
 - Read-model: `vendas_gerenciais_netvision`, alimentado pelo sync
   `VivenzzaSyncVendasGerenciaisLegado` (residente, ciclo de 30min dentro da
   janela operacional).
+- **Reconciliação (14/09/2026)**: o sync cria/atualiza E remove. Antes dessa
+  correção só criava/atualizava — uma linha que sumia da origem dentro do
+  período já lido (cancelamento/estorno/correção no NetVision) ficava presa
+  pra sempre no espelho, inflando quantidade e valor do indicador. A remoção
+  é escopada exatamente a filial+período da execução, só roda após leitura
+  completa da origem sem erro, nunca dispara sobre leitura vazia, e tem freio
+  de sanidade por percentual (nunca remove em massa por leitura
+  parcial/truncada). Ver docstring de `src/jobs/sync-vendas-gerenciais-legado.js`
+  pro detalhe completo.
 - **Série 99 entra em vendas gerenciais** — é venda gerencial real, **não
   é documento fiscal SEFAZ**. Nunca excluir Série 99 da visão gerencial.
 - O card "Vendas do Mês" do dashboard consome `vendas_gerenciais_mes`

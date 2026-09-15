@@ -16,6 +16,10 @@ const evolutionApi = axios.create({
   timeout: 20000,
 })
 
+// Únicas pastas válidas dentro do bucket "whatsapp-media" — usado para conter
+// "mediatype" (vindo de req.body) antes de virar segmento de path de Storage.
+const MEDIA_TYPES_STORAGE_VALIDOS = new Set(['image', 'video', 'audio', 'document'])
+
 // GET /api/whatsapp/media/:evolution_id — proxy para download de mídia via Evolution API
 // DEVE vir antes de /:lead_id para não ser capturado pelo catch-all
 router.get('/media/:evolution_id', async (req, res) => {
@@ -476,7 +480,16 @@ router.post('/enviar-midia', async (req, res) => {
       try {
         const buffer = Buffer.from(media, 'base64')
         const safeFile = (fileName || `file_${evolutionId}`).replace(/[^a-zA-Z0-9._-]/g, '_')
-        const storagePath = `${mediatype || 'document'}/${evolutionId}_${safeFile}`
+        // Achado de auditoria (2026-09-13): "mediatype" vem direto de req.body sem
+        // nenhuma validação e virava o PRIMEIRO segmento (a "pasta") do path no
+        // bucket "whatsapp-media" — diferente de fileName (safeFile), nunca foi
+        // sanitizado. Qualquer usuário autenticado (rota só exige `auth`, nenhum
+        // papel específico) podia mandar mediatype: "../../outra-pasta" e escapar
+        // do prefixo esperado (image/video/audio/document) dentro do bucket. Só a
+        // pasta de destino usa o valor validado — o `mediatype` enviado à Evolution
+        // API (linha acima) e os mapas de rótulo/tipo abaixo não mudam.
+        const pastaStorageSegura = MEDIA_TYPES_STORAGE_VALIDOS.has(mediatype) ? mediatype : 'document'
+        const storagePath = `${pastaStorageSegura}/${evolutionId}_${safeFile}`
         const { error: uploadError } = await supabase.storage
           .from('whatsapp-media')
           .upload(storagePath, buffer, { contentType: mimetype || 'application/octet-stream', upsert: true })

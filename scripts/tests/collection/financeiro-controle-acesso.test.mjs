@@ -10,17 +10,17 @@
 // existiam na árvore legada migrations/ (não numerada, não aplicada por
 // scripts/localdb-reset.mjs — mesmo gap documentado em
 // docs/MIGRATIONS_DRIFT_AUDIT_2026-09-03.md pra fn_sincronizar_baixa_legado).
-// Aplicadas aqui, verbatim (nenhuma linha alterada), SÓ neste cluster
-// sintético exclusivo (porta 55441, banco financeiro_access_20260907) via:
-//   psql ... -f migrations/estornos_financeiros.sql
-//   psql ... -f migrations/fn_baixar_titulo.sql
-//   psql ... -f migrations/fn_estornar_baixa.sql
-//   psql ... -f migrations/fn_aprovar_estorno.sql
-//   psql ... -f migrations/fn_rejeitar_estorno.sql
-// Nada foi aplicado em produção nem no banco compartilhado 5433/vivenzza_dev.
-// Isso NÃO fica persistido em scripts/localdb-reset.mjs — um reset novo
-// deste mesmo cluster (ou qualquer outro) precisaria reaplicar os 5 arquivos
-// manualmente antes de rodar este teste de novo.
+// Rodada 5 aplicou os 5 arquivos manualmente, só num cluster sintético
+// exclusivo avulso (porta 55441), sem persistir isso em
+// scripts/localdb-reset.mjs.
+//
+// ATUALIZAÇÃO 2026-09-12: gap fechado — os mesmos 5 objetos (verbatim, mesma
+// lógica) agora são supabase/migrations/20260101000058 a 000062, aplicadas
+// automaticamente por `npm run db:local:reset` como qualquer outra migration
+// real, em qualquer cluster (não precisa mais de psql manual nem de porta
+// fixa). 20260101000063 revoga EXECUTE de PUBLIC/anon/authenticated nas 4
+// RPCs (mesmo achado de segurança da PR #77 pra fn_sincronizar_baixa_legado)
+// — ver cobertura dedicada em estornos-financeiros-grants.test.mjs.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'http'
@@ -48,7 +48,17 @@ before(async () => {
   idAdmin = await criarUsuarioDeTeste('admin', 'admin')
   idFinanceiro = await criarUsuarioDeTeste('financeiro', 'financeiro')
   idVendedorA = await criarUsuarioDeTeste('vendedor', 'vendedor-a')
-  idTerceiroPapel = await criarUsuarioDeTeste('gerente', 'terceiro-papel') // papel desconhecido/não suportado
+  // ACHADO REAL (2026-09-09): usuarios_role_check em produção só aceita
+  // admin/vendedor/financeiro — reproduzido fielmente no baseline local
+  // desde então (ver scripts/localdb/schema-baseline/001_core.sql). Um
+  // INSERT direto com role='gerente' agora FALHA de verdade (antes,
+  // "funcionava" só porque o baseline local não tinha a constraint real).
+  // O papel "desconhecido" testado aqui é sobre o CLAIM do token — é só
+  // isso que auth() lê (nunca reconsulta o banco) — não sobre a linha em
+  // si, que só existe como âncora de FK. Por isso reaproveita o id de um
+  // usuário JÁ válido (idVendedorA), exatamente como tokenSemRole já
+  // reaproveita idAdmin logo abaixo.
+  idTerceiroPapel = idVendedorA
 
   tokenAdmin = jwt.sign({ id: idAdmin, email: 'admin@teste.com', role: 'admin' }, process.env.JWT_SECRET)
   tokenFinanceiro = jwt.sign({ id: idFinanceiro, email: 'financeiro@teste.com', role: 'financeiro' }, process.env.JWT_SECRET)
