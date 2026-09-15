@@ -47,7 +47,15 @@ before(async () => {
   idAdmin = await criarUsuarioDeTeste('admin', 'admin')
   idFinanceiro = await criarUsuarioDeTeste('financeiro', 'financeiro')
   idVendedorA = await criarUsuarioDeTeste('vendedor', 'vendedor-a')
-  idTerceiroPapel = await criarUsuarioDeTeste('gerente', 'terceiro-papel') // papel desconhecido/não suportado
+  // ACHADO REAL (2026-09-09): usuarios_role_check em produção só aceita
+  // admin/vendedor/financeiro — reproduzido fielmente no baseline local
+  // desde então. Um INSERT direto com role='gerente' agora FALHA de
+  // verdade. O papel "desconhecido" testado aqui é sobre o CLAIM do
+  // token — é só isso que auth() lê, nunca reconsulta o banco — não sobre
+  // a linha em si, que só existe como âncora de FK. Reaproveita o id de
+  // um usuário já válido (idVendedorA), igual tokenSemRole já faz com
+  // idAdmin logo abaixo.
+  idTerceiroPapel = idVendedorA
 
   tokenAdmin = jwt.sign({ id: idAdmin, email: 'admin@teste.com', role: 'admin' }, process.env.JWT_SECRET)
   tokenFinanceiro = jwt.sign({ id: idFinanceiro, email: 'financeiro@teste.com', role: 'financeiro' }, process.env.JWT_SECRET)

@@ -216,12 +216,44 @@ class QueryBuilder {
   // .not(col, 'is', null) e .not(col, 'in', '(a,b,c)') — mesmo espírito
   // "adaptador estreito, não PostgREST genérico" do resto deste arquivo.
   not(col, operator, val) { this._filters.push({ col: assertIdent(col, 'coluna'), op: `not.${operator}`, val }); return this }
+  // CORREÇÃO 2026-09-10 (achado do módulo "Meu Ponto") — mesmo problema do
+  // .not() acima: .is(col, null) é o jeito idiomático do supabase-js real
+  // de filtrar IS NULL (ex.: "linhas ainda não revogadas"), usado em
+  // src/middleware/pontoAuth.js, mas não existia suporte nenhum aqui —
+  // qualquer teste local que passasse por esse caminho quebrava com
+  // "TypeError: ...is is not a function". Só cobre .is(col, null)/.is(col,
+  // true)/.is(col, false), que é o que supabase-js realmente aceita nesse
+  // método (nunca uma coluna arbitrária) — mesmo adaptador estreito do
+  // resto deste arquivo, não um PostgREST genérico.
+  is(col, val) {
+    if (val !== null && val !== true && val !== false) {
+      throw new Error(`compat client local: .is('${col}', ...) só suporta null/true/false, recebeu ${JSON.stringify(val)}`)
+    }
+    this._filters.push({ col: assertIdent(col, 'coluna'), op: 'is', val })
+    return this
+  }
 
   order(col, { ascending = true } = {}) { this._order.push(`${assertIdent(col, 'coluna')} ${ascending ? 'ASC' : 'DESC'}`); return this }
   range(from, to) { this._range = [from, to]; return this }
   limit(n) { this._limit = n; return this }
   maybeSingle() { this._maybeSingle = true; this._returning = true; return this }
   single() { this._single = true; this._returning = true; return this }
+  // 2026-09-13 — suporte mínimo a .abortSignal(), espelhando o método real do
+  // postgrest-js (PostgrestTransformBuilder.abortSignal). Necessário pra
+  // testar localmente o hardening de timeout do incidente "IA comercial não
+  // responde" (src/routes/sdr.js passou a usar
+  // `.abortSignal(AbortSignal.timeout(...))` em toda chamada Supabase do
+  // caminho de resposta — sem suporte aqui, qualquer teste local que
+  // exercitasse esse caminho quebrava com "TypeError: ...abortSignal is not
+  // a function", mascarando os cenários de timeout inteiros).
+  //
+  // Só guarda a referência; a corrida de verdade contra o sinal acontece em
+  // _run(). Igual ao postgrest-js real (confirmado em
+  // node_modules/@supabase/postgrest-js/src/PostgrestBuilder.ts): abortar
+  // NUNCA rejeita a chamada — resolve com `{ data: null, error }`, então o
+  // código de aplicação que já trata erro do banco funciona sem alteração,
+  // aborte a espera ou não.
+  abortSignal(signal) { this._abortSignal = signal; return this }
 
   _whereClause(startIndex) {
     const clauses = []
@@ -239,6 +271,9 @@ class QueryBuilder {
       } else if (f.op === 'not.is' && f.val === null) {
         // Sem parâmetro — "IS NOT NULL" nunca é bind param no Postgres.
         clauses.push(`${f.col} IS NOT NULL`)
+      } else if (f.op === 'is') {
+        // Sem parâmetro — IS [NOT] NULL/TRUE/FALSE nunca é bind param.
+        clauses.push(f.val === null ? `${f.col} IS NULL` : `${f.col} IS ${f.val ? 'TRUE' : 'FALSE'}`)
       } else if (f.op === 'not.in') {
         // supabase-js aceita a lista já formatada estilo PostgREST: '(a,b,c)'.
         const itens = String(f.val).replace(/^\(|\)$/g, '').split(',').map((v) => v.trim()).filter(Boolean)
@@ -400,19 +435,43 @@ class QueryBuilder {
     return { data: this._returning ? rows : null, error: null }
   }
 
+  async _executarOperacao() {
+    if (this._op === 'insert') return await this._executeInsert()
+    if (this._op === 'upsert') return await this._executeUpsert()
+    if (this._op === 'update') return await this._executeUpdate()
+    if (this._op === 'delete') return await this._executeDelete()
+    return await this._executeSelect()
+  }
+
   async _run() {
     try {
-      if (this._op === 'insert') return await this._executeInsert()
-      if (this._op === 'upsert') return await this._executeUpsert()
-      if (this._op === 'update') return await this._executeUpdate()
-      if (this._op === 'delete') return await this._executeDelete()
-      return await this._executeSelect()
+      if (!this._abortSignal) return await this._executarOperacao()
+      // Corrida de verdade contra o sinal — se ele disparar (ex:
+      // AbortSignal.timeout(N) vencendo) ANTES da query terminar, resolve
+      // como abort (mesmo formato de erro do catch abaixo), igual ao
+      // comportamento real do postgrest-js/fetch. A query em si continua
+      // rodando no Postgres até terminar sozinha — abortar cancela só a
+      // ESPERA por um resultado, nunca a consulta (mesmo mecanismo do
+      // AbortSignal real: cancela o fetch, não garante cancelamento da
+      // query no servidor).
+      if (this._abortSignal.aborted) throw Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })
+      return await new Promise((resolve, reject) => {
+        this._abortSignal.addEventListener(
+          'abort',
+          () => reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })),
+          { once: true }
+        )
+        this._executarOperacao().then(resolve, reject)
+      })
     } catch (err) {
       // Repassa err.code (SQLSTATE do Postgres) igual ao que o driver `pg` já
       // fornece — é o MESMO código que o Supabase real devolve (ex: '23505' para
       // unique_violation), então o código de aplicação que já checa
-      // `error.code === '23505'` funciona sem alteração.
-      return { data: null, error: { message: err.message, code: err.code } }
+      // `error.code === '23505'` funciona sem alteração. AbortError não tem
+      // SQLSTATE — code fica undefined, igual ao code:'' do postgrest-js real
+      // (nenhum dos dois bate no formato de código permitido pelos logs de
+      // sdr.js, então ambos caem no mesmo fallback seguro lá).
+      return { data: null, error: { message: err.message, code: err.code, name: err.name } }
     }
   }
 
