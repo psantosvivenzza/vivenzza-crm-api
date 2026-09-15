@@ -350,7 +350,7 @@ export async function executarSincronizacaoVendasGerenciais({
     }
 
     if (syncLogId) {
-      await supabase.from('sincronizacoes_vendas_gerenciais').update({
+      const { error: erroFinalizacao } = await supabase.from('sincronizacoes_vendas_gerenciais').update({
         status: contadores.total_com_erro > 0 ? 'concluido_com_erros' : 'concluido',
         concluido_em: new Date().toISOString(),
         total_lido: contadores.total_lido,
@@ -361,6 +361,15 @@ export async function executarSincronizacaoVendasGerenciais({
         reconciliacao_candidatos: paraRemover.length,
         reconciliacao_motivo_bloqueio: motivoBloqueioReconciliacao,
       }).eq('id', syncLogId)
+      // Sem checar `error` aqui, uma falha nesta escrita (coluna ausente,
+      // cache de schema do PostgREST desatualizado, etc.) fica em silêncio:
+      // o registro nunca sai de 'executando', mesmo com o sync tendo
+      // funcionado — mesma classe de defeito já corrigida na PR #74
+      // (registrarMensagemSaida). Loga alto (não deixa passar batido) mas
+      // não derruba o processo: o sync em si já terminou com sucesso.
+      if (erroFinalizacao) {
+        log(`[sync-vendas-gerenciais-legado] ERRO ao finalizar registro de sincronização (id=${syncLogId}): ${erroFinalizacao.message} — o sync rodou e os dados foram gravados, mas o status em sincronizacoes_vendas_gerenciais pode ficar preso em 'executando'.`)
+      }
     }
 
     return {
@@ -369,9 +378,12 @@ export async function executarSincronizacaoVendasGerenciais({
     }
   } catch (err) {
     if (syncLogId) {
-      await supabase.from('sincronizacoes_vendas_gerenciais').update({
+      const { error: erroFinalizacaoFalha } = await supabase.from('sincronizacoes_vendas_gerenciais').update({
         status: 'falhou', concluido_em: new Date().toISOString(), mensagem_erro: err.message,
       }).eq('id', syncLogId)
+      if (erroFinalizacaoFalha) {
+        log(`[sync-vendas-gerenciais-legado] ERRO ao registrar falha do sync (id=${syncLogId}): ${erroFinalizacaoFalha.message} — erro original do sync: ${err.message}`)
+      }
     }
     throw err
   } finally {
