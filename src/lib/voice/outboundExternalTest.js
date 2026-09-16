@@ -10,6 +10,7 @@
 // sempre hoje (TRUNK_EXTERNO_CONFIGURADO=false, não tocado por este
 // arquivo) — dupla trava, igual ao MVP interno já fazia com o endpoint fixo.
 import { TIPO_DESTINO, resolverDestino } from './destinoResolver.js'
+import { lerConfigNvoip } from './externalConfig.js'
 
 export const CONTEXTO_MARCADOR = 'EXTERNAL_PILOT_TEST'
 export const NO_ANSWER_TIMEOUT_S = 30
@@ -23,8 +24,22 @@ export function construirPayloadOriginateExterno({ numero, ariApp, callerId }) {
   // Esta função nunca contorna isso; só existe pra já estar pronta/testável
   // quando (e somente quando) um trunk real for provisionado.
   const endpointBase = resolverDestino(TIPO_DESTINO.EXTERNAL)
+  // ACHADO REAL (2026-09-16, primeira tentativa de chamada real) —
+  // `PJSIP/<endpoint>/<numero-cru>` NÃO é um dial-string válido pra um
+  // trunk com destino explícito: o Asterisk tenta interpretar o terceiro
+  // segmento como uma URI SIP completa e rejeita ("Could not create
+  // dialog to invalid URI '+55...'"). Erro real visto em
+  // /var/log/asterisk/messages.log:
+  //   res_pjsip.c: Endpoint 'nvoip-endpoint': Could not create dialog to
+  //   invalid URI '+5551991567661'. Is endpoint registered and reachable?
+  // Fix: montar a URI SIP completa (sip:<numero>@<host-da-nvoip>), lida de
+  // NVOIP_SIP_SERVER/NVOIP_SIP_PORT (externalConfig.js) — nunca
+  // hardcoded aqui, pra nunca dessincronizar do que está em pjsip_nvoip.conf.
+  const { sipServer, sipPort } = lerConfigNvoip()
+  if (!sipServer) throw new Error('construirPayloadOriginateExterno: NVOIP_SIP_SERVER não configurado — não sei montar a URI de destino')
+  const uriDestino = `sip:${numero}@${sipServer}:${sipPort || 5060}`
   return {
-    endpoint: `${endpointBase}/${numero}`,
+    endpoint: `${endpointBase}/${uriDestino}`,
     app: ariApp,
     appArgs: CONTEXTO_MARCADOR,
     callerId: callerId || 'Vivenzza Voice AI',
