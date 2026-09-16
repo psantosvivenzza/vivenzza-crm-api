@@ -4,14 +4,23 @@
 //   voice_external_enabled=true  E  telefone em VOICE_EXTERNAL_ALLOWLIST
 // Sem as duas: BLOQUEIA, nunca chega a consultar ARI/endpoint/trunk.
 //
-// Mesmo assim, hoje isto SEMPRE bloqueia mais cedo ainda: não há trunk/
-// adapter configurado (destinoResolver.js, TRUNK_EXTERNO_CONFIGURADO=false,
-// hardcoded) — rodar este script neste ambiente nunca origina uma chamada
-// real, com ou sem --confirm.
+// ATUALIZADO 2026-09-16: TRUNK_EXTERNO_CONFIGURADO agora e true
+// (destinoResolver.js) — credenciais Nvoip reais compradas (numero
+// 555121651117), adapter de dial-string implementado. AINDA ASSIM este
+// script so origina de verdade se TODAS as travas abaixo passarem:
+//   1. voice_external_enabled=true no banco (SQL direto, sem rota PATCH)
+//   2. telefone presente em VOICE_EXTERNAL_ALLOWLIST
+//   3. endpoint [nvoip-endpoint] aplicado E registrado de verdade no
+//      Asterisk real (WSL2) — sem isso o originate falha no ARI mesmo
+//      com --confirm
+// Nenhuma das 3 foi feita ainda — ver docs/cobranca-ai/NVOIP_HOMOLOGACAO.md
+// (passos 1-16, nenhum executado). Nao rodar --confirm sem seguir esse
+// roteiro passo a passo, com o operador ouvindo o audio real.
 //
 // DRY-RUN por padrão (como o script interno). Uso:
 //   node scripts/voice/trigger-external-test.mjs --numero=+55XXXXXXXXXXX            (dry-run)
 //   node scripts/voice/trigger-external-test.mjs --numero=+55XXXXXXXXXXX --confirm  (originaria de verdade, se algum dia passar de todos os guards)
+import 'dotenv/config'
 import axios from 'axios'
 import { obterConfigCobranca } from '../../src/lib/collection/featureFlags.js'
 import {
@@ -58,7 +67,16 @@ async function main() {
   const autorizacao = avaliarAutorizacaoChamadaExterna({
     flags: config, numero: numeroArg, allowlist: allowlistOk ? [numeroArg] : [],
     idempotencyKey, chavesJaProcessadas, chamadasAtivas,
-    horaAtual: new Date(), politicaHorario: null, // fail-closed: sem política ainda, sempre bloqueia aqui — proposital
+    horaAtual: new Date(),
+    // 2026-09-16: janela baseada na Lei estadual RS 15.608/2014 (mais
+    // restritiva que a regra federal SARB 27/2023 e que qualquer outro
+    // estado levantado) — seg-sex 08:00-18:50, sem sabado/domingo. Aqui
+    // usamos 08:00-18:40 (10min de margem de seguranca antes do limite
+    // legal). Usada como padrao NACIONAL conservador ate existir volume
+    // real de ligacoes pra construir escala por estado/taxa de resposta.
+    // Nao e mais fail-closed cego — mas continua fail-closed fora dessa
+    // janela.
+    politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 8 * 60, fimMinutos: 18 * 60 + 40 }] },
     chamadasHoje, limiteDiario: limites.maxChamadasPorTelefoneDia,
   })
   if (!autorizacao.permitido) bloquear(autorizacao.motivo)
