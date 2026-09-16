@@ -37,7 +37,16 @@ export function construirPayloadOriginateExterno({ numero, ariApp, callerId }) {
   // hardcoded aqui, pra nunca dessincronizar do que está em pjsip_nvoip.conf.
   const { sipServer, sipPort } = lerConfigNvoip()
   if (!sipServer) throw new Error('construirPayloadOriginateExterno: NVOIP_SIP_SERVER não configurado — não sei montar a URI de destino')
-  const uriDestino = `sip:${numero}@${sipServer}:${sipPort || 5060}`
+  // ACHADO REAL (2026-09-16, segunda tentativa de chamada real) — com a URI
+  // SIP correta mas o número mantendo o "+", a Nvoip respondeu
+  // 404 Not Found / Reason: cause=3;text="NO_ROUTE_DESTINATION" (visto ao
+  // vivo no console do Asterisk, depois da autenticação digest já ter
+  // funcionado). O dial-plan da Nvoip não reconhece o "+" — usa dígitos
+  // puros (E.164 sem o prefixo "+"). Nunca reformatar o número em nenhum
+  // outro ponto do sistema (allowlist/DB continuam em formato E.164 com
+  // "+"); a normalização é só aqui, na hora de montar a URI de destino.
+  const numeroSemMais = String(numero).replace(/^\+/, '')
+  const uriDestino = `sip:${numeroSemMais}@${sipServer}:${sipPort || 5060}`
   return {
     endpoint: `${endpointBase}/${uriDestino}`,
     app: ariApp,
