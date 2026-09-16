@@ -41,7 +41,7 @@ const numeroArg = process.argv.find((a) => a.startsWith('--numero='))?.split('='
 
 function bloquear(motivo) {
   console.error(`[external-test] BLOQUEADO: ${motivo}`)
-  process.exit(1)
+  process.exitCode = 1
 }
 
 // voice_calls (migration 20260101000033) ainda não está aplicada em
@@ -54,7 +54,7 @@ async function buscarHistoricoChamadasExternas() {
 }
 
 async function main() {
-  if (!numeroArg) bloquear('--numero=+55XXXXXXXXXXX é obrigatório')
+  if (!numeroArg) return bloquear('--numero=+55XXXXXXXXXXX é obrigatório')
 
   const config = await obterConfigCobranca()
   const allowlistOk = numeroNaAllowlistExterna(numeroArg)
@@ -79,14 +79,14 @@ async function main() {
     politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 8 * 60, fimMinutos: 18 * 60 + 40 }] },
     chamadasHoje, limiteDiario: limites.maxChamadasPorTelefoneDia,
   })
-  if (!autorizacao.permitido) bloquear(autorizacao.motivo)
+  if (!autorizacao.permitido) return bloquear(autorizacao.motivo)
 
-  if (!avaliarLimiteGlobalPorHora(chamadasUltimaHora, limites.maxChamadasHora)) bloquear('limite_global_hora_excedido')
-  if (!avaliarLimiteGlobalPorDia(chamadasHoje, limites.maxChamadasDia)) bloquear('limite_global_dia_excedido')
+  if (!avaliarLimiteGlobalPorHora(chamadasUltimaHora, limites.maxChamadasHora)) return bloquear('limite_global_hora_excedido')
+  if (!avaliarLimiteGlobalPorDia(chamadasHoje, limites.maxChamadasDia)) return bloquear('limite_global_dia_excedido')
 
   console.log(`[external-test] guards de piloto/telefonia OK para ${mascararTelefone(numeroArg)} — seguindo pro ARI/trunk...`)
 
-  if (!ARI_USER || !ARI_PASSWORD) bloquear('ARI_USER/ARI_PASSWORD não configurados no ambiente')
+  if (!ARI_USER || !ARI_PASSWORD) return bloquear('ARI_USER/ARI_PASSWORD não configurados no ambiente')
   const cliente = axios.create({ baseURL: `${ARI_URL}/ari`, auth: { username: ARI_USER, password: ARI_PASSWORD }, timeout: 5000 })
 
   let payload
@@ -95,31 +95,37 @@ async function main() {
   } catch (err) {
     // Esperado hoje: destinoResolver.js sempre lança pra EXTERNAL (sem
     // trunk configurado) — este é o comportamento CORRETO, não um bug.
-    bloquear(`sem_trunk: ${err.message}`)
+    return bloquear(`sem_trunk: ${err.message}`)
   }
 
   console.log('[external-test] payload validado:', JSON.stringify(payload))
   if (!CONFIRMAR) {
     console.log('[external-test] DRY RUN — não originei nada. (Nunca chegaria aqui sem --confirm de qualquer forma.)')
-    process.exit(0)
+    process.exitCode = 0
+    return
   }
 
   console.log('[external-test] verificando ARI...')
   try {
     await cliente.get('/asterisk/info')
   } catch (err) {
-    bloquear(`ARI inalcançável em ${ARI_URL}: ${err.message}`)
+    return bloquear(`ARI inalcançável em ${ARI_URL}: ${err.message}`)
   }
 
-  const { data: canais } = await cliente.get('/channels').catch((err) => bloquear(`não consegui listar canais ativos: ${err.message}`))
-  if (avaliarChamadaJaAtiva(canais)) bloquear(`já existe(m) ${canais.length} canal(is) ativo(s) — encerre antes de originar`)
+  let canais
+  try {
+    ({ data: canais } = await cliente.get('/channels'))
+  } catch (err) {
+    return bloquear(`não consegui listar canais ativos: ${err.message}`)
+  }
+  if (avaliarChamadaJaAtiva(canais)) return bloquear(`já existe(m) ${canais.length} canal(is) ativo(s) — encerre antes de originar`)
 
   console.log('[external-test] ORIGINANDO chamada externa real para', mascararTelefone(numeroArg), '...')
   try {
     const { data } = await cliente.post('/channels', payload)
     console.log(`[external-test] OUTBOUND_CREATED channel_id=${data.id}`)
   } catch (err) {
-    bloquear(`falha ao originar: ${err.response?.data?.message || err.message}`)
+    return bloquear(`falha ao originar: ${err.response?.data?.message || err.message}`)
   }
 }
 
