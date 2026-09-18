@@ -14,14 +14,25 @@
  *
  * Desenho deliberadamente conservador pra esta primeira versão:
  *
- *   1. SÓ CRIA — nunca atualiza um cliente que já existe em clientes_erp.
- *      clientes_erp não tem nenhum campo de "override local" (diferente de
- *      `pedidos.atualizado_localmente_em`/`campos_com_override_local`), e
- *      correção de dados via API não caberia numa auditoria read-only
- *      seguida de remediação pontual — decidir a política de atualização de
- *      clientes já existentes fica pra uma rodada futura, com regra
- *      explícita. Enquanto isso, "não sobrescrever campo local sem regra
- *      explícita" == não escrever em cima de nada que já existe.
+ *   1. CRIA quem falta e, para quem já existe, SOMA contato novo sem nunca
+ *      apagar o que o CRM já tem (política decidida por Peterson em
+ *      18/09/2026, depois de telefones corrigidos no NetVision nunca
+ *      chegarem ao CRM — 34 clientes com número na origem que o CRM não
+ *      tinha, alguns deles sem número nenhum, o que trava a cobrança).
+ *
+ *      A regra é ADITIVA de propósito: telefone/celular/e-mail presente no
+ *      NetVision e ausente em `contatos` é acrescentado; nada é removido,
+ *      substituído nem reordenado. Isso resolve o caso real ("o número novo
+ *      não chega") sem a classe de bug oposta, que seria pior: sobrescrever
+ *      um número que a equipe corrigiu direto no CRM — clientes_erp não tem
+ *      campo de override local (diferente de
+ *      `pedidos.atualizado_localmente_em`/`campos_com_override_local`),
+ *      então não haveria como distinguir "dado velho do CRM" de "correção
+ *      humana recente do CRM". Comparação de telefone é por dígitos
+ *      (ignora máscara) e de e-mail por minúsculas.
+ *
+ *      Nenhum outro campo do cliente é atualizado — nome, endereço,
+ *      CNPJ/CPF e afins continuam intocados para quem já existe.
  *   2. VARREDURA COMPLETA, não incremental — ~2.048 linhas em `Pessoas`
  *      filtradas por Cliente=1 é pequeno o bastante pra comparar tudo a
  *      cada execução sem custo real, e isso elimina de vez a classe de bug
@@ -52,6 +63,39 @@ function montarContatos(row) {
   if (trim(row.Fone)) contatos.push({ tipo: 'fone', valor: trim(row.Fone) })
   if (trim(row.e_mail)) contatos.push({ tipo: 'email', valor: trim(row.e_mail) })
   return contatos
+}
+
+// Chave de comparação, não valor de exibição: telefone vira só dígitos (a
+// mesma máscara escrita de três jeitos é UM número) e e-mail vira minúsculo.
+// Sem isso, "(51) 99539-8108" e "51995398108" entrariam como dois contatos.
+function chaveContato(tipo, valor) {
+  const v = trim(valor)
+  if (!v) return ''
+  if (tipo === 'email') return `email:${v.toLowerCase()}`
+  // celular e fone compartilham o mesmo espaço de chave de propósito: o
+  // mesmo número cadastrado como "Fone" na origem e como "celular" no CRM
+  // é o mesmo número, e acrescentá-lo de novo só polui o cadastro.
+  return `tel:${v.replace(/\D/g, '')}`
+}
+
+/**
+ * ADITIVO: devolve os contatos do CRM acrescidos do que o NetVision tem e o
+ * CRM não. Nunca remove, nunca substitui, nunca reordena — os existentes
+ * saem primeiro, na ordem original. `alterado=false` quando não há nada a
+ * acrescentar (e aí o job não escreve no banco).
+ */
+export function mesclarContatosAditivo(contatosCrm, row) {
+  const atuais = Array.isArray(contatosCrm) ? contatosCrm : []
+  const chaves = new Set(atuais.map((c) => chaveContato(c?.tipo, c?.valor)).filter(Boolean))
+  const acrescentados = []
+  for (const candidato of montarContatos(row)) {
+    const chave = chaveContato(candidato.tipo, candidato.valor)
+    if (!chave || chaves.has(chave)) continue
+    chaves.add(chave)
+    acrescentados.push(candidato)
+  }
+  if (acrescentados.length === 0) return { contatos: atuais, acrescentados: [], alterado: false }
+  return { contatos: [...atuais, ...acrescentados], acrescentados, alterado: true }
 }
 
 function montarEndereco(row) {
@@ -97,8 +141,9 @@ export function montarClienteParaCriar(row) {
  */
 export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_com_erro: 0 }
+  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_com_erro: 0 }
   const criados = []
+  const contatosAcrescentados = []
   const erros = []
 
   try {
@@ -110,18 +155,48 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
     )
     contadores.total_netvision = rows.length
 
-    const existentes = new Set()
+    // Carrega `contatos` junto com o id: quem já existe agora também é
+    // avaliado (merge aditivo), então não basta saber que existe.
+    const existentes = new Map()
     for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await supabase.from('clientes_erp').select('legacy_id').range(offset, offset + 999)
+      const { data, error } = await supabase.from('clientes_erp').select('id, legacy_id, razao_social, contatos').range(offset, offset + 999)
       if (error) throw error
-      for (const r of data) existentes.add(r.legacy_id)
+      for (const r of data) existentes.set(r.legacy_id, r)
       if (data.length < 1000) break
     }
 
     for (const row of rows) {
       const codigo = trim(row.CodigoPessoa)
       if (!codigo) continue
-      if (existentes.has(codigo)) { contadores.total_ja_existente++; continue }
+
+      const jaExiste = existentes.get(codigo)
+      if (jaExiste) {
+        contadores.total_ja_existente++
+        const merge = mesclarContatosAditivo(jaExiste.contatos, row)
+        if (!merge.alterado) continue
+
+        const registro = {
+          legacy_id: codigo,
+          razao_social: jaExiste.razao_social,
+          acrescentados: merge.acrescentados.map((c) => `${c.tipo}:${c.valor}`),
+        }
+        if (dryRun) {
+          contadores.total_contato_acrescentado++
+          contatosAcrescentados.push(registro)
+          continue
+        }
+        try {
+          const { error } = await supabase.from('clientes_erp').update({ contatos: merge.contatos }).eq('id', jaExiste.id)
+          if (error) throw error
+          contadores.total_contato_acrescentado++
+          contatosAcrescentados.push(registro)
+        } catch (err) {
+          contadores.total_com_erro++
+          erros.push({ legacy_id: codigo, mensagem: err.message })
+          log(`[sync-clientes-legado] erro ao acrescentar contato em ${codigo}: ${err.message}`)
+        }
+        continue
+      }
 
       const payload = montarClienteParaCriar(row)
       if (payload.em_revisao) contadores.total_marcado_revisao++
@@ -143,7 +218,7 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       }
     }
 
-    return { ...contadores, dry_run: dryRun, criados, erros }
+    return { ...contadores, dry_run: dryRun, criados, contatos_acrescentados: contatosAcrescentados, erros }
   } finally {
     if (!poolE01) await pool.end()
   }

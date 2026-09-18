@@ -203,7 +203,10 @@ export async function executarSincronizacaoVendasGerenciais({
     // uma linha que a origem não forneceu).
     const { rows: semDataEmissao } = await pool.query(
       `SELECT COUNT(*) AS quantidade, COALESCE(SUM("ValorDocumento"), 0) AS valor_total,
-              COUNT(*) FILTER (WHERE "ValorDocumento" <> 0) AS quantidade_valor_nao_zero
+              -- COUNT(*) FILTER nao existe neste NetVision (Postgres antigo) e
+              -- derrubava o sync inteiro com "erro de sintaxe em ou proximo a (".
+              -- COUNT(CASE WHEN ...) e equivalente e portavel.
+              COUNT(CASE WHEN "ValorDocumento" <> 0 THEN 1 END) AS quantidade_valor_nao_zero
        FROM "EN_NotasRepres"
        WHERE "CodigoFilial" = $1 AND "DataEmissao" IS NULL`,
       [filial]

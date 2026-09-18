@@ -6,8 +6,9 @@
 //   node scripts/sync-clientes-legado.mjs --dry-run   (simula, não grava nada)
 //   node scripts/sync-clientes-legado.mjs             (aplica de verdade)
 //
-// SÓ CRIA clientes que faltam em clientes_erp — nunca atualiza um que já
-// existe (ver comentário em src/jobs/sync-clientes-legado.js). Varredura
+// CRIA clientes que faltam em clientes_erp e, para quem já existe, SOMA
+// telefone/e-mail novo do NetVision sem apagar o que o CRM já tem — nenhum
+// outro campo é tocado (ver src/jobs/sync-clientes-legado.js). Varredura
 // completa a cada execução (não incremental) — ~2.048 linhas é pequeno o
 // bastante pra não precisar de cursor.
 //
@@ -26,7 +27,12 @@ executarSincronizacaoClientes({ dryRun })
     console.log(`  Já existentes em clientes_erp: ${relatorio.total_ja_existente}`)
     console.log(`  ${dryRun ? 'Seriam criados' : 'Criados'}: ${relatorio.total_criado}`)
     console.log(`  Marcados em_revisao (dado incompleto): ${relatorio.total_marcado_revisao}`)
+    console.log(`  ${dryRun ? 'Teriam contato acrescentado' : 'Com contato acrescentado'}: ${relatorio.total_contato_acrescentado}`)
     console.log(`  Erros: ${relatorio.total_com_erro}`)
+    if (relatorio.contatos_acrescentados?.length) {
+      console.log(`\n  ${dryRun ? 'Contatos que seriam acrescentados' : 'Contatos acrescentados'}:`)
+      for (const c of relatorio.contatos_acrescentados) console.log(`    ${c.legacy_id}  ${c.razao_social}  +${c.acrescentados.join(' +')}`)
+    }
     if (relatorio.criados.length) {
       console.log(`\n  ${dryRun ? 'Seriam criados' : 'Criados'}:`)
       for (const c of relatorio.criados) console.log(`    ${c.legacy_id}  ${c.razao_social}${c.em_revisao ? '  [EM_REVISAO]' : ''}`)
