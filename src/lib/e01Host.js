@@ -11,6 +11,13 @@
 //   2. mDNS falha de vez em quando, sem motivo permanente — daí os
 //      `getaddrinfo ENOTFOUND DESKTOP-Q6O54R1` intermitentes. A máquina está
 //      lá, ligada, respondendo ping; só o nome não resolveu naquele instante.
+//      Medido em 18/09/2026: 8 resoluções seguidas falharam enquanto o banco
+//      atendia normalmente por IP. Não é raro — é frequente.
+//
+// A máquina do NetVision tem DUAS interfaces de rede: 192.168.1.105 e
+// 192.168.1.108 atendem o MESMO banco e01 (verificado consultando as duas).
+// Por isso o nome às vezes responde um e às vezes outro, e por isso cachear
+// o endereço é seguro: qualquer um dos dois é a máquina certa.
 //
 // O efeito prático é sync perdendo janela e recuperando na tentativa
 // seguinte. Barulhento, e no caso do financeiro chega a pausar a régua de
@@ -31,7 +38,43 @@
 //
 // Quando o host já é um IP literal, `dns.lookup` devolve ele mesmo: este
 // módulo continua correto sem nenhum caso especial.
+//
+// CACHE DO ÚLTIMO IP BOM: toda resolução bem-sucedida grava o endereço em
+// disco. Quando o nome falha, o cache é tentado ANTES do `E01_HOST_IP` fixo.
+// É isso que faz uma troca de IP por DHCP se resolver sozinha: basta o nome
+// ter resolvido uma vez depois da troca — coisa que acontece em minutos, já
+// que a falha de mDNS é intermitente, não permanente. Sem o cache, uma troca
+// de IP deixaria a reserva do `.env` apontando para o endereço errado, o que
+// é pior do que não ter reserva: falha com a aparência de configurada.
 import dns from 'dns'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const ARQUIVO_CACHE = path.join(__dirname, '..', '..', '.localdev', 'e01-host-cache.json')
+
+function lerCache(nome) {
+  try {
+    const dados = JSON.parse(fs.readFileSync(ARQUIVO_CACHE, 'utf8'))
+    // O cache é por NOME: se alguém trocar o E01_HOST, o endereço guardado
+    // para o host anterior não vale mais.
+    return dados?.host === nome ? dados.ip : null
+  } catch {
+    return null
+  }
+}
+
+function gravarCache(nome, ip) {
+  try {
+    if (lerCache(nome) === ip) return // nada mudou, não escreve à toa
+    fs.mkdirSync(path.dirname(ARQUIVO_CACHE), { recursive: true })
+    fs.writeFileSync(ARQUIVO_CACHE, JSON.stringify({ host: nome, ip, em: new Date().toISOString() }, null, 2))
+  } catch {
+    // Cache é conveniência, nunca requisito: disco cheio ou sem permissão
+    // não pode derrubar um sync.
+  }
+}
 
 export async function resolverHostE01() {
   const nome = process.env.E01_HOST
@@ -44,11 +87,16 @@ export async function resolverHostE01() {
 
   try {
     const { address } = await dns.promises.lookup(nome, { family: 4 })
+    gravarCache(nome, address)
     return address
   } catch (err) {
+    // Último IP que funcionou de verdade vem antes da reserva fixa: ele é o
+    // mais recente dos dois, e é o único que acompanha troca de DHCP.
+    const doCache = lerCache(nome)
+    if (doCache) return doCache
     if (reserva) return reserva
-    // Sem reserva configurada, devolve o nome e deixa o pg falhar com a
-    // mensagem original — esconder o erro aqui só atrasaria o diagnóstico.
+    // Sem cache e sem reserva, devolve o erro original — esconder aqui só
+    // atrasaria o diagnóstico.
     throw err
   }
 }

@@ -23,11 +23,63 @@
  * objetivo agora é ter o histórico de eventos espelhado com segurança, não
  * recalcular o financeiro a partir dele — decisão futura separada, com
  * autorização própria.
+ *
+ * ============================================================
+ * ESCRITA BLOQUEADA EM 18/09/2026 — NÃO DESBLOQUEIE SEM LER
+ * ============================================================
+ *
+ * A premissa acima ("inserir sem chamar fn_baixar_titulo é seguro") está
+ * ERRADA. Não chamar a RPC não isola nada: `fn_sincronizar_baixa_legado`,
+ * que o sync financeiro roda a cada 60s, soma TODA baixa ativa com
+ * `origem <> 'sync_legado'` como "outras" e encolhe o próprio espelho para
+ * `valor_pago_legado - outras`. Uma linha inserida aqui entra nessa conta
+ * na primeira varredura seguinte, sem ninguém chamar RPC nenhuma.
+ *
+ * Auditoria read-only feita sobre os dados reais de produção:
+ *
+ *   - 2.538 títulos no ledger `CR_PagtoParcial`
+ *   -   892 seriam inofensivos
+ *   - 1.646 EXCEDERIAM o `valor_pago_legado` do título
+ *   - R$ 222.479,37 de excesso somado
+ *   -    53 títulos virariam 'paga' SEM terem sido pagos
+ *
+ * A causa é semântica: a soma de `CR_PagtoParcial` corresponde a
+ * `CR_Duplicatas."ValorParcialmentePago"`, que NÃO é a mesma coluna que
+ * alimenta `valor_pago_legado`. Somar as duas conta o mesmo dinheiro duas
+ * vezes. Parte do ledger, aliás, já entrou na carga histórica — são as 116
+ * linhas `origem='migracao_legado'` (R$ 19.597,19), e reimportá-las
+ * duplicaria exatamente esses valores.
+ *
+ * Além disso, este job nunca chegou a rodar de verdade: `origem: 'netvision'`
+ * não passa no CHECK da tabela, que só aceita manual/migracao_legado/
+ * importacao_bancaria/pix_automatico/sync_legado. O `--dry-run` dizendo
+ * "3.584 seriam criados" sempre foi otimista — o INSERT falharia inteiro.
+ *
+ * O saldo do CRM JÁ ESTÁ CORRETO sem este job: quem espelha pagamento é o
+ * sync financeiro, pelo total do título. O que falta aqui é só o DETALHE
+ * evento a evento, que hoje ninguém consome.
+ *
+ * Para fazer isto direito, o histórico precisa de tabela PRÓPRIA
+ * (ex.: `pagamentos_legado_eventos`), fora de `baixas_financeiras` —
+ * `baixas_financeiras` é o razão que decide saldo, e histórico não pode
+ * morar num lugar onde ele vira dinheiro. Enquanto essa tabela não existir,
+ * a escrita fica bloqueada. O `--dry-run` continua liberado: é só leitura e
+ * serve para a análise.
  */
+
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { chavesLegado } from '../lib/financeiroLegado.js'
 import { configE01 } from '../lib/e01Host.js'
+
+export const ESCRITA_BLOQUEADA = true
+
+export const MOTIVO_BLOQUEIO =
+  'Escrita bloqueada em 18/09/2026. Inserir CR_PagtoParcial em baixas_financeiras faria ' +
+  'fn_sincronizar_baixa_legado contar o mesmo dinheiro duas vezes: 1.646 dos 2.538 títulos ' +
+  'excederiam o valor pago real (R$ 222.479,37 de excesso) e 53 virariam "paga" sem terem ' +
+  'sido pagos. O histórico evento a evento precisa de tabela própria, fora do razão que ' +
+  'decide saldo. Use --dry-run para analisar; ver o cabeçalho deste arquivo.'
 
 async function conectarE01() {
   return new pg.Pool({
@@ -62,6 +114,11 @@ function montarBaixa(row, contaId) {
  * `total_sem_conta_vinculada` pra visibilidade, sem quebrar o sync.
  */
 export async function executarSincronizacaoPagamentos({ dryRun = true, poolE01 = null, log = console.log } = {}) {
+  // Antes de conectar em qualquer coisa: a escrita não sai daqui. A trava é
+  // no código, não em variável de ambiente, porque a correção não é
+  // "configurar diferente" — é modelar o histórico em outra tabela.
+  if (!dryRun && ESCRITA_BLOQUEADA) throw new Error(MOTIVO_BLOQUEIO)
+
   const pool = poolE01 ?? await conectarE01()
   const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_sem_conta_vinculada: 0, total_com_erro: 0 }
   const erros = []
