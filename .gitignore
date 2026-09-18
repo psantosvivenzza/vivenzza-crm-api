@@ -16,3 +16,11 @@ scripts/voice/benchmark-output/
 # versionado. Backups do Asterisk (scripts/voice-server/backup-asterisk.sh)
 # são gravados FORA do repo de propósito — nunca aparecem aqui por acidente.
 voice-server.env
+
+# Backups do .env guardam o arquivo INTEIRO, com senha do ARI, chave do
+# Supabase e tokens. Nao estavam ignorados ate 18/09/2026 — um `git add .`
+# distraido mandaria credencial de producao para o GitHub.
+.env.bak*
+*.bak-*
+*.bak1
+logs/

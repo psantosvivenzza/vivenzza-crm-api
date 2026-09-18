@@ -45,6 +45,7 @@ import googleReviewsRouter from './routes/google-reviews.js'
 import agingRouter from './routes/aging.js'
 import dashboardRecuperacaoRouter from './routes/dashboard-recuperacao.js'
 import cobrancasRouter from './routes/cobrancas.js'
+import vozRouter from './routes/voz.js'
 import notificationsRouter from './routes/notifications.js'
 import cron from 'node-cron'
 import { runBackup } from './jobs/backup.js'
@@ -217,6 +218,10 @@ app.use('/api/blog', auth, adminOnly, blogRouter)
 // avaliações da loja, que alimentam o widget público em /api/avaliacoes.
 app.use('/api/admin/avaliacoes', auth, adminOnly, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOuFinanceiro, cobrancasRouter)
+// Painel da Central de Voz — SÓ LEITURA das views de auditoria das ligações.
+// Mesmo controle de acesso da cobrança (admin ou financeiro): quem pode ver
+// título vencido pode ver a ligação que cobrou aquele título.
+app.use('/api/voz', auth, adminOuFinanceiro, vozRouter)
 app.use('/api/notifications', auth, notificationsRouter)
 // FASE B.1 (homologação) — shadow mínimo, só leitura + PATCH de 3 flags
 // próprias (nba_shadow_mode/score_shadow_mode/shadow_max_customers). Nenhuma

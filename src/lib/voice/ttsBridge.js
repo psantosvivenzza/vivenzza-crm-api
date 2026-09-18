@@ -68,7 +68,7 @@ async function sintetizarViaWorker(texto, wavLocalTemp) {
   const resultado = await worker.enviar({ texto, wav_out: wavLocalTemp })
   return {
     loadMs: 0, synthMs: resultado.synth_ms, audioPrerollMs: resultado.audio_preroll_ms, duracaoAudioMs: resultado.duracao_audio_ms,
-    requestMs: Date.now() - t0, viaWorker: true,
+    requestMs: Date.now() - t0, viaWorker: true, textoRecebido: resultado.texto_recebido,
   }
 }
 
@@ -113,7 +113,7 @@ export async function sintetizar(texto, wavSaidaPath) {
     return {
       wavPath: wavSaidaPath, ulawPath: ulawSaidaPath,
       loadMs: resultado.loadMs, synthMs: resultado.synthMs, audioPrerollMs: resultado.audioPrerollMs, duracaoAudioMs: resultado.duracaoAudioMs,
-      requestMs: resultado.requestMs, viaWorker: resultado.viaWorker,
+      requestMs: resultado.requestMs, viaWorker: resultado.viaWorker, textoRecebido: resultado.textoRecebido,
     }
   } finally {
     await unlink(wavLocalTemp).catch(() => {})
