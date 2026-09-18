@@ -65,6 +65,10 @@ async function transcreverViaSubprocessoAvulso(wavLocalTemp, idioma) {
   const t0 = Date.now()
   const { stdout } = await execFileAsync(pythonBin, [sttScript, wavLocalTemp, '--model', sttModel, '--lang', idioma], {
     timeout: 30000, maxBuffer: 10 * 1024 * 1024,
+    // Mesmo motivo do pyWorkerClient: sem isto o transcript acentuado volta
+    // corrompido do Python no Windows (cp1252) e chega assim ao LLM.
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    encoding: 'utf8',
   })
   const resultado = JSON.parse(stdout.trim().split('\n').pop())
   return {

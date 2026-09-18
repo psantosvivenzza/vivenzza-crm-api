@@ -71,13 +71,30 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
     assert.equal(avaliarFlagExternalHabilitada(config), false)
   })
 
-  await t.test('4. resolverDestino(EXTERNAL) continua fail-closed — não foi tocado por este trabalho', () => {
-    assert.throws(() => resolverDestino(TIPO_DESTINO.EXTERNAL), /fail-closed/)
+  await t.test('4. resolverDestino(EXTERNAL) — adapter real implementado (2026-09-16), não lança mais por si só', () => {
+    // ATUALIZADO 2026-09-16: TRUNK_EXTERNO_CONFIGURADO passou a true (adapter
+    // Nvoip real, homologação em andamento) — resolverDestino não é mais a
+    // trava. A trava de verdade contra originar chamada real está em OUTRO
+    // lugar (voice_external_enabled=false no banco, allowlist vazia, e
+    // --confirm manual no script de trigger) — ver testes 3 e 6 deste mesmo
+    // arquivo, que continuam garantindo isso independentemente desta função.
+    assert.equal(resolverDestino(TIPO_DESTINO.EXTERNAL), 'PJSIP/nvoip-endpoint')
     assert.equal(resolverDestino(TIPO_DESTINO.INTERNAL), 'PJSIP/7001', 'ramal interno já homologado não pode ter sido afetado')
   })
 
-  await t.test('5. construirPayloadOriginateExterno também lança hoje — segunda trava, independente da primeira', () => {
-    assert.throws(() => construirPayloadOriginateExterno({ numero: '+5511999998888', ariApp: 'vivenzza-voice-ai' }), /fail-closed/)
+  await t.test('5. construirPayloadOriginateExterno monta URI SIP completa quando NVOIP_SIP_SERVER está configurado', () => {
+    // ATUALIZADO 2026-09-16: achado real de homologação — o Asterisk rejeita
+    // PJSIP/<endpoint>/<numero-cru> ("Could not create dialog to invalid
+    // URI"); o payload agora inclui uma URI SIP completa
+    // (sip:<numero>@<host>:<porta>), lida de NVOIP_SIP_SERVER/NVOIP_SIP_PORT.
+    // Sem essas envs (caso deste ambiente de teste), a função falha com erro
+    // de configuração claro — não mais com a mensagem antiga "fail-closed"
+    // (essa trava específica não existe mais aqui; as travas reais contra
+    // originar uma chamada real seguem cobertas pelos testes 3 e 6).
+    assert.throws(
+      () => construirPayloadOriginateExterno({ numero: '+5511999998888', ariApp: 'vivenzza-voice-ai' }),
+      /NVOIP_SIP_SERVER não configurado/
+    )
   })
 
   await t.test('6. limites globais (hora/dia) — fail-closed com limite<=0, bloqueia ao atingir o teto', () => {

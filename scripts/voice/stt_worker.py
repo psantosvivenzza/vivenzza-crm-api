@@ -25,6 +25,17 @@ def emit(obj):
     sys.stdout.flush()
 
 
+# Blindagem de encoding: no Windows o padrao do stdin/stdout e a code page
+# do locale (cp1252), o que corrompe todo acento vindo do Node e faz o Piper
+# FALAR o nome do simbolo ("copyright"). Forca UTF-8 nas duas pontas.
+try:
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="small")

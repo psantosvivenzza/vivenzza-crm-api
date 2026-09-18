@@ -36,6 +36,8 @@ Uso: python tts_worker.py --model caminho.onnx [--length-scale 1.10] [--preroll-
 import argparse
 import audioop
 import json
+import struct
+import math
 import os
 import sys
 import time
@@ -62,6 +64,8 @@ def resample_para_telefonia(wav_path):
     if sample_rate != TELEFONIA_SAMPLE_RATE:
         frames, _ = audioop.ratecv(frames, sample_width, 1, sample_rate, TELEFONIA_SAMPLE_RATE, None)
 
+    frames = condicionar_para_telefonia(frames, sample_width) if CONDICIONAMENTO else normalizar_simples(frames, sample_width)
+
     with wave.open(wav_path, "wb") as wav_out:
         wav_out.setnchannels(1)
         wav_out.setsampwidth(sample_width)
@@ -69,6 +73,120 @@ def resample_para_telefonia(wav_path):
         wav_out.writeframes(frames)
 
     return frames, sample_width
+
+
+# Liga/desliga o condicionamento agressivo. Padrao: DESLIGADO.
+CONDICIONAMENTO = os.environ.get("VOICE_TTS_CONDICIONAMENTO", "off").strip().lower() in ("on", "1", "true", "sim")
+
+
+def normalizar_simples(frames, sample_width):
+    """Apenas nivela o volume. Sem filtro, sem pre-enfase.
+
+    ACHADO DEFINITIVO (17/09/2026): capturamos o RTP pacote a pacote de uma
+    ligacao real. O que sai do Asterisk e byte-identico ao arquivo -- 50
+    pacotes/s, 160 bytes, zero perda, envelope e pico iguais aos do .wav
+    fonte. Logo o problema NUNCA esteve no Asterisk, no codec, no resample
+    nem no trunk: estava no condicionamento abaixo, que aplicava passa-alta
+    de 300 Hz em dois passes (~24 dB de corte na fundamental de uma voz
+    masculina, que vive em ~110 Hz) mais pre-enfase de 0,35 por cima.
+
+    No alto-falante do PC isso soa "mais nitido" -- por isso o .wav parecia
+    ter melhorado. No celular o AMR da operadora recebe uma voz sem corpo e
+    com agudo empurrado e devolve fala fina, rapida e comendo letra, que foi
+    exatamente o relato do cliente. Teste A/B de 4 variantes DENTRO DA MESMA
+    LIGACAO (mesmo trunk, mesma operadora, mesmo aparelho) decidiu:
+    pt_BR-cadu-medium, length_scale 1.10, SEM condicionamento.
+    """
+    if sample_width != 2:
+        return frames
+    n = len(frames) // 2
+    if n == 0:
+        return frames
+    x = struct.unpack("<%dh" % n, frames)
+    pico = max(1, max(abs(v) for v in x))
+    ganho = 22000.0 / pico
+    LIMITE = 32000
+    saida = []
+    for v in x:
+        s = v * ganho
+        if s > LIMITE:
+            s = LIMITE
+        elif s < -LIMITE:
+            s = -LIMITE
+        saida.append(int(s))
+    return struct.pack("<%dh" % n, *saida)
+
+
+def condicionar_para_telefonia(frames, sample_width):
+    """DESATIVADO por padrao -- ver normalizar_simples(). Mantido para
+    permitir volta atras via VOICE_TTS_CONDICIONAMENTO=on.
+
+    Texto original do achado que motivou este filtro:
+
+    ACHADO REAL (17/09/2026, primeiras ligacoes atendidas por clientes): o
+    cliente relatou fala "enrolada". A analise do WAV gerado mostrou o porque:
+    31,6% da energia abaixo de 300 Hz e apenas 13,7% entre 2 e 4 kHz. As
+    consoantes, que sao o que distingue uma palavra da outra, vivem justamente
+    nessa faixa alta. Sobrava grave (que na telefonia nem passa, so abafa) e
+    faltava consoante.
+
+    Tres etapas, todas padrao em audio de telefonia:
+      1. Passa-alta em 300 Hz  - tira o ronco que mascara a fala.
+      2. Pre-enfase leve       - levanta as consoantes de 2-4 kHz.
+      3. Normalizacao com teto - fala com nivel constante e sem estalo no
+                                 inicio (o WAV analisado batia 32.724 de
+                                 32.767 logo na primeira silaba).
+    """
+    if sample_width != 2:
+        return frames
+
+    n = len(frames) // 2
+    if n == 0:
+        return frames
+    x = list(struct.unpack("<%dh" % n, frames))
+
+    # 1) Passa-alta de 1a ordem em ~300 Hz (dois passes = ~12 dB/oitava).
+    #    coef = RC/(RC+dt), RC = 1/(2*pi*fc)
+    fc = 300.0
+    dt = 1.0 / TELEFONIA_SAMPLE_RATE
+    rc = 1.0 / (2.0 * math.pi * fc)
+    alpha = rc / (rc + dt)
+    for _ in range(2):
+        y = [0.0] * n
+        anterior_x = x[0]
+        anterior_y = 0.0
+        for i in range(n):
+            anterior_y = alpha * (anterior_y + x[i] - anterior_x)
+            anterior_x = x[i]
+            y[i] = anterior_y
+        x = y
+
+    # 2) Pre-enfase suave: realca as consoantes sem deixar a voz metalica.
+    pre = 0.35
+    z = [0.0] * n
+    anterior = 0.0
+    for i in range(n):
+        z[i] = x[i] - pre * anterior
+        anterior = x[i]
+    x = z
+
+    # 3) Normaliza pelo percentil alto (nao pelo pico absoluto, pra um unico
+    #    estalo nao derrubar o volume da fala inteira) e limita o resto.
+    magnitudes = sorted(abs(v) for v in x)
+    referencia = magnitudes[int(0.995 * (n - 1))] or 1.0
+    ALVO = 26000.0  # ~ -2 dBFS, com folga pra nao distorcer
+    ganho = ALVO / referencia
+    LIMITE = 32000
+    saida = []
+    for v in x:
+        s = v * ganho
+        if s > LIMITE:
+            s = LIMITE
+        elif s < -LIMITE:
+            s = -LIMITE
+        saida.append(int(s))
+
+    return struct.pack("<%dh" % n, *saida)
 
 
 def aplicar_preroll(wav_path, preroll_ms, sample_width):
@@ -100,6 +218,17 @@ def gravar_ulaw(wav_path, frames_8k_16bit, sample_width):
     return ulaw_path
 
 
+# Blindagem de encoding: no Windows o padrao do stdin/stdout e a code page
+# do locale (cp1252), o que corrompe todo acento vindo do Node e faz o Piper
+# FALAR o nome do simbolo ("copyright"). Forca UTF-8 nas duas pontas.
+try:
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -129,6 +258,9 @@ def main():
 
         req_id = req.get("id")
         texto = req.get("texto")
+        # Diagnostico de encoding: devolve o texto EXATO que chegou, para o
+        # Node poder provar que nao houve mojibake no caminho.
+        texto_recebido = texto
         wav_out = req.get("wav_out")
         try:
             t0 = time.time()
@@ -144,7 +276,7 @@ def main():
                 duracao_ms = int((wav_file.getnframes() / wav_file.getframerate()) * 1000)
 
             emit({
-                "id": req_id, "type": "result",
+                "id": req_id, "type": "result", "texto_recebido": texto_recebido,
                 "synth_ms": synth_ms, "audio_preroll_ms": args.preroll_ms, "duracao_audio_ms": duracao_ms,
                 "wav_path": wav_out, "ulaw_path": ulaw_path,
             })

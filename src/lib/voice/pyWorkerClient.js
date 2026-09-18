@@ -31,11 +31,21 @@ export function criarWorkerPersistente({ label, pythonBin, scriptPath, args = []
   let prontoPromise = null
   let ultimosRestartsMs = []
 
+  // ACHADO DA REVISÃO (17/09/2026): esta promessa é rejeitada quando o
+  // worker excede os restarts, mas depois do boot NINGUÉM mais faz await
+  // nela. No Node 22 uma unhandled rejection DERRUBA O PROCESSO — ou seja,
+  // o worker de TTS morrendo 3 vezes levava junto o serviço de voz inteiro,
+  // com ligações ativas, sem hangup e sem auditoria. O catch vazio é o que
+  // transforma isso em degradação (fallback) em vez de queda.
   function novaPromessaPronto() {
     prontoPromise = new Promise((resolve, reject) => {
       resolvePronto = resolve
       rejeitarPronto = reject
     })
+    // Handler "silencioso" só para marcar a promessa como tratada. Quem
+    // realmente precisa do erro continua recebendo pelo await de
+    // aguardarPronto().
+    prontoPromise.catch(() => {})
   }
 
   function limparPendentesComErro(mensagem) {
@@ -50,7 +60,21 @@ export function criarWorkerPersistente({ label, pythonBin, scriptPath, args = []
     pronto = false
     novaPromessaPronto()
     console.log(`[voice-ai] ${label}_MODEL_LOAD_START`)
-    proc = spawn(pythonBin, [scriptPath, ...args], { stdio: ['pipe', 'pipe', 'pipe'] })
+    // ACHADO REAL (17/09/2026, relato do cliente na ligacao: "ele fala o
+    // NOME do acento, copyright no meio da frase"). O Node escreve o JSON em
+    // UTF-8, mas no Windows o sys.stdin do Python assume a code page do
+    // locale (cp1252). Ai "Ola" (0xC3 0xA1) vira "OlA¡", "acao" vira "aA§ao"
+    // e "A©" aparece no lugar de acento -- e o normalizador de texto do
+    // Piper le esses simbolos e FALA o nome deles ("copyright", "pound",
+    // "section"). Nao era sotaque nem modelo de voz: era mojibake.
+    // PYTHONIOENCODING forca UTF-8 nas duas pontas do pipe.
+    proc = spawn(pythonBin, [scriptPath, ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    })
+    proc.stdin.setDefaultEncoding('utf8')
+    proc.stdout.setEncoding('utf8')
+    proc.stderr.setEncoding('utf8')
     rl = createInterface({ input: proc.stdout })
 
     rl.on('line', (linha) => {

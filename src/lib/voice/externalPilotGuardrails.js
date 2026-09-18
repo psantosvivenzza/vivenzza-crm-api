@@ -28,12 +28,40 @@ export function avaliarChamadaDuplicadaAtiva(numero, chamadasAtivas) {
   return !lista.some((c) => c.numero === numero && c.status !== 'HANGUP' && c.status !== 'COMPLETED' && c.status !== 'NO_ANSWER' && c.status !== 'BUSY' && c.status !== 'FAILED')
 }
 
+export const TIMEZONE_COBRANCA = 'America/Sao_Paulo'
+
+// BUG REAL corrigido em 2026-09-17: esta função usava getDay()/getHours() do
+// relógio LOCAL do processo. Num servidor em UTC (o caso normal em nuvem),
+// 18:00 BRT é 21:00 UTC — o guard achava que estava fora da janela e
+// bloqueava ligações legítimas; pior, 06:00 BRT é 09:00 UTC e ele
+// AUTORIZARIA uma ligação às 6 da manhã, fora da janela legal estadual.
+// Agora a hora é sempre resolvida em horário de Brasília, independente do
+// fuso onde o processo roda. Mesmo princípio de hojeBrtISO() em
+// collectionContactPolicy.js, mas via Intl — que também acerta a virada do
+// dia, que a aritmética de UTC-3 não cobria.
+export function partesHorarioBrt(data) {
+  const partes = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: TIMEZONE_COBRANCA,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+      .formatToParts(data)
+      .map((parte) => [parte.type, parte.value]),
+  )
+  const DIAS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+  // hour12:false devolve '24' à meia-noite em alguns runtimes — normaliza.
+  const hora = Number(partes.hour) % 24
+  return { diaSemana: DIAS[partes.weekday], minutoDoDia: hora * 60 + Number(partes.minute) }
+}
+
 // Fail-closed por padrão: sem política explícita com pelo menos uma janela,
 // NUNCA autoriza — não herda horário comercial "padrão" às cegas.
 export function avaliarHorarioPermitido(horaAtual, politica) {
   if (!politica || !Array.isArray(politica.janelas) || politica.janelas.length === 0) return false
-  const diaSemana = horaAtual.getDay()
-  const minutoDoDia = horaAtual.getHours() * 60 + horaAtual.getMinutes()
+  const { diaSemana, minutoDoDia } = partesHorarioBrt(horaAtual)
   return politica.janelas.some((janela) => {
     if (Array.isArray(janela.dias) && !janela.dias.includes(diaSemana)) return false
     return minutoDoDia >= janela.inicioMinutos && minutoDoDia < janela.fimMinutos

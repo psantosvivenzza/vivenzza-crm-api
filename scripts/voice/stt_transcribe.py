@@ -11,6 +11,15 @@ import json
 import time
 import sys
 
+# Blindagem de encoding (Windows usa cp1252 por padrao no stdout e isso
+# corrompe todo transcript acentuado no caminho de volta ao Node).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+
 
 def main():
     parser = argparse.ArgumentParser()

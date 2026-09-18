@@ -13,6 +13,11 @@ import { sintetizar, iniciarTtsWorker, aguardarTtsPronto } from './ttsBridge.js'
 import { responderTurno, aquecerCerebro } from './voiceBrain.js'
 import { inspecionarWav } from './wavInspector.js'
 import { ENDPOINT_PERMITIDO, APP_ARGS_MARCADOR, classificarCausaSemAtendimento } from './outboundInternalTest.js'
+import { ENDPOINT_EXTERNO_NVOIP } from './destinoResolver.js'
+import { CONTEXTO_MARCADOR as MARCADOR_EXTERNO } from './outboundExternalTest.js'
+import { montarSaudacao, FRASE_NAO_ENTENDI, fraseDespedida, fraseEncerramentoNormal, FRASE_TRANSFERIR_HUMANO } from './saudacao.js'
+import { filtrarFalaDoRobo, avaliarConfirmacaoResponsavel, ehNegacaoDeIdentidade, ehCaixaPostal, RESPOSTA_ASSUNTO_A_TERCEIRO } from './guardaConteudo.js'
+import { finalizarTentativa } from './voiceCallsRepo.js'
 
 // VOICE AI OUTBOUND INTERNAL MVP: a originação em si (o POST que faz o
 // telefone tocar) acontece num script separado (scripts/voice/
@@ -25,6 +30,19 @@ import { ENDPOINT_PERMITIDO, APP_ARGS_MARCADOR, classificarCausaSemAtendimento }
 // (app subscription) se conectam no ARI. Filtra pelo nome do canal
 // (PJSIP/7001-...) já que é o único destino permitido neste MVP.
 const PREFIXO_CANAL_OUTBOUND = `${ENDPOINT_PERMITIDO}-`
+// BUG REAL corrigido em 17/09/2026, na primeira ligação para um cliente real:
+// este filtro só conhecia o ramal interno da homologação (PJSIP/7001-), então
+// TODA chamada externa (PJSIP/nvoip-endpoint-...) passava batido. O serviço
+// ficava cego: não logava RINGING/ANSWERED/NO_ANSWER e, pior, nunca gravava o
+// desfecho em voice_calls — o registro ficava preso em CREATED para sempre e
+// o painel não conseguia distinguir quem atendeu de quem não atendeu, que é
+// exatamente a métrica que denuncia bloqueio de operadora.
+const PREFIXO_CANAL_EXTERNO = `${ENDPOINT_EXTERNO_NVOIP}-`
+
+function ehCanalOutboundNosso(channel) {
+  const nome = channel?.name ?? ''
+  return nome.startsWith(PREFIXO_CANAL_OUTBOUND) || nome.startsWith(PREFIXO_CANAL_EXTERNO)
+}
 const canaisOutboundEmStasis = new Set()
 
 // ACHADO (rodada de UX de voz — "chiado" reportado numa ligação real):
@@ -48,7 +66,13 @@ async function preservarAudioDiagnostico(origemPath, nomeArquivo) {
 // antes de desistir e seguir só com o fallback de subprocesso avulso (mais
 // lento, mas nunca impede o serviço de subir — degradação visível nos logs,
 // nunca silenciosa).
-const WORKER_READY_TIMEOUT_MS = Number(process.env.VOICE_WORKER_READY_TIMEOUT_MS || 60000)
+// ACHADO REAL (18/09/2026, 1a subida depois de um reboot): com o cache de
+// disco frio, o modelo do Whisper levou 172s para carregar — o timeout de
+// 60s disparou, o serviço marcou o STT como indisponível e avisaria os
+// turnos para usar o fallback lento. O worker se recuperou sozinho ao
+// ficar pronto, mas o alarme era falso e assustava à toa. 240s cobre a
+// máquina fria sem esconder uma falha de verdade.
+const WORKER_READY_TIMEOUT_MS = Number(process.env.VOICE_WORKER_READY_TIMEOUT_MS || 240000)
 
 async function aguardarComTimeout(promessa, timeoutMs, rotulo) {
   let timeoutId
@@ -74,8 +98,21 @@ const RECORD_MAX_DURATION_S = Number(process.env.VOICE_RECORD_MAX_DURATION_S || 
 // só aceita INTEIRO de segundos — 800ms pedido não é expressável sem VAD
 // (Silero, fora de escopo agora). 1s é o mínimo granular disponível hoje.
 const RECORD_MAX_SILENCE_S = Number(process.env.VOICE_RECORD_MAX_SILENCE_S || 1)
+// Silêncio entre atender e a primeira palavra — ver comentário no answer().
+const PAUSA_APOS_ATENDER_MS = Number(process.env.VOICE_PAUSA_APOS_ATENDER_MS ?? 1200)
 
-const SAUDACAO = 'Olá. Este é um teste interno do assistente de voz da Vivenzza. Pode falar depois do sinal.'
+// ACHADO REAL (17/09/2026, primeira ligação externa atendida por um humano):
+// a saudação antiga ("Este é um teste interno do assistente de voz...") era
+// um texto de bancada. Quem atende o telefone não tem o contexto do teste, e
+// a ligação soa desconexa — ainda mais porque o cérebro responde com o prompt
+// de COBRANÇA nos turnos seguintes. Saudação agora: identifica a marca já na
+// primeira frase, diz explicitamente que é um atendimento automatizado
+// (transparência — o interlocutor precisa saber que fala com uma máquina) e
+// dá uma instrução clara do que fazer. Frases curtas separadas por PONTO,
+// porque o TTS usa a pontuação como pausa: sem isso a fala sai atropelada.
+// Configurável por env pra ajustar o texto sem mexer em código.
+const SAUDACAO = process.env.VOICE_SAUDACAO
+  || 'Olá! Aqui é o assistente virtual da Vivenzza Professional. Esta é uma ligação automatizada de atendimento. Pode falar normalmente depois do sinal, que eu te escuto.'
 const NOME_SAUDACAO_FIXA = 'voice-ai-saudacao-fixa'
 const FEEDBACK_IMEDIATO = 'Só um instante enquanto verifico isso.'
 const NOME_FEEDBACK_FIXO = 'voice-ai-feedback-fixo'
@@ -150,22 +187,53 @@ export async function iniciarServicoVoz() {
   // Só loga pra canais que nunca chegaram a StasisStart (senão duplicaria
   // o que instrumentarCanal() já loga depois de StasisStart).
   client.on('ChannelStateChange', (event, channel) => {
-    if (!channel.name?.startsWith(PREFIXO_CANAL_OUTBOUND) || canaisOutboundEmStasis.has(channel.id)) return
-    if (channel.state === 'Ring' || channel.state === 'Ringing') console.log(`[voice-ai] OUTBOUND_EVENT=RINGING channel=${channel.id}`)
-    if (channel.state === 'Up') console.log(`[voice-ai] OUTBOUND_EVENT=ANSWERED channel=${channel.id}`)
+    if (!ehCanalOutboundNosso(channel) || canaisOutboundEmStasis.has(channel.id)) return
+    if (channel.state === 'Ring' || channel.state === 'Ringing') {
+      console.log(`[voice-ai] OUTBOUND_EVENT=RINGING channel=${channel.id}`)
+      canaisQueTocaram.add(channel.id)
+    }
+    if (channel.state === 'Up') {
+      console.log(`[voice-ai] OUTBOUND_EVENT=ANSWERED channel=${channel.id}`)
+      auditarAtendimento(channel.id)
+    }
   })
   client.on('ChannelDestroyed', (event, channel) => {
-    if (!channel.name?.startsWith(PREFIXO_CANAL_OUTBOUND) || canaisOutboundEmStasis.has(channel.id)) return
+    // canaisJaAuditados protege contra a corrida: o finally do StasisStart
+    // remove o canal de canaisOutboundEmStasis ANTES de o ChannelDestroyed
+    // chegar do Asterisk, e sem isto este handler reabria uma chamada já
+    // conversada como NO_ANSWER.
+    if (!ehCanalOutboundNosso(channel) || canaisOutboundEmStasis.has(channel.id) || canaisJaAuditados.has(channel.id)) return
     const resultado = classificarCausaSemAtendimento(event.cause)
     console.log(`[voice-ai] OUTBOUND_EVENT=${resultado} channel=${channel.id} cause=${event.cause} cause_txt="${event.cause_txt}" (nunca entrou em conversa — desligado antes de atender)`)
+    const classificado = classificarEncerramento(channel.id, resultado)
+    if (classificado !== resultado) {
+      console.log(`[voice-ai] OUTBOUND_EVENT reclassificado ${resultado} -> ${classificado} (o telefone chegou a tocar) channel=${channel.id}`)
+    }
+    auditarEncerramento(channel.id, {
+      status: classificado,
+      hangupCause: event.cause_txt ?? String(event.cause),
+      failureClass: classificado === 'COMPLETED' ? null : classificado,
+    })
+    canaisQueTocaram.delete(channel.id)
   })
 
   client.on('StasisStart', async (event, channel) => {
-    const ehOutbound = Array.isArray(event.args) && event.args.includes(APP_ARGS_MARCADOR)
+    // ACHADO DA REVISÃO (17/09/2026): só o marcador do teste INTERNO era
+    // reconhecido, então TODA ligação de cobrança entrava como
+    // outbound=false. Efeito: a auditoria classificava a chamada como
+    // "nunca entrou em conversa" e o painel ficava mentindo justamente na
+    // métrica que denuncia bloqueio de operadora.
+    const ehOutbound = Array.isArray(event.args)
+      && (event.args.includes(APP_ARGS_MARCADOR) || event.args.includes(MARCADOR_EXTERNO))
     if (ehOutbound) canaisOutboundEmStasis.add(channel.id)
     console.log(`[voice-ai] StasisStart channel=${channel.id} outbound=${ehOutbound}`)
     if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=STASIS_START channel=${channel.id}`)
     instrumentarCanal(channel)
+
+    let statusFinal = 'FAILED'
+    let ultimoIntent = null
+    let ultimoRequiresHuman = false
+    const transcricoes = []
 
     try {
       await rm(DIAG_ULTIMA_LIGACAO_DIR, { recursive: true, force: true }).catch(() => {})
@@ -185,31 +253,104 @@ export async function iniciarServicoVoz() {
         await channel.answer()
         console.log(`[voice-ai] answer() OK channel=${channel.id}`)
       }
+      {
+        // ACHADO REAL (17/09/2026, ouvindo a ligação): o áudio começava no
+        // instante do atendimento e a pessoa perdia o início da frase — o
+        // celular leva cerca de um segundo pra abrir o caminho de som depois
+        // que o usuário encosta no botão. Esta pausa é curta o bastante pra
+        // não parecer chamada muda e longa o bastante pra ninguém perder o
+        // "Olá".
+        if (PAUSA_APOS_ATENDER_MS > 0) {
+          await new Promise((r) => setTimeout(r, PAUSA_APOS_ATENDER_MS))
+          console.log(`[voice-ai] pausa de ${PAUSA_APOS_ATENDER_MS}ms após atender (caminho de áudio do celular) channel=${channel.id}`)
+        }
+      }
 
       if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=CONVERSATION_STARTED channel=${channel.id}`)
+      // Nome do contato, quando a fila mandou. Falhar aqui NUNCA pode
+      // derrubar a ligação: sem nome, cai na abertura genérica por função.
+      let clienteNome = null
+      try {
+        const v = await new Promise((resolve) => {
+          channel.getChannelVar({ variable: 'VIVENZZA_CLIENTE_NOME' }, (err, res) => resolve(err ? null : res?.value))
+        })
+        clienteNome = v || null
+      } catch { clienteNome = null }
+
+      const textoSaudacao = montarSaudacao(clienteNome)
+      console.log(`[voice-ai] SAUDACAO channel=${channel.id} nome=${clienteNome ? 'sim' : 'nao'} texto="${textoSaudacao}"`)
+
       await tocarComFallback(channel, async () => {
-        if (!saudacaoFixa) throw new Error('saudação pré-gerada indisponível')
-        return saudacaoFixa
+        const nome = `voice-ai-${channel.id}-saudacao`
+        try {
+          const r = await sintetizar(textoSaudacao, path.join(SOUNDS_DIR, `${nome}.wav`))
+          return { media: `custom/${nome}`, duracaoMs: r.duracaoAudioMs }
+        } catch (err) {
+          console.error(`[voice-ai] TTS da saudação personalizada falhou (${err.message}) — caindo na saudação pré-gerada`)
+          if (!saudacaoFixa) throw new Error('saudação pré-gerada indisponível')
+          return saudacaoFixa
+        }
       }, 'saudação')
       if (saudacaoFixa) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_SAUDACAO_FIXA}.wav`), '01-saudacao.wav')
       if (feedbackFixo) await preservarAudioDiagnostico(path.join(SOUNDS_DIR, `${NOME_FEEDBACK_FIXO}.wav`), '02-feedback.wav')
 
       let turno = 1
-      let ultimoRequiresHuman = false
+      let reprompts = 0
+      const estadoConversa = { responsavelConfirmado: false }
+      let encerramentoFalado = false
       for (; turno <= MAX_TURNOS; turno++) {
         console.log(`[voice-ai] === turno ${turno}/${MAX_TURNOS} channel=${channel.id} ===`)
-        const continuar = await executarTurno(client, channel, turno)
+        const continuar = await executarTurno(client, channel, turno, estadoConversa)
         if (!continuar.ok) {
-          console.log(`[voice-ai] turno ${turno} não produziu diálogo válido (${continuar.motivo}) — encerrando`)
-          break
+          // ACHADO REAL (17/09/2026): quando o STT nao entendia, o loop
+          // quebrava e o finally desligava SEM DIZER NADA. Do lado do
+          // cliente isso e simplesmente "a ligacao caiu do nada" -- foi o
+          // relato literal. Numa cobranca isso e pior que nao ligar: queima
+          // a marca e o cliente nao sabe nem quem era. Agora pedimos para
+          // repetir ate REPROMPTS_MAXIMOS e, so entao, nos despedimos.
+          if (continuar.caixaPostal) {
+            statusFinal = 'CAIXA_POSTAL'
+            ultimoIntent = 'CAIXA_POSTAL'
+            if (continuar.transcript) transcricoes.push(continuar.transcript)
+            encerramentoFalado = true // de propósito: NÃO falamos com secretária eletrônica
+            break
+          }
+          reprompts++
+          console.log(`[voice-ai] turno ${turno} sem diálogo válido (${continuar.motivo}) — reprompt ${reprompts}/${REPROMPTS_MAXIMOS}`)
+          if (reprompts > REPROMPTS_MAXIMOS) {
+            await falar(channel, fraseDespedida(), 'despedida')
+            encerramentoFalado = true
+            break
+          }
+          await falar(channel, FRASE_NAO_ENTENDI, 'reprompt')
+          continue
         }
+        reprompts = 0
         ultimoRequiresHuman = continuar.requiresHuman
+        ultimoIntent = continuar.intent ?? ultimoIntent
+        if (continuar.transcript) transcricoes.push(continuar.transcript)
         if (continuar.requiresHuman) {
-          console.log(`[voice-ai] turno ${turno} — requires_human=true, encerrando loop de IA (transferência real pra humano é passo futuro)`)
+          // ACHADO DA REVISÃO (17/09/2026): aqui o código dava break e o
+          // finally desligava. Ou seja: o cliente pedia para falar com uma
+          // pessoa e era DESLIGADO na hora. É o pior desfecho possível numa
+          // cobrança — pior do que nunca ter ligado.
+          console.log(`[voice-ai] turno ${turno} — requires_human=true, avisando o cliente antes de encerrar`)
+          await falar(channel, FRASE_TRANSFERIR_HUMANO, 'transferir-humano')
+          encerramentoFalado = true
           break
         }
       }
+
+      // ACHADO DA REVISÃO: quando o for terminava por esgotar MAX_TURNOS,
+      // ninguém falava nada e o finally desligava. Do lado do cliente isso é
+      // exatamente "a ligação caiu do nada". Nenhum caminho pode encerrar
+      // calado.
+      if (!encerramentoFalado) {
+        await falar(channel, fraseEncerramentoNormal(), 'encerramento')
+        encerramentoFalado = true
+      }
       console.log(`[voice-ai] fim do loop de turnos channel=${channel.id} ultimoRequiresHuman=${ultimoRequiresHuman}`)
+      if (statusFinal !== 'CAIXA_POSTAL') statusFinal = 'COMPLETED'
       if (ehOutbound) console.log(`[voice-ai] OUTBOUND_EVENT=COMPLETED channel=${channel.id}`)
     } catch (err) {
       console.error(`[voice-ai] EXCEÇÃO não tratada no ciclo da chamada channel=${channel.id}: ${err.message}`)
@@ -224,7 +365,21 @@ export async function iniciarServicoVoz() {
       }
       if (ehOutbound) {
         console.log(`[voice-ai] OUTBOUND_EVENT=HANGUP channel=${channel.id}`)
+        canaisJaAuditados.add(channel.id)
+        // Ponto ÚNICO de fechamento da auditoria para chamadas que chegaram
+        // a conversar. Espera curta para o ChannelDestroyed trazer a causa.
+        await new Promise((r) => setTimeout(r, 400))
+        await auditarEncerramento(channel.id, {
+          status: statusFinal,
+          hangupCause: causaDesligamento.get(channel.id) ?? null,
+          failureClass: statusFinal === 'COMPLETED' ? null : statusFinal,
+          intentFinal: ultimoIntent,
+          requiresHuman: ultimoRequiresHuman,
+          transcricao: transcricoes.length ? transcricoes.join(' | ') : null,
+        })
+        causaDesligamento.delete(channel.id)
         canaisOutboundEmStasis.delete(channel.id)
+        setTimeout(() => canaisJaAuditados.delete(channel.id), 60000)
       }
     }
   })
@@ -235,10 +390,84 @@ export async function iniciarServicoVoz() {
   return client
 }
 
+// --- Auditoria em voice_calls -------------------------------------------
+// Fecha o registro que trigger-external-test.mjs abriu ao originar. É o que
+// transforma "ligamos" em "foi atendida, durou X, terminou assim" — sem isto
+// o painel não consegue distinguir uma chamada bem-sucedida de uma que a
+// operadora bloqueou, que é justamente o alarme mais importante.
+//
+// SEMPRE best-effort: uma falha de banco NUNCA pode derrubar uma ligação em
+// andamento. Erro aqui vira log, não exceção.
+const atendidaEm = new Map()
+const causaDesligamento = new Map()
+const canaisJaAuditados = new Set()
+// Canais que chegaram a fazer o telefone TOCAR do outro lado (183/Ringing).
+const canaisQueTocaram = new Set()
+
+// ACHADO REAL (17/09/2026, primeiras ligações para clientes reais): a Nvoip
+// encerra a chamada não atendida com causa 0 ("Unknown"), que
+// classificarCausaSemAtendimento() joga em FAILED por não conhecer o código.
+// Resultado: "o cliente não atendeu" (normal em cobrança, 15-35% de contato é
+// o benchmark) virava "falha técnica" no painel — justamente a métrica que
+// denuncia bloqueio de operadora. Se o telefone CHEGOU A TOCAR e ninguém
+// atendeu, isso é NO_ANSWER. FAILED fica reservado para o que nem tocou.
+function classificarEncerramento(channelId, resultadoBruto) {
+  if (resultadoBruto === 'FAILED' && canaisQueTocaram.has(channelId)) return 'NO_ANSWER'
+  return resultadoBruto
+}
+
+async function auditarAtendimento(channelId) {
+  const quando = new Date().toISOString()
+  atendidaEm.set(channelId, quando)
+  try {
+    await finalizarTentativa({ callId: channelId, status: 'ANSWERED', answeredAt: quando, endedAt: null })
+  } catch (err) {
+    console.warn(`[voice-ai] auditoria: nao consegui marcar atendimento de ${channelId} — ${err.message}`)
+  }
+}
+
+async function auditarEncerramento(channelId, { status, hangupCause = null, failureClass = null, intentFinal = null, requiresHuman = null, transcricao = null } = {}) {
+  const inicio = atendidaEm.get(channelId)
+  const fim = new Date().toISOString()
+  const duracao = inicio ? Math.max(0, Math.round((new Date(fim) - new Date(inicio)) / 1000)) : 0
+  atendidaEm.delete(channelId)
+  try {
+    await finalizarTentativa({
+      callId: channelId,
+      status,
+      answeredAt: inicio ?? null,
+      endedAt: fim,
+      durationSeconds: duracao,
+      hangupCause,
+      failureClass,
+      // ACHADO DO PILOTO (18/09/2026): estes três campos eram montados no
+      // finally e DESCARTADOS aqui — por isso intent, requires_human e
+      // transcrição chegavam sempre NULL no banco. Sem eles a régua nunca
+      // enxerga promessa de pagamento e ninguém fica sabendo de um pedido
+      // de atendimento humano.
+      intentFinal,
+      requiresHuman,
+      transcricao,
+    })
+  } catch (err) {
+    console.warn(`[voice-ai] auditoria: nao consegui fechar ${channelId} — ${err.message}`)
+  }
+}
+
 function instrumentarCanal(channel) {
   channel.on('ChannelStateChange', (ev, ch) => console.log(`[voice-ai] ChannelStateChange channel=${ch.id} state=${ch.state}`))
   channel.on('ChannelHangupRequest', (ev, ch) => console.log(`[voice-ai] ChannelHangupRequest channel=${ch.id} cause=${ev.cause} soft=${ev.soft}`))
-  channel.on('ChannelDestroyed', (ev, ch) => console.log(`[voice-ai] ChannelDestroyed channel=${ch.id} cause=${ev.cause} cause_txt="${ev.cause_txt}"`))
+  channel.on('ChannelDestroyed', (ev, ch) => {
+    // ACHADO DA REVISÃO: isto gravava COMPLETED INCONDICIONALMENTE, inclusive
+    // para ligações que estouraram exceção, e corria com o handler de app
+    // (que gravava FAILED/NO_ANSWER na mesma chamada). Quem gravasse por
+    // último vencia — status não-determinístico. Agora a auditoria tem DONO
+    // ÚNICO: quem entrou em Stasis é fechado pelo finally do StasisStart.
+    // Aqui só guardamos a causa real do desligamento.
+    console.log(`[voice-ai] ChannelDestroyed channel=${ch.id} cause=${ev.cause} cause_txt="${ev.cause_txt}"`)
+    causaDesligamento.set(ch.id, ev.cause_txt ?? String(ev.cause))
+    canaisQueTocaram.delete(ch.id)
+  })
   channel.on('StasisEnd', (ev, ch) => console.log(`[voice-ai] StasisEnd channel=${ch.id}`))
   channel.on('PlaybackStarted', (ev, pb) => console.log(`[voice-ai] PlaybackStarted id=${pb.id} media_uri=${pb.media_uri}`))
   channel.on('PlaybackFinished', (ev, pb) => console.log(`[voice-ai] PlaybackFinished id=${pb.id}`))
@@ -257,6 +486,18 @@ function instrumentarCanal(channel) {
 const ESPERA_PLAYBACK_BUFFER_MS = 800
 const ESPERA_PLAYBACK_SEM_DURACAO_MS = 2500
 
+// Quantas vezes pedimos "pode repetir?" antes de encerrar com educação.
+const REPROMPTS_MAXIMOS = Number(process.env.VOICE_REPROMPTS_MAXIMOS || 2)
+
+// Fala uma frase avulsa (reprompt, despedida). Best-effort: nunca derruba.
+async function falar(channel, texto, rotulo) {
+  await tocarComFallback(channel, async () => {
+    const nome = `voice-ai-${channel.id}-${rotulo}-${Date.now()}`
+    const r = await sintetizar(texto, path.join(SOUNDS_DIR, `${nome}.wav`))
+    return { media: `custom/${nome}`, duracaoMs: r.duracaoAudioMs }
+  }, rotulo)
+}
+
 // Nunca deixa a ligação cair por falha de mídia — se o TTS falhar, cai pro
 // tom nativo do Asterisk (tone:ring, já homologado isoladamente), sempre
 // logando a causa real. `gerarMedia` retorna { media, duracaoMs } quando
@@ -273,7 +514,13 @@ async function tocarComFallback(channel, gerarMedia, rotulo) {
     media = null
   }
 
-  const mediaUri = media ? `sound:${media}` : 'tone:ring'
+  // ACHADO DA REVISÃO: o fallback era 'tone:ring'. Do lado de quem JÁ
+  // atendeu, ouvir tom de chamada no meio da conversa é incompreensível e
+  // destrói o posicionamento premium. O feedback pré-gerado ("só um
+  // instante") é sempre melhor que um trim-trim.
+  const fallback = feedbackFixo ? `sound:${feedbackFixo.media}` : 'tone:ring'
+  const mediaUri = media ? `sound:${media}` : fallback
+  if (!media) console.warn(`[voice-ai] FALLBACK_DE_MIDIA (${rotulo}) usando ${mediaUri} channel=${channel.id}`)
   console.log(`[voice-ai] PLAYBACK_REQUESTED (${rotulo}) media=${mediaUri} duracaoMs=${duracaoMs ?? 'desconhecida'} channel=${channel.id}`)
   try {
     const playback = await new Promise((resolve, reject) => {
@@ -307,6 +554,10 @@ function esperarPlaybackFinalizar(channel, playback, duracaoMs) {
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
       console.log(`[voice-ai] fim da espera de playback (${esperaMaximaMs}ms, ${duracaoMs != null ? 'duração conhecida' : 'sem duração — fallback curto'}) id=${playback.id} channel=${channel.id}`)
+      // ACHADO DA REVISÃO: sem este removeListener vazava um listener por
+      // ÁUDIO TOCADO — e como PlaybackFinished nunca chega neste ari-client,
+      // o timeout é o caminho normal, ou seja, vazava sempre.
+      channel.removeListener('PlaybackFinished', onFinished)
       resolve()
     }, esperaMaximaMs)
     function onFinished(ev, pb) {
@@ -321,7 +572,7 @@ function esperarPlaybackFinalizar(channel, playback, duracaoMs) {
 
 // Executa 1 turno completo: grava -> valida -> STT -> cérebro -> TTS ->
 // playback. Nunca lança pra fora — qualquer falha vira {ok:false, motivo}.
-async function executarTurno(client, channel, numeroTurno) {
+async function executarTurno(client, channel, numeroTurno, estado = { responsavelConfirmado: false }) {
   const nomeGravacao = `voice-ai-${channel.id}-turno${numeroTurno}`
   try {
     console.log(`[voice-ai] RECORD_STARTED turno=${numeroTurno} channel=${channel.id}`)
@@ -386,10 +637,50 @@ async function executarTurno(client, channel, numeroTurno) {
       return { ok: false, motivo: 'transcript_vazio' }
     }
 
-    console.log(`[voice-ai] LLM_STARTED turno=${numeroTurno} channel=${channel.id}`)
-    const tLlm0 = Date.now()
-    const resultado = await responderTurno(transcript)
-    const llmMs = Date.now() - tLlm0
+    // CAIXA POSTAL: encerra NA HORA, sem dizer mais nada. Nenhuma palavra
+    // sobre o assunto vai para uma secretária eletrônica que qualquer um
+    // escuta depois. Marca o desfecho para a régua tratar como "não falamos
+    // com ninguém" e tentar de novo noutra faixa de horário.
+    if (ehCaixaPostal(transcript)) {
+      console.log(`[voice-ai] CAIXA_POSTAL detectada turno=${numeroTurno} channel=${channel.id} — encerrando sem deixar recado`)
+      return { ok: false, motivo: 'caixa_postal', caixaPostal: true, transcript, intent: 'CAIXA_POSTAL' }
+    }
+
+    // ATALHO DETERMINÍSTICO (18/09/2026): quando a pessoa NEGA ser a
+    // responsável, a resposta é fixa — não há nada para o modelo decidir.
+    // Pular o cérebro aqui derruba os ~7s de espera do turno mais comum de
+    // todos: responderTurno faz DUAS chamadas ao modelo em sequência
+    // (classificar + gerar). Menos silêncio morto, menos chance de o cliente
+    // desligar, e zero risco de o modelo inventar frase.
+    const negouIdentidade = !estado.responsavelConfirmado && ehNegacaoDeIdentidade(transcript)
+
+    let resultado
+    let llmMs = 0
+    if (negouIdentidade) {
+      resultado = { intent: 'NAO_E_O_RESPONSAVEL', requiresHuman: false, respostaTexto: RESPOSTA_ASSUNTO_A_TERCEIRO }
+      console.log(`[voice-ai] ATALHO_SEM_LLM turno=${numeroTurno} channel=${channel.id} motivo=negacao_de_identidade`)
+    } else {
+      console.log(`[voice-ai] LLM_STARTED turno=${numeroTurno} channel=${channel.id}`)
+      const tLlm0 = Date.now()
+      resultado = await responderTurno(transcript)
+      llmMs = Date.now() - tLlm0
+    }
+
+    // A confirmação de identidade é avaliada por REGRA, não pelo modelo: é
+    // ela que destranca falar de título/valor/vencimento (Art. 42 do CDC).
+    if (!estado.responsavelConfirmado && avaliarConfirmacaoResponsavel(transcript)) {
+      estado.responsavelConfirmado = true
+      console.log(`[voice-ai] RESPONSAVEL_CONFIRMADO turno=${numeroTurno} channel=${channel.id}`)
+    }
+
+    // Trava determinística sobre a fala do robô. Prompt é intenção; isto é
+    // garantia. Se o modelo tentar falar de dívida antes da confirmação, a
+    // frase dele é DESCARTADA e trocada pela resposta fixa.
+    const filtrado = filtrarFalaDoRobo(resultado.respostaTexto, { responsavelConfirmado: estado.responsavelConfirmado })
+    if (filtrado.bloqueado) {
+      console.warn(`[voice-ai] FALA_BLOQUEADA turno=${numeroTurno} motivo=${filtrado.motivo} channel=${channel.id} — substituída pela resposta fixa a terceiro`)
+    }
+    resultado.respostaTexto = filtrado.texto
     console.log(`[voice-ai] LLM_FINISHED turno=${numeroTurno} LLM_ms=${llmMs} intent=${resultado.intent} requiresHuman=${resultado.requiresHuman}`)
 
     // ACHADO (correção de medição, mesma rodada de PARTE C): a 1ª versão
@@ -432,7 +723,7 @@ async function executarTurno(client, channel, numeroTurno) {
     const overheadNaoExplicadoMs = timeToRealReplyMs - somaEstagiosMs
     console.log(`[voice-ai] LATENCIA_RESUMO turno=${numeroTurno} time_to_feedback_ms=${timeToFeedbackMs} wav_inspect_ms=${wavInspectMs} stt_wall_ms=${sttWallMs} llm_ms=${llmMs} tts_wall_ms=${ttsWallMs} soma_estagios_ms=${somaEstagiosMs} time_to_real_reply_ms=${timeToRealReplyMs} overhead_nao_explicado_ms=${overheadNaoExplicadoMs}`)
 
-    return { ok: true, requiresHuman: resultado.requiresHuman, intent: resultado.intent }
+    return { ok: true, requiresHuman: resultado.requiresHuman, intent: resultado.intent, transcript, falaBloqueada: filtrado.bloqueado }
   } catch (err) {
     console.error(`[voice-ai] EXCEÇÃO no turno ${numeroTurno} channel=${channel.id}: ${err.message}`)
     console.error(err.stack)
