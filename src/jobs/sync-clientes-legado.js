@@ -45,12 +45,11 @@
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { configE01 } from '../lib/e01Host.js'
 
 async function conectarE01() {
   const pool = new pg.Pool({
-    host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-    password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-    connectionTimeoutMillis: 8000, max: 2,
+    ...(await configE01({ max: 2 })),
   })
   return pool
 }
@@ -65,17 +64,31 @@ function montarContatos(row) {
   return contatos
 }
 
-// Chave de comparação, não valor de exibição: telefone vira só dígitos (a
-// mesma máscara escrita de três jeitos é UM número) e e-mail vira minúsculo.
-// Sem isso, "(51) 99539-8108" e "51995398108" entrariam como dois contatos.
-function chaveContato(tipo, valor) {
+// Menor quantidade de dígitos que ainda pode ser um telefone discável no
+// Brasil: 8 (fixo sem DDD). Abaixo disso é lixo de cadastro ("-", "0", "( )"),
+// não número.
+const MINIMO_DIGITOS_TELEFONE = 8
+
+/**
+ * Chave de comparação, não valor de exibição: telefone vira só dígitos (a
+ * mesma máscara escrita de três jeitos é UM número) e e-mail vira minúsculo.
+ * Sem isso, "(51) 99539-8108" e "51995398108" entrariam como dois contatos.
+ *
+ * Devolve '' (sem chave, ignorado em tudo) para lixo de cadastro. Isso
+ * importa mais do que parece: a primeira versão devolvia a chave `tel:` para
+ * qualquer valor sem dígito, e aí TODO cadastro com telefone vazio colidia
+ * com todo outro — 32 clientes apareceram como "mesmo telefone" na varredura
+ * de 18/09/2026 só por causa disso.
+ */
+export function chaveContato(tipo, valor) {
   const v = trim(valor)
   if (!v) return ''
-  if (tipo === 'email') return `email:${v.toLowerCase()}`
+  if (tipo === 'email') return v.includes('@') ? `email:${v.toLowerCase()}` : ''
   // celular e fone compartilham o mesmo espaço de chave de propósito: o
   // mesmo número cadastrado como "Fone" na origem e como "celular" no CRM
   // é o mesmo número, e acrescentá-lo de novo só polui o cadastro.
-  return `tel:${v.replace(/\D/g, '')}`
+  const digitos = v.replace(/\D/g, '')
+  return digitos.length >= MINIMO_DIGITOS_TELEFONE ? `tel:${digitos}` : ''
 }
 
 /**
@@ -83,19 +96,51 @@ function chaveContato(tipo, valor) {
  * CRM não. Nunca remove, nunca substitui, nunca reordena — os existentes
  * saem primeiro, na ordem original. `alterado=false` quando não há nada a
  * acrescentar (e aí o job não escreve no banco).
+ *
+ * `donoDaChave` (opcional) é um Map chave→legacy_id do cliente que JÁ tem
+ * aquele contato no CRM. Serve para o guard de contato de terceiro descrito
+ * abaixo; sem ele, o merge se comporta como antes.
+ *
+ * GUARD DE CONTATO DE TERCEIRO (18/09/2026): um telefone que já identifica
+ * OUTRO cliente nunca é acrescentado — vira `conflitos`, para revisão humana.
+ * Isso não é preciosismo de dado: quem herda o número errado é cobrado no
+ * lugar de quem deve, e expor dívida a terceiro é exatamente o que o art. 42
+ * do CDC pune. A varredura que motivou o guard achou casos reais na origem —
+ * duas clientes distintas com o mesmo celular e o mesmo e-mail no NetVision.
+ * Na dúvida entre "somar um número que pode ser de outra pessoa" e "não
+ * somar e sinalizar", o sistema não soma.
  */
-export function mesclarContatosAditivo(contatosCrm, row) {
+export function mesclarContatosAditivo(contatosCrm, row, { donoDaChave = null, legacyId = null, ambiguosNaOrigem = null } = {}) {
   const atuais = Array.isArray(contatosCrm) ? contatosCrm : []
   const chaves = new Set(atuais.map((c) => chaveContato(c?.tipo, c?.valor)).filter(Boolean))
   const acrescentados = []
+  const conflitos = []
   for (const candidato of montarContatos(row)) {
     const chave = chaveContato(candidato.tipo, candidato.valor)
     if (!chave || chaves.has(chave)) continue
+
+    // Ambiguidade NA ORIGEM: o mesmo número está em dois cadastros do
+    // NetVision. Aqui não existe "dono" a descobrir — o próprio NetVision
+    // não sabe de quem é. Bloqueia para os dois lados, sempre, e continua
+    // bloqueando até alguém corrigir o cadastro lá. É o que torna a decisão
+    // estável: sem isto, cada execução daria o número para quem fosse
+    // processado primeiro, e a correção da execução anterior seria desfeita.
+    if (ambiguosNaOrigem?.has(chave)) {
+      conflitos.push({ ...candidato, ja_pertence_a: null, ambiguo_na_origem: true })
+      continue
+    }
+
+    const dono = donoDaChave?.get(chave)
+    if (dono && dono !== legacyId) {
+      conflitos.push({ ...candidato, ja_pertence_a: dono })
+      continue
+    }
+
     chaves.add(chave)
     acrescentados.push(candidato)
   }
-  if (acrescentados.length === 0) return { contatos: atuais, acrescentados: [], alterado: false }
-  return { contatos: [...atuais, ...acrescentados], acrescentados, alterado: true }
+  if (acrescentados.length === 0) return { contatos: atuais, acrescentados: [], conflitos, alterado: false }
+  return { contatos: [...atuais, ...acrescentados], acrescentados, conflitos, alterado: true }
 }
 
 function montarEndereco(row) {
@@ -141,9 +186,10 @@ export function montarClienteParaCriar(row) {
  */
 export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_com_erro: 0 }
+  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0 }
   const criados = []
   const contatosAcrescentados = []
+  const conflitosContato = []
   const erros = []
 
   try {
@@ -165,6 +211,37 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       if (data.length < 1000) break
     }
 
+    // Índice contato→dono, montado ANTES do laço: alimenta o guard de contato
+    // de terceiro. Quando a mesma chave já aparece em mais de um cliente
+    // (situação que a varredura de 18/09/2026 mostrou existir de antes), o
+    // primeiro vence como "dono" — o guard só precisa saber que o contato já
+    // identifica alguém que não é este cliente, não qual dos dois é o certo.
+    // Essa pergunta é humana e sai no relatório de conflitos.
+    const donoDaChave = new Map()
+    for (const cliente of existentes.values()) {
+      for (const contato of (cliente.contatos || [])) {
+        const chave = chaveContato(contato?.tipo, contato?.valor)
+        if (chave && !donoDaChave.has(chave)) donoDaChave.set(chave, cliente.legacy_id)
+      }
+    }
+
+    // Contatos que o PRÓPRIO NetVision repete em dois cadastros diferentes.
+    // Não há dono a eleger — nem a origem sabe. Bloqueados para todo mundo
+    // até o cadastro ser corrigido lá.
+    const contagemNaOrigem = new Map()
+    for (const linha of rows) {
+      const vistosNestaLinha = new Set()
+      for (const contato of montarContatos(linha)) {
+        const chave = chaveContato(contato.tipo, contato.valor)
+        // O mesmo número em Fone E Celular do MESMO cadastro é uma linha só,
+        // não duas pessoas — não pode contar duas vezes.
+        if (!chave || vistosNestaLinha.has(chave)) continue
+        vistosNestaLinha.add(chave)
+        contagemNaOrigem.set(chave, (contagemNaOrigem.get(chave) || 0) + 1)
+      }
+    }
+    const ambiguosNaOrigem = new Set([...contagemNaOrigem.entries()].filter(([, n]) => n > 1).map(([k]) => k))
+
     for (const row of rows) {
       const codigo = trim(row.CodigoPessoa)
       if (!codigo) continue
@@ -172,7 +249,20 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       const jaExiste = existentes.get(codigo)
       if (jaExiste) {
         contadores.total_ja_existente++
-        const merge = mesclarContatosAditivo(jaExiste.contatos, row)
+        const merge = mesclarContatosAditivo(jaExiste.contatos, row, { donoDaChave, legacyId: codigo, ambiguosNaOrigem })
+
+        for (const conflito of merge.conflitos) {
+          contadores.total_conflito_contato++
+          conflitosContato.push({
+            legacy_id: codigo,
+            razao_social: jaExiste.razao_social,
+            contato: `${conflito.tipo}:${conflito.valor}`,
+            ja_pertence_a: conflito.ja_pertence_a,
+            dono_razao_social: conflito.ja_pertence_a ? (existentes.get(conflito.ja_pertence_a)?.razao_social ?? null) : null,
+            ambiguo_na_origem: Boolean(conflito.ambiguo_na_origem),
+          })
+        }
+
         if (!merge.alterado) continue
 
         const registro = {
@@ -188,6 +278,12 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
         try {
           const { error } = await supabase.from('clientes_erp').update({ contatos: merge.contatos }).eq('id', jaExiste.id)
           if (error) throw error
+          // Registra o que acabou de entrar: dentro da MESMA execução, dois
+          // clientes diferentes não podem receber o mesmo número.
+          for (const c of merge.acrescentados) {
+            const k = chaveContato(c.tipo, c.valor)
+            if (k && !donoDaChave.has(k)) donoDaChave.set(k, codigo)
+          }
           contadores.total_contato_acrescentado++
           contatosAcrescentados.push(registro)
         } catch (err) {
@@ -199,6 +295,42 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       }
 
       const payload = montarClienteParaCriar(row)
+
+      // Mesmo guard na criação: um cliente novo não nasce com o telefone de
+      // outro cliente. O contato em conflito sai do payload e o cliente nasce
+      // em_revisao — ele É criado (não sumir com o cadastro é o certo), mas
+      // sem herdar contato que pode ser de terceiro. Sem isto, dois clientes
+      // cadastrados no mesmo dia com o mesmo celular entrariam os dois com
+      // ele, e a cobrança escolheria um dos dois na sorte.
+      const contatosLimpos = []
+      for (const contato of payload.contatos) {
+        const chave = chaveContato(contato.tipo, contato.valor)
+        if (!chave) continue
+        const dono = donoDaChave.get(chave)
+        const ambiguo = ambiguosNaOrigem.has(chave)
+        if (ambiguo || (dono && dono !== codigo)) {
+          contadores.total_conflito_contato++
+          conflitosContato.push({
+            legacy_id: codigo,
+            razao_social: payload.razao_social,
+            contato: `${contato.tipo}:${contato.valor}`,
+            ja_pertence_a: ambiguo ? null : dono,
+            dono_razao_social: ambiguo ? null : (existentes.get(dono)?.razao_social ?? null),
+            ambiguo_na_origem: ambiguo,
+            no_cadastro_novo: true,
+          })
+          continue
+        }
+        contatosLimpos.push(contato)
+        if (!dryRun) donoDaChave.set(chave, codigo)
+      }
+      if (contatosLimpos.length !== payload.contatos.length) {
+        payload.em_revisao = true
+        payload.observacoes = [payload.observacoes, 'Contato do NetVision já pertence a outro cliente — não importado, revisar.']
+          .filter(Boolean).join(' ')
+      }
+      payload.contatos = contatosLimpos
+
       if (payload.em_revisao) contadores.total_marcado_revisao++
 
       if (dryRun) {
@@ -218,7 +350,7 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       }
     }
 
-    return { ...contadores, dry_run: dryRun, criados, contatos_acrescentados: contatosAcrescentados, erros }
+    return { ...contadores, dry_run: dryRun, criados, contatos_acrescentados: contatosAcrescentados, conflitos_contato: conflitosContato, erros }
   } finally {
     if (!poolE01) await pool.end()
   }

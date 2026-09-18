@@ -28,7 +28,17 @@ executarSincronizacaoClientes({ dryRun })
     console.log(`  ${dryRun ? 'Seriam criados' : 'Criados'}: ${relatorio.total_criado}`)
     console.log(`  Marcados em_revisao (dado incompleto): ${relatorio.total_marcado_revisao}`)
     console.log(`  ${dryRun ? 'Teriam contato acrescentado' : 'Com contato acrescentado'}: ${relatorio.total_contato_acrescentado}`)
+    console.log(`  Contatos BLOQUEADOS (já pertencem a outro cliente): ${relatorio.total_conflito_contato}`)
     console.log(`  Erros: ${relatorio.total_com_erro}`)
+    if (relatorio.conflitos_contato?.length) {
+      console.log('\n  Contatos bloqueados — revisar o cadastro na origem:')
+      for (const c of relatorio.conflitos_contato) {
+        const motivo = c.ambiguo_na_origem
+          ? 'o NetVision tem este mesmo contato em DOIS cadastros — corrigir lá'
+          : `já é de ${c.ja_pertence_a} ${c.dono_razao_social ?? ''}`
+        console.log(`    ${c.legacy_id}  ${c.razao_social}  ${c.contato}  -> ${motivo}${c.no_cadastro_novo ? '  [cadastro novo]' : ''}`)
+      }
+    }
     if (relatorio.contatos_acrescentados?.length) {
       console.log(`\n  ${dryRun ? 'Contatos que seriam acrescentados' : 'Contatos acrescentados'}:`)
       for (const c of relatorio.contatos_acrescentados) console.log(`    ${c.legacy_id}  ${c.razao_social}  +${c.acrescentados.join(' +')}`)

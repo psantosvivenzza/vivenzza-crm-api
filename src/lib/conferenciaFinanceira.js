@@ -12,6 +12,7 @@
 import pg from 'pg'
 import { supabase } from './supabase-admin.server.js'
 import { detectarColunas, normalizarLinhaLegado, calcularValorPagoLegado, chavesLegado } from './financeiroLegado.js'
+import { configE01 } from './e01Host.js'
 
 const CENTAVO = 0.005
 const ABERTO_CRM = new Set(['aberta', 'vencida', 'pago_parcial'])
@@ -31,9 +32,7 @@ export async function executarConferencia({ poolE01 = null } = {}) {
 
   if (!pool) {
     pool = new pg.Pool({
-      host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-      password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-      connectionTimeoutMillis: 8000, max: 2,
+      ...(await configE01({ max: 2 })),
     })
     poolProprio = true
   }

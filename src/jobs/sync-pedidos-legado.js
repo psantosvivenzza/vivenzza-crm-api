@@ -18,6 +18,7 @@
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { configE01 } from '../lib/e01Host.js'
 
 const PAGE_E01 = 200
 const PAGE_SUPABASE = 1000
@@ -43,9 +44,7 @@ export function mapearStatus({ cancelado, pedidoConfirmado, statusPedido }) {
 // verdade pra cada consulta concorrente.
 async function conectarE01() {
   const pool = new pg.Pool({
-    host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-    password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-    connectionTimeoutMillis: 8000, max: CONCORRENCIA,
+    ...(await configE01({ max: CONCORRENCIA })),
   })
   try {
     await pool.query('SELECT 1') // valida a conexão antes de seguir, mesmo padrão de client.connect()

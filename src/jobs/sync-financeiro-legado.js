@@ -30,6 +30,7 @@
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { configE01 } from '../lib/e01Host.js'
 import {
   detectarColunas, normalizarLinhaLegado, decidirAtualizacao, chavesLegado, dataISO,
 } from '../lib/financeiroLegado.js'
@@ -63,9 +64,7 @@ async function atualizarRegistroSincronizacao(syncId, campos) {
 
 async function conectarE01() {
   const pool = new pg.Pool({
-    host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-    password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-    connectionTimeoutMillis: 8000, max: 4,
+    ...(await configE01({ max: 4 })),
   })
   try {
     await pool.query('SELECT 1')

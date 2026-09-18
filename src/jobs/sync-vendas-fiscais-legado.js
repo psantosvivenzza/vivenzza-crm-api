@@ -23,6 +23,7 @@
  */
 import pg from 'pg'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { configE01 } from '../lib/e01Host.js'
 
 const CFOP_VENDA = new Set(['5102', '6102'])
 const CFOP_BONIFICACAO = new Set(['6910'])
@@ -30,9 +31,7 @@ const CFOP_AMBIGUO = new Set(['5910'])
 
 async function conectarE01() {
   return new pg.Pool({
-    host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-    password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-    connectionTimeoutMillis: 8000, max: 2,
+    ...(await configE01({ max: 2 })),
   })
 }
 
