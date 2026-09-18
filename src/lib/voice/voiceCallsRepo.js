@@ -28,7 +28,10 @@ function inicioDoDiaBrtISO(agora = new Date()) {
 function linhaParaTentativa(linha) {
   return {
     criadoEm: linha.criado_em,
-    atendida: STATUS_ATENDIDA.has(linha.status),
+    // Contato humano efetivo conta como atendida para a régua (trava de 7
+    // dias), mesmo que a ligação do robô tenha caído na caixa postal. Sem
+    // isto, o robô ligaria de novo para quem a Nicole acabou de atender.
+    atendida: STATUS_ATENDIDA.has(linha.status) || linha.contato_humano_efetivo === true,
     dataPrometida: linha.data_prometida ?? null,
     cicloIniciadoEm: linha.ciclo_iniciado_em ?? null,
     faixaHorario: linha.faixa_horario ?? null,
@@ -56,7 +59,7 @@ export async function buscarEstadoChamadasExternas({ numero, agora = new Date() 
     telefoneHash
       ? supabase
           .from(TABELA)
-          .select('criado_em, status, data_prometida, ciclo_iniciado_em, faixa_horario, tentativa_numero')
+          .select('criado_em, status, data_prometida, ciclo_iniciado_em, faixa_horario, tentativa_numero, contato_humano_efetivo')
           .eq('telefone_hash', telefoneHash)
           .gte('criado_em', trintaDiasAtras)
           .order('criado_em', { ascending: false })

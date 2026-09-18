@@ -127,4 +127,93 @@ router.get('/telefones-suspeitos', async (req, res) => {
   }
 })
 
+// --- Retornos humanos -----------------------------------------------------
+// Quando o cliente pede atendente, o robo PROMETE que alguem retorna. Estas
+// duas rotas sao o que fecha esse ciclo: a lista do que esta prometido e nao
+// foi feito, e o registro do que aconteceu no retorno.
+//
+// O desfecho NAO e so historico: promessa de pagamento grava data_prometida e
+// contato efetivo grava contato_humano_efetivo, os dois campos que a regua de
+// tentativas ja le. E o que impede o robo de ligar amanha para o cliente com
+// quem o financeiro acabou de falar.
+
+const DESFECHOS = {
+  PROMETEU_PAGAR: { efetivo: true, exigeData: true },
+  JA_PAGOU: { efetivo: true, exigeData: false },
+  CONTESTOU: { efetivo: true, exigeData: false },
+  SEM_CONDICAO: { efetivo: true, exigeData: false },
+  FALADO_SEM_DEFINICAO: { efetivo: true, exigeData: false },
+  NAO_ATENDEU: { efetivo: false, exigeData: false },
+  TELEFONE_ERRADO: { efetivo: false, exigeData: false },
+}
+
+// GET /api/voz/retornos-pendentes — o que foi prometido ao cliente e ainda
+// nao foi cumprido. Lista curta de proposito: e uma fila de trabalho, nao um
+// relatorio.
+router.get('/retornos-pendentes', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('voice_calls')
+      .select('call_id, cliente_nome, codigo_cliente, destination_masked, started_at, intent_final, transcricao')
+      .eq('requires_human', true)
+      .is('retorno_humano_em', null)
+      .order('started_at', { ascending: false })
+      .limit(100)
+    if (error) throw new Error(error.message)
+    res.json({ total: data?.length ?? 0, retornos: data ?? [] })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// POST /api/voz/retornos/:callId — registra o que aconteceu no retorno.
+router.post('/retornos/:callId', async (req, res) => {
+  try {
+    const { desfecho, dataPrometida, valorPrometido, observacao } = req.body ?? {}
+    const regra = DESFECHOS[String(desfecho || '').toUpperCase()]
+    if (!regra) {
+      return res.status(400).json({ erro: `desfecho inválido — use um de: ${Object.keys(DESFECHOS).join(', ')}` })
+    }
+    if (regra.exigeData && !dataPrometida) {
+      return res.status(400).json({ erro: 'promessa de pagamento exige a data prometida' })
+    }
+    if (dataPrometida && !/^\d{4}-\d{2}-\d{2}$/.test(dataPrometida)) {
+      return res.status(400).json({ erro: 'dataPrometida deve estar no formato AAAA-MM-DD' })
+    }
+
+    const patch = {
+      retorno_humano_em: new Date().toISOString(),
+      retorno_humano_desfecho: String(desfecho).toUpperCase(),
+      retorno_humano_por: req.user?.id ?? null,
+      retorno_humano_observacao: observacao ? String(observacao).slice(0, 1000) : null,
+      contato_humano_efetivo: regra.efetivo,
+    }
+    // Só grava promessa quando houve promessa: um null aqui apagaria uma
+    // promessa que a propria ligacao tinha capturado.
+    if (dataPrometida) patch.data_prometida = dataPrometida
+    if (valorPrometido != null && !Number.isNaN(Number(valorPrometido))) {
+      patch.valor_prometido = Number(valorPrometido)
+    }
+
+    const { data, error } = await supabase
+      .from('voice_calls')
+      .update(patch)
+      .eq('call_id', req.params.callId)
+      .select('call_id, cliente_nome, tarefa_id, retorno_humano_desfecho, data_prometida')
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) return res.status(404).json({ erro: 'ligação não encontrada' })
+
+    // Fecha a tarefa junto, para o financeiro nao ter de marcar concluida em
+    // dois lugares. Best-effort: o registro do desfecho e o que importa.
+    if (data.tarefa_id) {
+      await supabase.from('tarefas').update({ status: 'concluida' }).eq('id', data.tarefa_id)
+    }
+
+    res.json({ ok: true, retorno: data })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 export default router

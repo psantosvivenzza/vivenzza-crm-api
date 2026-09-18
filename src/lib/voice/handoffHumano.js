@@ -54,7 +54,7 @@ export async function registrarPedidoDeHumano({
       console.warn(`[voice-ai] HANDOFF_MAIS_DE_UM_FINANCEIRO: ${financeiros.length} ativos; atribuindo a "${responsavel.nome}" por ordem alfabética. A premissa de um financeiro só não vale mais — definir regra de atribuição (rodízio ou dono fixo da cobrança).`)
     }
 
-    const { error } = await supabase.from('tarefas').insert({
+    const { data: tarefa, error } = await supabase.from('tarefas').insert({
       titulo: `Retornar ligação — ${nome} ${motivo}`,
       descricao: [
         `O assistente de voz ligou para ${nome}${codigoCliente ? ` (código ${codigoCliente})` : ''}.`,
@@ -74,12 +74,18 @@ export async function registrarPedidoDeHumano({
       responsavel_id: responsavel?.id ?? null,
       intencao_ia: intent,
       prioridade_ia: intent === 'QUERO_ATENDENTE' ? 'alta' : 'media',
-      proxima_acao_ia: 'Ligar de volta para o cliente e tratar o caso com uma pessoa.',
-    })
+      proxima_acao_ia: 'Registrar o desfecho em Financeiro > Central de Voz > Retornos.',
+    }).select('id').single()
     if (error) throw new Error(error.message)
 
-    console.log(`[voice-ai] HANDOFF_TAREFA_CRIADA cliente="${nome}" intent=${intent} call=${callId}`)
-    return { criada: true }
+    // Liga a tarefa a ligacao: e o que permite fechar as duas de uma vez
+    // quando o financeiro registrar o desfecho na Central de Voz.
+    if (tarefa?.id && callId) {
+      await supabase.from('voice_calls').update({ tarefa_id: tarefa.id }).eq('call_id', callId)
+    }
+
+    console.log(`[voice-ai] HANDOFF_TAREFA_CRIADA cliente="${nome}" intent=${intent} call=${callId} tarefa=${tarefa?.id ?? '?'}`)
+    return { criada: true, tarefaId: tarefa?.id ?? null }
   } catch (err) {
     // Alto e claro no log: uma promessa foi feita ao cliente e a tarefa falhou.
     console.error(`[voice-ai] HANDOFF_TAREFA_FALHOU cliente="${nome}" intent=${intent} call=${callId}: ${err.message} — O CLIENTE FOI PROMETIDO UM RETORNO E NINGUEM FOI AVISADO`)
