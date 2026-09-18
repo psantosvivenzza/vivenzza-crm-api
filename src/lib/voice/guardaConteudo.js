@@ -95,6 +95,35 @@ const NEGACOES = [
 // pior, mandar "uma pessoa da Vivenzza entra em contato", é jogar fora o
 // contato. O certo é pedir o responsável / o melhor horário, sem NUNCA dizer
 // do que se trata (Art. 42 do CDC).
+// ALUCINAÇÃO DO WHISPER (achado do piloto, 18/09/2026). Em silêncio ou ruído,
+// o Whisper não devolve vazio: ele INVENTA texto, e sempre os mesmos bordões,
+// tirados das legendas com que foi treinado. Duas das três ligações que o
+// painel marcou como "cliente pediu atendente" hoje tinham como transcrição
+// "Legendas pela comunidade de Amara.org" — ninguém pediu nada, era silêncio.
+//
+// Sem este filtro, todo silêncio vira um turno com intenção UNKNOWN, UNKNOWN
+// entra em INTENTS_SEMPRE_HUMANO, e o robô promete ao cliente que "uma pessoa
+// da Vivenzza entra em contato". Promessa feita por causa de ruído.
+const ALUCINACOES_WHISPER = [
+  /amara\.org/i,
+  /legendas? (pela|por|feitas? pela) comunidade/i,
+  /legendado pela comunidade/i,
+  /^\s*(obrigad[oa]|tchau|muito obrigad[oa])[.!]?\s*$/i,
+  /subtitles? by/i,
+  /^\s*\.{2,}\s*$/,
+  /^\s*\[?(m[úu]sica|music|aplausos|risos)\]?\s*$/i,
+  /inscreva-se no canal/i,
+  /^\s*legenda[s]?\s*[:.]?\s*$/i,
+]
+
+export function ehAlucinacaoDoStt(transcricao) {
+  const t = String(transcricao || '').trim()
+  if (!t) return false
+  // Transcrição muito curta em cima de uma gravação longa também é ruído,
+  // mas isso quem avalia é quem tem a duração — aqui só o texto.
+  return ALUCINACOES_WHISPER.some((r) => r.test(t))
+}
+
 // ACHADO DO PILOTO REAL (18/09/2026): uma ligação foi "atendida" por uma
 // CAIXA POSTAL e o robô conversou com a secretária eletrônica por 36
 // segundos — gastou minuto de trunk, ocupou o teto horário e registrou a
@@ -139,4 +168,19 @@ export function avaliarConfirmacaoResponsavel(transcricao) {
   if (!t.trim()) return false
   if (NEGACOES.some((r) => r.test(t))) return false
   return CONFIRMACOES.some((r) => r.test(t))
+}
+
+// Só o pedido EXPLÍCITO de atendente vira tarefa de retorno. "Não entendi o
+// que a pessoa falou" (UNKNOWN) NÃO é pedido de humano: no piloto de
+// 18/09/2026, duas das três ligações marcadas como "pediu atendente" eram
+// silêncio que o Whisper alucinou. Misturar os dois enche a fila da equipe de
+// tarefa falsa — e fila com tarefa falsa é fila que ninguém olha.
+const INTENTS_QUE_VIRAM_TAREFA = new Set([
+  'QUERO_ATENDENTE',
+  'CONTESTA_VALOR',
+  'SEM_CONDICAO_AGORA',
+])
+
+export function pedidoMereceTarefa(intent) {
+  return INTENTS_QUE_VIRAM_TAREFA.has(String(intent || '').toUpperCase())
 }

@@ -127,3 +127,38 @@ test('caixa postal nunca recebe conteúdo de cobrança', async () => {
   const r = filtrarFalaDoRobo('Você tem um título vencido de R$ 1.409,44', { responsavelConfirmado: false })
   assert.equal(r.bloqueado, true)
 })
+
+// --- Achado do piloto: promessa de retorno feita por causa de ruído --------
+// Duas das três ligações marcadas como "pediu atendente" no 1o dia tinham
+// como transcrição "Legendas pela comunidade de Amara.org": o Whisper
+// alucinando em cima de silêncio. Ninguém pediu nada, e mesmo assim o robô
+// prometeu que a Vivenzza retornaria.
+test('alucinação do Whisper é reconhecida e não vira fala do cliente', async () => {
+  const { ehAlucinacaoDoStt } = await import('../../../src/lib/voice/guardaConteudo.js')
+  for (const ruido of [
+    'Legendas pela comunidade de Amara.org', 'legendas pela comunidade',
+    'Legendado pela comunidade', '...', '[Música]', 'Obrigado.',
+    'Inscreva-se no canal', 'Subtitles by the community',
+  ]) {
+    assert.equal(ehAlucinacaoDoStt(ruido), true, `deveria ser alucinação: ${ruido}`)
+  }
+  for (const fala of [
+    'Sim, sou eu', 'Quero falar com um atendente', 'Já paguei semana passada',
+    'Pode me ligar amanhã de tarde', 'Não', 'Obrigado, mas já paguei isso',
+  ]) {
+    assert.equal(ehAlucinacaoDoStt(fala), false, `é fala real, não pode filtrar: ${fala}`)
+  }
+})
+
+test('só pedido EXPLÍCITO de atendente vira tarefa de retorno', async () => {
+  const { pedidoMereceTarefa } = await import('../../../src/lib/voice/guardaConteudo.js')
+  for (const i of ['QUERO_ATENDENTE', 'CONTESTA_VALOR', 'SEM_CONDICAO_AGORA']) {
+    assert.equal(pedidoMereceTarefa(i), true, `deveria gerar tarefa: ${i}`)
+  }
+  // UNKNOWN é "não entendi o que falaram" — nunca um pedido de atendente.
+  // Gerar tarefa aqui enche a fila da equipe de tarefa falsa, e fila com
+  // tarefa falsa é fila que ninguém olha.
+  for (const i of ['UNKNOWN', 'PROMESSA_PAGAMENTO', 'JA_PAGOU', '', null, undefined]) {
+    assert.equal(pedidoMereceTarefa(i), false, `NÃO deveria gerar tarefa: ${i}`)
+  }
+})

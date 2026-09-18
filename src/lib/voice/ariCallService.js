@@ -16,7 +16,8 @@ import { ENDPOINT_PERMITIDO, APP_ARGS_MARCADOR, classificarCausaSemAtendimento }
 import { ENDPOINT_EXTERNO_NVOIP } from './destinoResolver.js'
 import { CONTEXTO_MARCADOR as MARCADOR_EXTERNO } from './outboundExternalTest.js'
 import { montarSaudacao, FRASE_NAO_ENTENDI, fraseDespedida, fraseEncerramentoNormal, FRASE_TRANSFERIR_HUMANO } from './saudacao.js'
-import { filtrarFalaDoRobo, avaliarConfirmacaoResponsavel, ehNegacaoDeIdentidade, ehCaixaPostal, RESPOSTA_ASSUNTO_A_TERCEIRO } from './guardaConteudo.js'
+import { filtrarFalaDoRobo, avaliarConfirmacaoResponsavel, ehNegacaoDeIdentidade, ehCaixaPostal, ehAlucinacaoDoStt, RESPOSTA_ASSUNTO_A_TERCEIRO } from './guardaConteudo.js'
+import { registrarPedidoDeHumano, pedidoMereceTarefa } from './handoffHumano.js'
 import { finalizarTentativa } from './voiceCallsRepo.js'
 
 // VOICE AI OUTBOUND INTERNAL MVP: a originação em si (o POST que faz o
@@ -331,11 +332,32 @@ export async function iniciarServicoVoz() {
         if (continuar.transcript) transcricoes.push(continuar.transcript)
         if (continuar.requiresHuman) {
           // ACHADO DA REVISÃO (17/09/2026): aqui o código dava break e o
-          // finally desligava. Ou seja: o cliente pedia para falar com uma
-          // pessoa e era DESLIGADO na hora. É o pior desfecho possível numa
-          // cobrança — pior do que nunca ter ligado.
-          console.log(`[voice-ai] turno ${turno} — requires_human=true, avisando o cliente antes de encerrar`)
-          await falar(channel, FRASE_TRANSFERIR_HUMANO, 'transferir-humano')
+          // finally desligava — o cliente pedia uma pessoa e era DESLIGADO na
+          // hora. Pior desfecho possível numa cobrança.
+          //
+          // ACHADO DO PILOTO (18/09/2026): mas a frase "uma pessoa da Vivenzza
+          // entra em contato" só pode ser dita quando o cliente REALMENTE
+          // pediu. UNKNOWN significa "não entendi o que falaram" — e no
+          // piloto isso disparava em cima de silêncio alucinado pelo Whisper.
+          // Prometer retorno por causa de ruído é criar dívida com o cliente.
+          const pedidoReal = pedidoMereceTarefa(continuar.intent)
+          if (pedidoReal) {
+            // A promessa é feita ao vivo, ao telefone. A tarefa é o que faz a
+            // Vivenzza cumpri-la. Best-effort: nunca derruba a ligação.
+            await registrarPedidoDeHumano({
+              clienteNome,
+              codigoCliente: null,
+              telefoneMascarado: null,
+              intent: continuar.intent,
+              transcricao: continuar.transcript,
+              callId: channel.id,
+            }).catch((e) => console.error(`[voice-ai] handoff falhou: ${e.message}`))
+            console.log(`[voice-ai] turno ${turno} — pedido real de atendente (${continuar.intent}), prometendo retorno e abrindo tarefa`)
+            await falar(channel, FRASE_TRANSFERIR_HUMANO, 'transferir-humano')
+          } else {
+            console.log(`[voice-ai] turno ${turno} — requires_human com intent=${continuar.intent}: NAO é pedido explícito, encerrando sem prometer retorno`)
+            await falar(channel, fraseEncerramentoNormal(), 'encerramento')
+          }
           encerramentoFalado = true
           break
         }
@@ -635,6 +657,15 @@ async function executarTurno(client, channel, numeroTurno, estado = { responsave
     if (!transcript.trim()) {
       console.log(`[voice-ai] transcript vazio turno=${numeroTurno} — nada reconhecido, encerrando sem travar`)
       return { ok: false, motivo: 'transcript_vazio' }
+    }
+
+    // O Whisper não devolve vazio no silêncio: ele INVENTA texto, sempre os
+    // mesmos bordões de legenda. Tratar isso como fala faz o turno virar
+    // intenção UNKNOWN, que entra em INTENTS_SEMPRE_HUMANO — e o robô promete
+    // ao cliente um retorno por causa de ruído. Silêncio é silêncio.
+    if (ehAlucinacaoDoStt(transcript)) {
+      console.log(`[voice-ai] ALUCINACAO_STT turno=${numeroTurno} channel=${channel.id} texto="${transcript}" — tratando como silêncio`)
+      return { ok: false, motivo: 'transcript_alucinado' }
     }
 
     // CAIXA POSTAL: encerra NA HORA, sem dizer mais nada. Nenhuma palavra
