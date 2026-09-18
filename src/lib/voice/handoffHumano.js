@@ -32,15 +32,27 @@ export async function registrarPedidoDeHumano({
   const nome = clienteNome || codigoCliente || 'Cliente'
 
   try {
-    // Responsável: quem cuida de cobrança. Sem dono, a tarefa nasce órfã e
-    // ninguém se sente responsável por ela.
-    const { data: responsavel } = await supabase
+    // PREMISSA (confirmada pelo Peterson em 18/09/2026): o financeiro da
+    // Vivenzza é UMA pessoa só. Por isso a tarefa vai direto para ela, sem
+    // regra de rodízio.
+    //
+    // A premissa está codificada aqui de propósito, com aviso quando deixar de
+    // valer: no dia em que entrar um segundo financeiro, um `limit(1)` mudo
+    // escolheria uma das duas por acaso e metade dos retornos cairia em quem
+    // não deveria, sem ninguém perceber. Melhor o log reclamar.
+    const { data: financeiros } = await supabase
       .from('usuarios')
-      .select('id')
+      .select('id, nome')
       .eq('role', 'financeiro')
       .eq('ativo', true)
-      .limit(1)
-      .maybeSingle()
+      .order('nome')
+
+    const responsavel = financeiros?.[0] ?? null
+    if (!financeiros?.length) {
+      console.error('[voice-ai] HANDOFF_SEM_DONO: nenhum usuário financeiro ativo — a tarefa vai nascer órfã e ninguém será cobrado por ela')
+    } else if (financeiros.length > 1) {
+      console.warn(`[voice-ai] HANDOFF_MAIS_DE_UM_FINANCEIRO: ${financeiros.length} ativos; atribuindo a "${responsavel.nome}" por ordem alfabética. A premissa de um financeiro só não vale mais — definir regra de atribuição (rodízio ou dono fixo da cobrança).`)
+    }
 
     const { error } = await supabase.from('tarefas').insert({
       titulo: `Retornar ligação — ${nome} ${motivo}`,
