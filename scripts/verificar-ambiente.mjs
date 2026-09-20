@@ -28,12 +28,25 @@ if (faltandoE01.length) {
   falhou = true
   console.log(`  FALHOU: faltam variaveis no .env: ${faltandoE01.join(', ')}`)
 } else {
-  console.log(`  Destino: ${process.env.E01_HOST}:${process.env.E01_PORT}/${process.env.E01_DATABASE}`)
-  const client = new pg.Client({
-    host: process.env.E01_HOST, port: process.env.E01_PORT, user: process.env.E01_USER,
-    password: process.env.E01_PASSWORD, database: process.env.E01_DATABASE,
-    connectionTimeoutMillis: 8000,
-  })
+  // Resolve pelo MESMO caminho dos syncs (src/lib/e01Host.js): IPv4 explicito,
+  // com cache do ultimo IP bom e a reserva do .env. Sem isto, este script
+  // dizia "ENOTFOUND" enquanto os syncs, usando o cache, chegavam no servidor
+  // e reportavam "connection timeout" — ou seja, o diagnostico acusava o nome
+  // quando o problema real era a maquina desligada. Diagnostico que aponta a
+  // causa errada custa mais caro que nao ter diagnostico.
+  const { configE01 } = await import('../src/lib/e01Host.js')
+  let cfg
+  try {
+    cfg = await configE01()
+  } catch (err) {
+    falhou = true
+    console.log(`  FALHOU ao resolver o endereco de ${process.env.E01_HOST}: ${err.message}`)
+    cfg = null
+  }
+  if (cfg) {
+  const via = cfg.host === process.env.E01_HOST ? '' : ` (via ${cfg.host})`
+  console.log(`  Destino: ${process.env.E01_HOST}:${process.env.E01_PORT}/${process.env.E01_DATABASE}${via}`)
+  const client = new pg.Client({ ...cfg, connectionTimeoutMillis: 8000 })
   try {
     await client.connect()
     const { rows } = await client.query('SELECT COUNT(*) AS n FROM "CR_Duplicatas"')
@@ -47,7 +60,10 @@ if (faltandoE01.length) {
     console.log('  - Este script so funciona na maquina do escritorio, na mesma')
     console.log('    rede do servidor NetVision.')
     console.log('  - Se o sync de pedidos funciona nesta maquina, o acesso existe.')
+    console.log('  - "connection timeout" com endereco resolvido = o servidor do')
+    console.log('    NetVision esta desligado ou fora da rede, nao e problema de nome.')
     await client.end().catch(() => {})
+  }
   }
 }
 

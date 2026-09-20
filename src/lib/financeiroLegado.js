@@ -22,7 +22,23 @@ export const CANDIDATOS_COLUNA = {
   sequencia: ['Sequencia', 'Parcela', 'NumeroParcela'],
   codigoCliente: ['CodigoCliente', 'CodigoEmitente'],
   valor: ['ValorTitulo', 'Valor', 'ValorDuplicata', 'ValorOriginal', 'ValorParcela'],
-  valorPago: ['ValorPago', 'ValorRecebido', 'ValorBaixado', 'ValorLiquidado', 'ValorParcialmentePago'],
+  valorPago: ['ValorPago', 'ValorRecebido', 'ValorBaixado', 'ValorLiquidado'],
+  // COMPLEMENTAR a valorPago, não alternativa — e é por isso que saiu da lista
+  // acima (achado de 18/09/2026). Nesta instalação o NetVision divide o que o
+  // cliente pagou em duas colunas: `ValorParcialmentePago` guarda o que entrou
+  // em parcelas (bate exatamente com a soma de CR_PagtoParcial) e `ValorPago`
+  // guarda o acerto que fecha o título. Nos 2.385 títulos que têm as duas, a
+  // soma fecha a duplicata ao centavo:
+  //
+  //   1000757/3  duplicata 3.278,80 = pago 2.572,80 + parcial   706,00
+  //   1000881/5  duplicata 3.162,30 = pago 1.162,30 + parcial 2.000,00
+  //   1000693/4  duplicata 2.789,75 = pago    52,05 + parcial 2.737,70
+  //
+  // Enquanto `ValorParcialmentePago` era só um fallback na lista acima, ele
+  // nunca era lido (ValorPago existe e vencia sempre). Efeito real medido: o
+  // CRM cobrava R$ 3.533,88 a mais, em títulos abertos, de gente que já tinha
+  // pago — Francisco Freitas aparecia devendo R$ 1.273,44 tendo pago metade.
+  valorPagoParcial: ['ValorParcialmentePago'],
   dataPagamento: ['DataPagamento', 'DataBaixa', 'DataRecebimento', 'DataLiquidacao', 'DataQuitacao'],
   situacao: ['Situacao', 'SituacaoTitulo', 'StatusTitulo', 'Status'],
   quitado: ['Quitado', 'Baixado', 'Liquidado', 'PagoTotal', 'Pago'],
@@ -45,7 +61,7 @@ const OBRIGATORIAS = ['numeroTitulo', 'sequencia']
 
 // Pelo menos um sinal de pagamento precisa existir, senão o sync não teria o
 // que sincronizar (e rodar assim daria uma falsa sensação de segurança).
-const SINAIS_PAGAMENTO = ['valorPago', 'dataPagamento', 'situacao', 'quitado', 'aberta']
+const SINAIS_PAGAMENTO = ['valorPago', 'valorPagoParcial', 'dataPagamento', 'situacao', 'quitado', 'aberta']
 
 // Tolerância de centavo — comparar numeric vindo de dois bancos com == é receita
 // pra "atualizar" o mesmo título pra sempre.
@@ -112,6 +128,21 @@ function numero(v) {
 
 function texto(v) {
   return v === null || v === undefined ? '' : String(v).trim().toLowerCase()
+}
+
+/**
+ * Soma as colunas de valor pago que a instalação tiver.
+ *
+ * Devolve `null` quando NENHUMA delas trouxe número — e isso é o ponto
+ * delicado: `calcularValorPagoLegado` distingue "o ERP disse que pagou zero"
+ * de "o ERP não informou valor", e só no segundo caso cai nas heurísticas de
+ * quitação. Somar tratando ausência como 0 apagaria essa diferença e faria
+ * título quitado-sem-valor voltar a ser cobrado.
+ */
+export function somaValoresPagos(...valores) {
+  const numeros = valores.map(numero).filter((n) => n !== null)
+  if (numeros.length === 0) return null
+  return numeros.reduce((s, n) => s + n, 0)
 }
 
 /**
@@ -188,7 +219,10 @@ export function normalizarLinhaLegado(linha, mapa) {
     sequencia: col('sequencia'),
     codigoCliente: col('codigoCliente') != null ? String(col('codigoCliente')).trim() : null,
     valor: numero(col('valor')),
-    valorPagoBruto: numero(col('valorPago')),
+    // SOMA, não "o que estiver preenchido": as duas colunas são
+    // complementares nesta instalação (ver CANDIDATOS_COLUNA.valorPagoParcial).
+    // Quando só uma existe, a outra entra como 0 e o resultado é o de antes.
+    valorPagoBruto: somaValoresPagos(col('valorPago'), col('valorPagoParcial')),
     dataPagamento: col('dataPagamento') ?? null,
     quitado: quitadoFlag,
     cancelado: canceladoFlag,
