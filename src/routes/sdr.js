@@ -693,6 +693,11 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
     }
 
     etapaAtual = 'insert_saida'
+    // instance_name = EVOLUTION_INSTANCE (mesma constante server-side usada no
+    // evolutionApi.post acima, nunca o body do cliente) — é literalmente a
+    // instância que recebeu este envio. Sem isso, toda análise por instância
+    // (health, volume comercial x financeiro) ficava cega pras respostas da
+    // Lara (achado de auditoria b264e419).
     const { error: erroInsert } = await supabase.from('whatsapp_mensagens').insert({
       lead_id: leads?.[0]?.id ?? null,
       mensagem,
@@ -702,7 +707,28 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_url: mediaUrl,
+      instance_name: EVOLUTION_INSTANCE,
     }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if (erroInsert?.code === 'PGRST204') {
+      // Mesmo fallback de src/routes/webhook-handler.js: se a coluna
+      // instance_name ainda não existir neste ambiente (migration
+      // 20260101000041 não aplicada), regrava sem ela — nunca perde o
+      // registro local só porque uma coluna nova ainda não chegou.
+      const { error: erroFallback } = await supabase.from('whatsapp_mensagens').insert({
+        lead_id: leads?.[0]?.id ?? null,
+        mensagem,
+        direcao: 'saida',
+        telefone,
+        status: 'enviado',
+        evolution_id: evolutionId,
+        media_tipo: mediaTipo,
+        media_url: mediaUrl,
+      }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+      if (erroFallback) {
+        logarFalhaDePersistenciaLocal('insert_saida', erroFallback.code, correlationId)
+      }
+      return
+    }
     if (erroInsert) {
       logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code, correlationId)
       return
