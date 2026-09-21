@@ -1,9 +1,10 @@
 import { Router } from 'express'
 import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
+import { randomUUID } from 'node:crypto'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
-import { candidatosTelefone } from '../lib/telefone.js'
+import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
@@ -651,8 +652,13 @@ function codigoErroSeguro(codigoErro) {
   return (typeof codigoErro === 'string' && CODIGO_ERRO_PERMITIDO_RE.test(codigoErro)) ? codigoErro : 'nao_informado'
 }
 
-function logarFalhaDePersistenciaLocal(etapa, codigoErro) {
-  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — sem reenvio automático`)
+// correlationId (opcional): um UUID gerado uma vez por mensagem recebida em
+// processarLara, só pra permitir cruzar no Railway os logs de um mesmo turno
+// (decisão -> tentativa de envio -> resultado) sem nunca expor telefone/
+// conteúdo — nunca é dado do usuário, nunca é persistido, só aparece em log.
+function logarFalhaDePersistenciaLocal(etapa, codigoErro, correlationId) {
+  const sufixoCorrelacao = correlationId ? ` correlationId=${correlationId}` : ''
+  console.error(`[sdr] falha ao persistir registro local após envio já aceito pela Evolution (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — sem reenvio automático${sufixoCorrelacao}`)
 }
 
 // Mesma disciplina de log de logarFalhaDePersistenciaLocal (nunca err.message/
@@ -660,11 +666,12 @@ function logarFalhaDePersistenciaLocal(etapa, codigoErro) {
 // Usado nas checagens de leitura abaixo (config/handoff/histórico) que, até
 // esta correção, falhavam em total silêncio — nenhum log em nenhuma hipótese,
 // mesmo quando o resultado prático já era "a Lara não vai responder isto direito".
-function logarFalhaDeVerificacao(etapa, codigoErro) {
-  console.error(`[sdr] não foi possível concluir a verificação (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — seguindo com o mesmo comportamento padrão de antes desta checagem`)
+function logarFalhaDeVerificacao(etapa, codigoErro, correlationId) {
+  const sufixoCorrelacao = correlationId ? ` correlationId=${correlationId}` : ''
+  console.error(`[sdr] não foi possível concluir a verificação (etapa=${etapa}, codigo=${codigoErroSeguro(codigoErro)}) — seguindo com o mesmo comportamento padrão de antes desta checagem${sufixoCorrelacao}`)
 }
 
-async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null }) {
+async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTipo = null, mediaUrl = null, correlationId = null }) {
   // Rastreia a etapa em andamento pra o catch-all (exceções inesperadas,
   // fora do caminho normal `{ data, error }` do supabase-js) ainda saber
   // relatar qual etapa estava rodando — sem depender do texto da exceção.
@@ -678,7 +685,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       // sucesso — o ENVIO à Evolution já aconteceu antes desta etapa rodar.
       // Um erro aqui é sempre uma falha de REGISTRO LOCAL, nunca prova (nem
       // sugere) que o envio ao cliente falhou.
-      logarFalhaDePersistenciaLocal('consulta_lead', erroLeads.code)
+      logarFalhaDePersistenciaLocal('consulta_lead', erroLeads.code, correlationId)
       return
     }
 
@@ -694,13 +701,13 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       media_url: mediaUrl,
     }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     if (erroInsert) {
-      logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code)
+      logarFalhaDePersistenciaLocal('insert_saida', erroInsert.code, correlationId)
       return
     }
   } catch (err) {
     // Exceção inesperada (não o caminho normal `{ error }` acima) — mesma
     // regra: nunca loga err.message/detail/hint/objeto bruto.
-    logarFalhaDePersistenciaLocal(etapaAtual, err?.code)
+    logarFalhaDePersistenciaLocal(etapaAtual, err?.code, correlationId)
   }
 }
 
@@ -831,12 +838,35 @@ async function processarLara(event) {
   const msg = Array.isArray(event.data) ? event.data[0] : event.data
   if (!msg || msg.key?.fromMe) return null
 
+  // Um id opaco por mensagem recebida — só pra cruzar, no Railway, os logs de
+  // um mesmo turno (extração de telefone -> decisão -> envio -> persistência),
+  // inclusive os descartes abaixo. Nunca é telefone/conteúdo, nunca é
+  // persistido — só aparece em texto de log.
+  const correlationId = randomUUID()
+
   const remoteJidSdr = msg.key?.remoteJid ?? ''
-  const realJidSdr = (remoteJidSdr.endsWith('@lid') && msg.key?.remoteJidAlt)
-    ? msg.key.remoteJidAlt
-    : remoteJidSdr
+  const remoteJidAltSdr = msg.key?.remoteJidAlt ?? ''
+  const ehLidSdr = remoteJidSdr.endsWith('@lid')
+  const realJidSdr = (ehLidSdr && remoteJidAltSdr) ? remoteJidAltSdr : remoteJidSdr
   const telefone = realJidSdr.replace('@s.whatsapp.net', '').replace('@lid', '')
-  if (!telefone) return null
+
+  // @lid sem remoteJidAlt: o WhatsApp não revelou o telefone real do contato
+  // (é a própria proteção de privacidade do "Linked ID") — sem remoteJidAlt
+  // não existe forma confiável de recuperá-lo aqui. Usar os dígitos crus do
+  // @lid como se fossem o telefone recria o bug de "leads fantasma" já
+  // corrigido em 2026-07-06 (commit 4fa14d8: "evita leads fantasma com IDs
+  // numéricos do Meta") — só que de um jeito pior: a conversa processava e
+  // tentava enviar sob uma identidade que nunca casa com o telefone real do
+  // lead (fragmenta o histórico) e arrisca uma tentativa de entrega a um
+  // destinatário que não existe, tudo isso SEM NENHUM LOG (achado da
+  // auditoria de 2026-09-21). Este é um descarte inevitável de verdade — não
+  // dá pra inventar o telefone que o WhatsApp não mandou — mas agora fica
+  // logado, sanitizado e correlacionável, em vez de silencioso.
+  if (!telefone || (ehLidSdr && !remoteJidAltSdr)) {
+    const motivo = !telefone ? 'telefone_vazio' : 'lid_sem_remoteJidAlt'
+    console.warn(`[sdr:descarte] correlationId=${correlationId} motivo=${motivo} telefone_parcial=${mascararTelefone(telefone)}`)
+    return null
+  }
 
   // Interruptor geral da Lara, controlado pela página /automacoes — quando desativado,
   // a Lara não responde nada, em nenhum status_atendimento (pausa total do bot).
@@ -846,7 +876,7 @@ async function processarLara(event) {
     .eq('id', 1)
     .maybeSingle()
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-  if (erroConfig) logarFalhaDeVerificacao('ler_config_automacoes', erroConfig.code)
+  if (erroConfig) logarFalhaDeVerificacao('ler_config_automacoes', erroConfig.code, correlationId)
   if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
 
   // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
@@ -865,6 +895,14 @@ async function processarLara(event) {
     || conteudo.videoMessage?.caption
     || conteudo.documentMessage?.caption
     || ''
+  // Achado da auditoria de 2026-09-21: `texto` só-espaço (ex: cliente manda um
+  // espaço ou quebra de linha sozinha) é truthy em JS — antes disso caía direto
+  // como `mensagem`, passava pelos branches abaixo sem tocar nos fallbacks
+  // ("O cliente enviou...", "[Mensagem recebida]") e só virava vazio DEPOIS do
+  // `.trim()` do `if (!mensagem.trim())` — descartando em silêncio uma
+  // mensagem comercial real. Checar o texto já aparado aqui garante que os
+  // fallbacks (que já existiam, só não eram usados nesse caso) entram em ação.
+  const textoAparado = texto.trim()
 
   let mensagem = ''
   let tipo = 'texto'
@@ -878,17 +916,24 @@ async function processarLara(event) {
     mensagem = transcricao || '[Cliente enviou um áudio que não foi possível transcrever]'
   } else if (conteudo.imageMessage) {
     tipo = 'imagem'
-    mensagem = texto || 'O cliente enviou uma imagem. Responda que recebeu e peça para descrever o que precisa em texto.'
+    mensagem = textoAparado || 'O cliente enviou uma imagem. Responda que recebeu e peça para descrever o que precisa em texto.'
   } else if (conteudo.documentMessage) {
     tipo = 'documento'
-    mensagem = texto || 'O cliente enviou um documento/arquivo. Responda que recebeu e pergunte como pode ajudar.'
-  } else if (texto) {
-    mensagem = texto
+    mensagem = textoAparado || 'O cliente enviou um documento/arquivo. Responda que recebeu e pergunte como pode ajudar.'
+  } else if (textoAparado) {
+    mensagem = textoAparado
   } else {
     mensagem = '[Mensagem recebida]'
   }
 
-  if (!mensagem.trim()) return null
+  // Rede de segurança: com a correção acima, todo branch já garante `mensagem`
+  // não-vazia — este `return null` só dispara se um caso futuro/imprevisto
+  // escapar dos fallbacks. Antes desta correção, isto era 100% silencioso
+  // (achado da auditoria de 2026-09-21); agora fica logado e correlacionável.
+  if (!mensagem.trim()) {
+    console.warn(`[sdr:descarte] correlationId=${correlationId} motivo=mensagem_vazia_apos_fallback tipo=${tipo}`)
+    return null
+  }
 
   // Busca por todas as variações de DDD/9º dígito — o número recebido num evento
   // pode vir formatado diferente do que foi salvo antes (ex: WhatsApp reenviando
@@ -904,7 +949,7 @@ async function processarLara(event) {
     .eq('atendimento_humano', true)
     .limit(1)
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-  if (erroHandoff) logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code)
+  if (erroHandoff) logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code, correlationId)
   if (leadsHandoff && leadsHandoff.length > 0) return null
 
   const { data: conversasExistentes, error: erroHistorico } = await supabase
@@ -914,7 +959,7 @@ async function processarLara(event) {
     .order('ultimo_contato', { ascending: false })
     .limit(1)
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-  if (erroHistorico) logarFalhaDeVerificacao('ler_historico_conversa', erroHistorico.code)
+  if (erroHistorico) logarFalhaDeVerificacao('ler_historico_conversa', erroHistorico.code, correlationId)
 
   const conversa = conversasExistentes?.[0] ?? null
   // Mantém o telefone já salvo como chave canônica, para não fragmentar o
@@ -1012,6 +1057,7 @@ async function processarLara(event) {
   }, [])
 
   console.log('[sdr:debug]', JSON.stringify({
+    correlationId,
     tel: telefoneConversa,
     historicoLen: historico.length,
     historicoRoles: historico.map(h => h.role),
@@ -1031,7 +1077,7 @@ async function processarLara(event) {
     })
     claudeRawText = claudeResponse.content[0]?.text || ''
   } catch (anthropicErr) {
-    console.error('[sdr] Claude indisponível:', anthropicErr.message)
+    console.error(`[sdr] Claude indisponível: correlationId=${correlationId}`, anthropicErr.message)
     try {
       await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
         number: telefone,
@@ -1054,6 +1100,7 @@ async function processarLara(event) {
   }
 
   console.log('[sdr:debug]', JSON.stringify({
+    correlationId,
     tel: telefoneConversa,
     claudeRawLen: claudeRawText.length,
     claudeRaw: claudeRawText.slice(0, 200),
@@ -1082,10 +1129,21 @@ async function processarLara(event) {
       status_atendimento: 'ia_atendendo',
       ultimo_contato: new Date().toISOString(),
     }, { onConflict: 'telefone' }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-    if (erroSalvarEstado) logarFalhaDeVerificacao('salvar_estado_conversa', erroSalvarEstado.code)
+    if (erroSalvarEstado) logarFalhaDeVerificacao('salvar_estado_conversa', erroSalvarEstado.code, correlationId)
   } catch (err) {
-    logarFalhaDeVerificacao('salvar_estado_conversa', err?.code)
+    logarFalhaDeVerificacao('salvar_estado_conversa', err?.code, correlationId)
   }
+
+  // Achado da auditoria de 2026-09-21: um caso real teve `status_atendimento`
+  // gravado como 'ia_atendendo' (decisão tomada) sem NENHUMA mensagem de saída
+  // correspondente e sem log de erro correspondente — indicando falha em
+  // algum ponto entre esta linha e o envio real, não reproduzida por leitura
+  // de código (todo caminho abaixo já tem try/catch com log próprio). Esta
+  // marca não muda nenhum comportamento — só garante que, se isso repetir,
+  // existe pelo menos UM log certeiro amarrando "decisão tomada" ao mesmo
+  // correlationId dos logs de envio/erro logo abaixo, fechando a lacuna de
+  // observabilidade relatada mesmo sem uma causa raiz determinística.
+  console.log(`[sdr:decisao] correlationId=${correlationId} status=ia_atendendo iniciando_fase_de_envio`)
 
   // Tabela determinística decide o formato — não fica a critério do Claude a
   // cada turno, garantindo que etapas como "lead sumiu" ou "preço" nunca saem em áudio.
@@ -1128,9 +1186,9 @@ async function processarLara(event) {
         }
       } catch { /* upload de cópia do áudio é best-effort, não bloqueia o envio */ }
 
-      await registrarMensagemSaida({ telefone, mensagem: '[áudio]', evolutionId: evolutionIdAudio, mediaTipo: 'audio', mediaUrl: audioUrl })
+      await registrarMensagemSaida({ telefone, mensagem: '[áudio]', evolutionId: evolutionIdAudio, mediaTipo: 'audio', mediaUrl: audioUrl, correlationId })
     } catch (audioErr) {
-      console.error('[sdr] erro ao gerar áudio:', audioErr.message)
+      console.error(`[sdr] erro ao gerar áudio: correlationId=${correlationId}`, audioErr.message)
     }
   }
 
@@ -1139,9 +1197,9 @@ async function processarLara(event) {
       number: telefone,
       text: parsed.resposta,
     })
-    await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null })
+    await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null, correlationId })
   } catch (textErr) {
-    console.error('[sdr] erro ao enviar texto:', textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
+    console.error(`[sdr] erro ao enviar texto: correlationId=${correlationId}`, textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
   }
 
   if (ACOES_CATALOGO.includes(parsed.acao)) {
@@ -1159,9 +1217,10 @@ async function processarLara(event) {
           evolutionId: envioCat?.key?.id ?? null,
           mediaTipo: 'document',
           mediaUrl: cat.url,
+          correlationId,
         })
       } catch (catErr) {
-        console.error('[sdr] erro ao enviar catálogo:', cat.fileName, '|', catErr.message)
+        console.error(`[sdr] erro ao enviar catálogo: correlationId=${correlationId}`, cat.fileName, '|', catErr.message)
       }
     }
   }
