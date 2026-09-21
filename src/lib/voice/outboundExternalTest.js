@@ -5,10 +5,13 @@
 //
 // REGRA DE OURO: só chega a montar um payload de originate depois de
 // avaliarAutorizacaoChamadaExterna() (externalPilotGuardrails.js) E os
-// limites globais (avaliarLimiteGlobalPorHora/Dia) terem autorizado — e
-// mesmo assim, resolverDestino(EXTERNAL) (destinoResolver.js) ainda lança
-// sempre hoje (TRUNK_EXTERNO_CONFIGURADO=false, não tocado por este
-// arquivo) — dupla trava, igual ao MVP interno já fazia com o endpoint fixo.
+// limites globais (avaliarLimiteGlobalPorHora/Dia) terem autorizado.
+// ATUALIZADO 2026-09-16/21: TRUNK_EXTERNO_CONFIGURADO passou a true
+// (adapter Nvoip implementado) — resolverDestino(EXTERNAL) NÃO lança mais
+// por si só. A trava real de "sem trunk pronto" agora é a ausência de
+// NVOIP_SIP_SERVER, checada AQUI (abaixo) e também dentro de
+// avaliarAutorizacaoChamadaExterna via avaliarTrunkPronto — dupla trava
+// continua existindo, só que por outro critério.
 import { TIPO_DESTINO, resolverDestino } from './destinoResolver.js'
 import { lerConfigNvoip } from './externalConfig.js'
 
@@ -20,9 +23,11 @@ export const NO_ANSWER_TIMEOUT_S = 30
 // futura separada, ver collectionGuardsForVoice.js).
 export function construirPayloadOriginateExterno({ numero, ariApp, callerId, clienteNome }) {
   if (!numero) throw new Error('construirPayloadOriginateExterno: número é obrigatório')
-  // resolverDestino lança aqui hoje, sempre — TRUNK_EXTERNO_CONFIGURADO=false.
-  // Esta função nunca contorna isso; só existe pra já estar pronta/testável
-  // quando (e somente quando) um trunk real for provisionado.
+  // ATUALIZADO 2026-09-21: resolverDestino NÃO lança mais para EXTERNAL
+  // (adapter Nvoip existe desde 2026-09-16) — mantido mesmo assim como
+  // defesa em profundidade caso o adapter seja removido/quebre no futuro.
+  // A trava real de "trunk pronto" hoje é o check de NVOIP_SIP_SERVER logo
+  // abaixo (e, antes disso, avaliarTrunkPronto em avaliarAutorizacaoChamadaExterna).
   const endpointBase = resolverDestino(TIPO_DESTINO.EXTERNAL)
   // ACHADO REAL (2026-09-16, primeira tentativa de chamada real) —
   // `PJSIP/<endpoint>/<numero-cru>` NÃO é um dial-string válido pra um
@@ -31,7 +36,7 @@ export function construirPayloadOriginateExterno({ numero, ariApp, callerId, cli
   // dialog to invalid URI '+55...'"). Erro real visto em
   // /var/log/asterisk/messages.log:
   //   res_pjsip.c: Endpoint 'nvoip-endpoint': Could not create dialog to
-  //   invalid URI '+5551991567661'. Is endpoint registered and reachable?
+  //   invalid URI '+55XXXXXXXXXXX'. Is endpoint registered and reachable?
   // Fix: montar a URI SIP completa (sip:<numero>@<host-da-nvoip>), lida de
   // NVOIP_SIP_SERVER/NVOIP_SIP_PORT (externalConfig.js) — nunca
   // hardcoded aqui, pra nunca dessincronizar do que está em pjsip_nvoip.conf.

@@ -46,23 +46,49 @@ const CONTEXTO_BASE = {
 // teste ("nenhum trunk existe, logo nada pode ligar") deixou de valer. O que
 // ele precisa provar agora é o oposto e mais importante: mesmo COM trunk
 // real, as travas de flag e allowlist continuam bloqueando sozinhas.
+//
+// ATUALIZADO 21/09/2026 (auditoria do kill switch): "trunk real" aqui
+// significa TAMBÉM NVOIP_SIP_SERVER configurado — desde que
+// avaliarAutorizacaoChamadaExterna passou a checar avaliarTrunkPronto
+// (externalPilotGuardrails.js), sem essa env a função bloqueia por
+// "sem_trunk" ANTES de sequer avaliar flag/allowlist, o que mascarava
+// exatamente o motivo que estes dois testes querem isolar. Setar a env
+// localmente (nunca uma credencial real — só o hostname público da Nvoip,
+// mesmo valor do template) é o que torna "trunk real" verdadeiro aqui.
 test('VOICE EXTERNAL READINESS: com trunk real, flag desabilitada ainda bloqueia sozinha', () => {
-  assert.equal(resolverDestino(TIPO_DESTINO.EXTERNAL), 'PJSIP/nvoip-endpoint')
-  const resultado = avaliarAutorizacaoChamadaExterna({
-    ...CONTEXTO_BASE,
-    flags: { voice_external_enabled: false },
-  })
-  assert.equal(resultado.permitido, false)
-  assert.match(resultado.motivo, /flag_desabilitada/)
+  process.env.NVOIP_SIP_SERVER = 'app.nvoip.com.br'
+  try {
+    assert.equal(resolverDestino(TIPO_DESTINO.EXTERNAL), 'PJSIP/nvoip-endpoint')
+    const resultado = avaliarAutorizacaoChamadaExterna({
+      ...CONTEXTO_BASE,
+      flags: { voice_external_enabled: false },
+    })
+    assert.equal(resultado.permitido, false)
+    assert.match(resultado.motivo, /flag_desabilitada/)
+  } finally {
+    delete process.env.NVOIP_SIP_SERVER
+  }
 })
 
 test('VOICE EXTERNAL READINESS: com trunk real, número fora da allowlist ainda bloqueia sozinho', () => {
-  const resultado = avaliarAutorizacaoChamadaExterna({
-    ...CONTEXTO_BASE,
-    allowlist: ['+5511000000000'],
-  })
+  process.env.NVOIP_SIP_SERVER = 'app.nvoip.com.br'
+  try {
+    const resultado = avaliarAutorizacaoChamadaExterna({
+      ...CONTEXTO_BASE,
+      allowlist: ['+5511000000000'],
+    })
+    assert.equal(resultado.permitido, false)
+    assert.match(resultado.motivo, /fora_da_allowlist/)
+  } finally {
+    delete process.env.NVOIP_SIP_SERVER
+  }
+})
+
+test('VOICE EXTERNAL READINESS: SEM trunk pronto (NVOIP_SIP_SERVER ausente), nem flag+allowlist corretas autorizam — kill switch do trunk isolado', () => {
+  delete process.env.NVOIP_SIP_SERVER // estado padrão desta suíte — garante mesmo se outro teste tiver setado antes
+  const resultado = avaliarAutorizacaoChamadaExterna(CONTEXTO_BASE) // flag=true, allowlist correta — tudo "verde" exceto o trunk
   assert.equal(resultado.permitido, false)
-  assert.match(resultado.motivo, /fora_da_allowlist/)
+  assert.match(resultado.motivo, /sem_trunk/)
 })
 
 test('VOICE EXTERNAL READINESS: INTERNAL continua resolvendo pro ramal já homologado', () => {

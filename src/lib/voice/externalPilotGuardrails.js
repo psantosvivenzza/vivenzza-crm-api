@@ -7,9 +7,27 @@
 // checks e só autoriza se TODOS passarem. Sem flag + allowlist, nunca
 // origina — mesmo que todo o resto esteja correto.
 import { TIPO_DESTINO, resolverDestino } from './destinoResolver.js'
+import { lerConfigNvoip } from './externalConfig.js'
 
 export function avaliarFlagExternalHabilitada(flags) {
   return flags?.voice_external_enabled === true
+}
+
+// ACHADO REAL (21/09/2026, auditoria do kill switch): desde que
+// TRUNK_EXTERNO_CONFIGURADO passou a `true` em destinoResolver.js
+// (2026-09-16, adapter Nvoip implementado), `resolverDestino(EXTERNAL)`
+// NUNCA MAIS lança — o try/catch abaixo, que era a trava real de "sem
+// trunk configurado", virou código morto. Sem este check, flag=true no
+// banco + allowlist OK já bastava pra `avaliarAutorizacaoChamadaExterna`
+// devolver permitido=true mesmo sem nenhuma credencial/servidor SIP real
+// configurado — a checagem de prontidão do trunk só sobrevivia rio abaixo,
+// em `construirPayloadOriginateExterno` (outboundExternalTest.js), que nem
+// todo chamador desta função necessariamente invoca antes de decidir.
+// Esta função restaura a checagem de prontidão do trunk NESTA camada
+// central de autorização — mesmo critério (NVOIP_SIP_SERVER presente) já
+// usado por construirPayloadOriginateExterno, só que fail-closed mais cedo.
+export function avaliarTrunkPronto(configNvoip) {
+  return Boolean(configNvoip?.sipServer)
 }
 
 export function avaliarNumeroNaAllowlist(numero, allowlist) {
@@ -105,6 +123,9 @@ export function avaliarAutorizacaoChamadaExterna({
     resolverDestino(TIPO_DESTINO.EXTERNAL)
   } catch (err) {
     return { permitido: false, motivo: `sem_trunk: ${err.message}` }
+  }
+  if (!avaliarTrunkPronto(lerConfigNvoip())) {
+    return { permitido: false, motivo: 'sem_trunk: NVOIP_SIP_SERVER não configurado — trunk SIP não está pronto para originar' }
   }
   if (!avaliarFlagExternalHabilitada(flags)) return { permitido: false, motivo: 'flag_desabilitada: voice_external_enabled não está true' }
   if (!avaliarNumeroNaAllowlist(numero, allowlist)) return { permitido: false, motivo: `fora_da_allowlist: "${numero}" não está na allowlist de teste` }
