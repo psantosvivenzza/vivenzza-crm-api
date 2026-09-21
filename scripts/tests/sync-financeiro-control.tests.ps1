@@ -540,6 +540,51 @@ Teste 'R1. Reconciliar Running: PID nao existe mais - confirma seguro, NUNCA cha
     Assert-Equal 0 $chamouEncerrar.n 'nao ha nada pra encerrar'
   } finally { Remove-Item -Recurse -Force $raiz -ErrorAction SilentlyContinue }
 }
+Teste 'R1b. Reconciliar Running: PID nao existe mais USANDO O DEFAULT REAL de ObterProcessoPorId (Get-Process de verdade, sem fake) - BUGFIX 16/09: precisa confirmar seguro mesmo quando a mensagem da ProcessCommandException nao esta em ingles' {
+  $raiz = Novo-RaizInicializada
+  try {
+    # Sem -ObterProcessoPorId/-EncerrarProcesso: ao contrario de R1 (que
+    # injeta um fake e nunca chama Get-Process de verdade), este teste usa
+    # os defaults REAIS do modulo ($script:ObterProcessoPorIdPadrao) -
+    # exatamente o trecho que o bugfix desta PR alterou. [int]::MaxValue
+    # e um PID que o Windows jamais atribui (PIDs reais ficam muito
+    # abaixo disso), entao Get-Process -Id sempre lanca
+    # ProcessCommandException aqui, com a mensagem no idioma do SO/host -
+    # e a razao de capturar por TIPO, nao so por regex de mensagem em
+    # ingles, ser indispensavel. EncerrarProcesso real nunca roda: o PID
+    # ja nao existe, entao mesmoProcesso=false encerra o caminho antes de
+    # qualquer Stop-Process de verdade ser considerado.
+    $pidInexistente = [int]::MaxValue
+    Set-SyncFinanceiroEstadoFixture -Raiz $raiz -Estado 'Running' -GeracaoId 'g1' -WorkerPid $pidInexistente -StartTimeUtc (Get-Date) | Out-Null
+    $d = Invoke-SyncFinanceiroWatchdogInicio -Raiz $raiz -GeracaoId ([guid]::NewGuid().ToString())
+    Assert-True $d.DeveIniciarWorker 'Get-Process REAL para PID inexistente precisa ser reconhecido como "confirmado morto" (ProcessCommandException por tipo, independente da mensagem/idioma)'
+    Assert-True (-not $d.EstadoIncerto) 'nao pode sobrar EstadoIncerto quando o processo registrado realmente nao existe'
+  } finally { Remove-Item -Recurse -Force $raiz -ErrorAction SilentlyContinue }
+}
+Teste 'R1c. Reconciliar Running: caminho REAL ($script:ObterProcessoPorIdPadrao) reconhece a mensagem pt-BR LITERAL do incidente de 16/09 - achado desta revisao: este host so tem o satellite resource en-US do PowerShell (PSHOME sem pasta pt-BR), entao Get-Process real (R1b) nunca reproduz a mensagem em portugues aqui; este teste fecha essa lacuna substituindo SO o Get-Process nativo (dependencia externa), nunca a logica de decisao sob teste' {
+  # NewBoundScriptBlock roda DENTRO do escopo lexico do modulo, permitindo
+  # sombrear apenas o cmdlet Get-Process (fronteira com o SO) e ainda
+  # assim exercitar os DOIS catches reais de $script:ObterProcessoPorIdPadrao
+  # (por tipo e por mensagem) - diferenca central para R1/R2/... acima, que
+  # substituem o proprio scriptblock ObterProcessoPorId (a logica sob teste)
+  # por um fake e por isso nunca chegam perto deste codigo.
+  $modulo = Get-Module sync-financeiro-control
+  Assert-True ($null -ne $modulo) 'o modulo precisa estar carregado para NewBoundScriptBlock'
+  $chamarComGetProcessSimulado = $modulo.NewBoundScriptBlock({
+    param($MensagemExcecao, $ProcessIdSimulado)
+    function Get-Process {
+      param($Id, $ErrorAction)
+      throw [Microsoft.PowerShell.Commands.ProcessCommandException]::new($MensagemExcecao)
+    }
+    & $script:ObterProcessoPorIdPadrao -ProcessId $ProcessIdSimulado
+  })
+  $msgPtBr = 'Não é possível localizar um processo com o identificador de processo 4242.'
+  $resultado = $null
+  $lancou = $false
+  try { $resultado = & $chamarComGetProcessSimulado $msgPtBr 4242 } catch { $lancou = $true }
+  Assert-True (-not $lancou) 'BUGFIX 16/09: a mensagem pt-BR precisa ser reconhecida como "processo nao existe", nunca relancada como erro genuino'
+  Assert-True ($null -eq $resultado) 'PID confirmado morto via mensagem pt-BR precisa devolver $null (nao o objeto de processo)'
+}
 Teste 'R2. Reconciliar Running: PID existe mas com StartTimeUtc diferente (reaproveitado) - confirma seguro SEM tentar encerrar o processo errado' {
   $raiz = Novo-RaizInicializada
   try {
