@@ -41,12 +41,13 @@ test('buscarTodasAsLinhas / buscarUltimosScoresENba: sem truncamento além de 10
   }
 
   async function snapshotOperacional() {
-    const [{ count: dispatches }, { count: envios }, { count: promessas }] = await Promise.all([
+    const [{ count: dispatches }, { count: tentativas }, { count: envios }, { count: promessas }] = await Promise.all([
       supabase.from('collection_dispatches').select('id', { count: 'exact', head: true }),
+      supabase.from('collection_dispatch_attempts').select('id', { count: 'exact', head: true }),
       supabase.from('cobrancas_whatsapp').select('id', { count: 'exact', head: true }),
       supabase.from('collection_promises').select('id', { count: 'exact', head: true }),
     ])
-    return { dispatches, envios, promessas }
+    return { dispatches, tentativas, envios, promessas }
   }
 
   const pessoaMarcador = 'Paginação PostgREST Teste'
@@ -195,18 +196,34 @@ test('buscarTodasAsLinhas / buscarUltimosScoresENba: sem truncamento além de 10
     for (const l of pag2.data) assert.equal(idsP1.has(l.contas_financeiras_id), false, 'página 2 não pode repetir id da página 1')
   })
 
-  await t.test('14/15/16. ler os endpoints com carteira grande não cria dispatch, não envia WhatsApp, não muta tabela financeira', async () => {
-    // dispatches/promises ficam mesmo em 0 (nenhum teste deste arquivo os
-    // cria). cobrancas_whatsapp NÃO é 0 por padrão — seed.sql insere 2
-    // linhas sintéticas de baseline (fixture pra outros testes) que
+  await t.test('14/15/16. ler os endpoints com carteira grande não cria dispatch nem tentativa de dispatch, não envia WhatsApp, não muta tabela financeira', async () => {
+    // dispatches/tentativas/promises ficam mesmo em 0 (nenhum teste deste
+    // arquivo os cria). cobrancas_whatsapp NÃO é 0 por padrão — seed.sql
+    // insere 2 linhas sintéticas de baseline (fixture pra outros testes) que
     // sobrevivem a qualquer db:local:reset — comparar contra o valor ANTES
     // de repetir as leituras é mais robusto do que assumir zero absoluto.
+    //
+    // collection_dispatch_attempts entrou na comparação em 2026-09-21 —
+    // achado anterior (ver docs/claude-context, memória de sessão) relatou
+    // "175 collection_dispatch_attempts" rodando este arquivo sozinho. Causa
+    // raiz investigada e confirmada: NÃO é side effect das rotas (nenhuma
+    // delas grava nessa tabela — só dispatchEngine.js/
+    // providerAttemptCounter.js/whatsappInstances.js escrevem nela, e
+    // nenhuma é chamada por collection-shadow-reports.js). É acúmulo de
+    // estado de rodadas ANTERIORES de `npm run test:collection` sem
+    // `node scripts/localdb-reset.mjs` entre elas — reproduzido: contra um
+    // Postgres recém-resetado, isolado, rodando só este arquivo OU a suíte
+    // inteira em ordem, o valor de collection_dispatch_attempts antes e
+    // depois deste teste é sempre 0. Mantida aqui como guarda real contra
+    // regressão futura (delta, não zero absoluto — mesmo racional de
+    // cobrancas_whatsapp acima), não porque havia um bug de fato.
     const antes = await snapshotOperacional()
     await fetch(`${base}/api/collection-shadow/customers`, { headers })
     await fetch(`${base}/api/collection-shadow/queue?limit=200`, { headers })
     const depois = await snapshotOperacional()
-    assert.deepEqual(depois, antes, 'ler os endpoints com carteira grande não pode alterar dispatches/cobrancas_whatsapp/promises')
+    assert.deepEqual(depois, antes, 'ler os endpoints com carteira grande não pode alterar dispatches/tentativas/cobrancas_whatsapp/promises')
     assert.equal(depois.dispatches, 0, 'nenhum cenário deste arquivo deveria ter criado um dispatch')
+    assert.equal(depois.tentativas, 0, 'nenhum cenário deste arquivo deveria ter criado uma tentativa de dispatch')
   })
 
   // Achado real (mesma sessão): limpar só as tabelas de SCORE entre os
