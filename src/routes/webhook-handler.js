@@ -1,6 +1,8 @@
 import axios from 'axios'
+import { randomUUID } from 'node:crypto'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
+import { resolverTelefoneReal } from '../lib/whatsappLid.js'
 import { proximoVendedor } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
@@ -252,11 +254,53 @@ export async function processWhatsappEvent(payload) {
     if (!msg || !msg.key?.remoteJid) return
 
     const fromMe = msg.key?.fromMe === true
-    const remoteJid = msg.key?.remoteJid ?? ''
-    const realJid = (remoteJid.endsWith('@lid') && msg.key?.remoteJidAlt)
-      ? msg.key.remoteJidAlt
-      : remoteJid
-    const telefone = realJid.replace('@s.whatsapp.net', '').replace('@lid', '')
+
+    // Precisa vir ANTES da resolução de telefone abaixo: o caminho financeiro
+    // mantém o comportamento de sempre (nunca tocado por esta mudança — ver
+    // comentário logo abaixo), só o caminho comercial ganha a resolução nova.
+    const instanceName = payload.instance ?? payload.instanceName ?? null
+    const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
+
+    // Um id opaco por mensagem — só pra cruzar, no Railway, os logs de um
+    // mesmo evento (resolução de telefone -> descarte/match de lead),
+    // mesmo padrão de correlationId já usado em processarLara (sdr.js,
+    // PR #111). Nunca é telefone/conteúdo, nunca é persistido.
+    const correlationId = randomUUID()
+
+    let telefone
+    if (ehFinanceiro) {
+      // Comportamento INTOCADO — motor financeiro (inboundMessageHandler.js)
+      // é código separado, fora do escopo desta mudança (ver CLAUDE.md:
+      // "preferir PR pequena e separada por domínio"). Mesma extração de
+      // sempre, char por char idêntica à versão anterior desta função.
+      const remoteJid = msg.key?.remoteJid ?? ''
+      const realJid = (remoteJid.endsWith('@lid') && msg.key?.remoteJidAlt)
+        ? msg.key.remoteJidAlt
+        : remoteJid
+      telefone = realJid.replace('@s.whatsapp.net', '').replace('@lid', '')
+    } else {
+      // resolverTelefoneReal (src/lib/whatsappLid.js) é o único ponto de
+      // decisão pra @lid, compartilhado com processarLara (sdr.js) — além de
+      // remoteJidAlt da própria mensagem, também consulta o cache persistente
+      // de lid->telefone (whatsapp_lid_telefone), alimentado sempre que uma
+      // mensagem anterior do MESMO lid já trouxe remoteJidAlt. Sem nenhuma
+      // das duas provas, falha fechado: descarta a mensagem em vez de usar os
+      // dígitos crus do @lid como telefone (o mesmo bug de "leads fantasma"
+      // do commit 4fa14d8, 2026-07-06 — esta função nunca tinha ganhado a
+      // proteção equivalente que a PR #111 deu a processarLara).
+      const resolucao = await resolverTelefoneReal({
+        remoteJid: msg.key?.remoteJid,
+        remoteJidAlt: msg.key?.remoteJidAlt,
+        instanceName,
+        correlationId,
+      })
+      if (!resolucao.telefone) {
+        const sufixoLid = resolucao.lidMascarado ? ` lid_parcial=${resolucao.lidMascarado}` : ''
+        console.warn(`[webhook:descarte] correlationId=${correlationId} motivo=${resolucao.motivo}${sufixoLid}`)
+        return
+      }
+      telefone = resolucao.telefone
+    }
 
     // Mensagens efêmeras ("apagar após visualização") e de visualização única embrulham
     // o conteúdo real um nível mais profundo — sem isso, a mídia/texto real nunca é
@@ -292,8 +336,8 @@ export async function processWhatsappEvent(payload) {
     // falado com a Vivenzza antes (achado real: 16 mensagens confirmadas por
     // conteúdo em produção). Instância desconhecida/ausente sempre segue o
     // caminho comercial de sempre (ver ehInstanciaFinanceira — fail-safe).
-    const instanceName = payload.instance ?? payload.instanceName ?? null
-    const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
+    // instanceName/ehFinanceiro já foram calculados acima, antes da resolução
+    // de telefone — reaproveitados aqui, não recalculados.
 
     const semPrefixo = telefone.replace(/^55/, '')
     let lead = null

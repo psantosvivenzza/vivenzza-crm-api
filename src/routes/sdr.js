@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
+import { resolverTelefoneReal } from '../lib/whatsappLid.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
@@ -847,27 +848,28 @@ async function processarLara(event) {
   // persistido — só aparece em texto de log.
   const correlationId = randomUUID()
 
-  const remoteJidSdr = msg.key?.remoteJid ?? ''
-  const remoteJidAltSdr = msg.key?.remoteJidAlt ?? ''
-  const ehLidSdr = remoteJidSdr.endsWith('@lid')
-  const realJidSdr = (ehLidSdr && remoteJidAltSdr) ? remoteJidAltSdr : remoteJidSdr
-  const telefone = realJidSdr.replace('@s.whatsapp.net', '').replace('@lid', '')
+  // resolverTelefoneReal (src/lib/whatsappLid.js) é o único ponto de decisão
+  // pra @lid, compartilhado com processWhatsappEvent (webhook-handler.js) —
+  // além de remoteJidAlt da própria mensagem, também consulta o cache
+  // persistente de lid->telefone (whatsapp_lid_telefone) alimentado sempre
+  // que uma mensagem anterior do MESMO lid já trouxe remoteJidAlt. Pesquisa
+  // (2026-09-21, continuação da PR #111) confirmou que não existe outra
+  // fonte confiável (nenhum endpoint read-only da Evolution API resolve um
+  // @lid nunca visto antes) — ver comentário completo no módulo. Continua
+  // fail-closed: sem nenhuma das duas provas, `telefone` vem null e a
+  // mensagem é descartada, exatamente como antes desta mudança.
+  const instanceSdr = event.instance ?? event.instanceName ?? null
+  const resolucaoSdr = await resolverTelefoneReal({
+    remoteJid: msg.key?.remoteJid,
+    remoteJidAlt: msg.key?.remoteJidAlt,
+    instanceName: instanceSdr,
+    correlationId,
+  })
+  const telefone = resolucaoSdr.telefone
 
-  // @lid sem remoteJidAlt: o WhatsApp não revelou o telefone real do contato
-  // (é a própria proteção de privacidade do "Linked ID") — sem remoteJidAlt
-  // não existe forma confiável de recuperá-lo aqui. Usar os dígitos crus do
-  // @lid como se fossem o telefone recria o bug de "leads fantasma" já
-  // corrigido em 2026-07-06 (commit 4fa14d8: "evita leads fantasma com IDs
-  // numéricos do Meta") — só que de um jeito pior: a conversa processava e
-  // tentava enviar sob uma identidade que nunca casa com o telefone real do
-  // lead (fragmenta o histórico) e arrisca uma tentativa de entrega a um
-  // destinatário que não existe, tudo isso SEM NENHUM LOG (achado da
-  // auditoria de 2026-09-21). Este é um descarte inevitável de verdade — não
-  // dá pra inventar o telefone que o WhatsApp não mandou — mas agora fica
-  // logado, sanitizado e correlacionável, em vez de silencioso.
-  if (!telefone || (ehLidSdr && !remoteJidAltSdr)) {
-    const motivo = !telefone ? 'telefone_vazio' : 'lid_sem_remoteJidAlt'
-    console.warn(`[sdr:descarte] correlationId=${correlationId} motivo=${motivo} telefone_parcial=${mascararTelefone(telefone)}`)
+  if (!telefone) {
+    const sufixoLid = resolucaoSdr.lidMascarado ? ` lid_parcial=${resolucaoSdr.lidMascarado}` : ''
+    console.warn(`[sdr:descarte] correlationId=${correlationId} motivo=${resolucaoSdr.motivo}${sufixoLid}`)
     return null
   }
 
