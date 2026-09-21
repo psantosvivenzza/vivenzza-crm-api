@@ -9,6 +9,32 @@
 -- As colunas de multi-whatsapp/human_call_threshold NÃO entram aqui — vêm
 -- de supabase/migrations/20260101000028 e 000029 (migrations reais,
 -- replayadas por localdb-reset.mjs logo depois deste baseline).
+--
+-- ACHADO REAL (2026-09-21, worktree triagem-regressao-20260921): extensão
+-- pgcrypto nunca foi versionada em nenhum baseline nem migration git — só
+-- existe habilitada em produção porque todo projeto Supabase novo já vem
+-- com ela ativa por padrão, instalada no schema "extensions" (não em
+-- "public"). supabase/migrations/20260101000069_fila_ligacao_cobranca.sql
+-- usa digest() sem qualificar schema (só funciona com "extensions" no
+-- search_path do banco) e 20260101000071_voz_indice_hash_telefone_whatsapp.sql
+-- chama explicitamente extensions.digest(...) — os dois presumem essa
+-- extensão já instalada nesse schema exato. Um checkout limpo com Postgres
+-- local recém-inicializado (npm run db:local:reset) travava na 000069 com
+-- "função digest(text, unknown) não existe" e, corrigindo só isso, travava
+-- de novo na 000071 com "o esquema extensions não existe" — reproduzido de
+-- verdade nesta sessão, bloqueando toda a suíte test:collection num
+-- worktree novo. gen_random_uuid() logo abaixo NÃO precisa disso: é nativa
+-- do Postgres 13+, só digest()/pgcrypto ficava faltando. ALTER DATABASE (em
+-- vez de só SET search_path) porque baseline/migrations rodam um arquivo
+-- por conexão psql nova (localdb-reset.mjs) — precisa persistir no banco,
+-- não só na sessão atual.
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+DO $$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I SET search_path TO "$user", public, extensions', current_database());
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS public.usuarios (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
