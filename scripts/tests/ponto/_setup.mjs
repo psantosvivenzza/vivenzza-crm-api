@@ -251,12 +251,29 @@ export async function concederExecucaoDeTeste(nome, assinaturaFuncao) {
 // helper simula esse mesmo perfil de privilégio num papel de teste — não é
 // "enfraquecer" nada, é reproduzir fielmente o que o chamador real (o
 // próprio backend) já tem.
+//
+// BYPASSRLS (achado de 2026-09-21, ao rodar a suíte contra um reset
+// verdadeiramente do zero incluindo a migration 070): as 12 tabelas do Meu
+// Ponto (incluindo ponto_solicitacoes_marcacao/ponto_desafios/
+// ponto_equipamentos) ganharam RLS habilitado SEM nenhuma policy
+// (migration 070_meu_ponto_rls.sql, achado de 18/09/2026) — correto para
+// produção real (bloqueia anon/authenticated), mas isso também bloqueia
+// QUALQUER papel comum, mesmo com GRANT de tabela explícito, porque "RLS
+// habilitado sem policy" nega SELECT/UPDATE pra todo mundo que não seja
+// dono/superusuário/BYPASSRLS. O Supabase real dá esse mesmo bypass a
+// `service_role` via o atributo BYPASSRLS na definição da própria role da
+// plataforma (não é um GRANT de tabela) — sem replicar isso aqui, o papel
+// de teste passava a ver zero linhas depois da migration 070, mesmo com os
+// GRANTs certos, e os testes que provam "GRANT real funciona" (aqui e em
+// componente-equipamento.test.mjs) quebravam com `*_nao_encontrada` em vez
+// de exercitar a lógica de autorização que realmente querem testar.
 export async function concederAcessoTabelasPontoDeTeste(nome) {
   psqlDeTeste(`
     GRANT SELECT ON public.usuarios, public.ponto_gestores, public.ponto_config TO ${nome};
     GRANT SELECT, INSERT, UPDATE ON public.ponto_marcacoes, public.ponto_solicitacoes_marcacao, public.ponto_correcoes TO ${nome};
     GRANT SELECT, UPDATE ON public.ponto_desafios TO ${nome};
     GRANT SELECT, UPDATE ON public.ponto_equipamentos TO ${nome};
+    ALTER ROLE ${nome} BYPASSRLS;
   `)
 }
 
