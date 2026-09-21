@@ -36,6 +36,20 @@ function digitosTelefone(jid) {
   return (jid ?? '').replace('@s.whatsapp.net', '').replace('@lid', '')
 }
 
+// remoteJidAlt só é uma prova confiável o suficiente pra virar telefone
+// PERMANENTE no cache (registrarMapeamento nunca sobrescreve — ver abaixo) se
+// o resultado parecer mesmo um telefone: só dígitos, no intervalo E.164 (8 a
+// 15 — https://en.wikipedia.org/wiki/E.164). Sem essa validação, um payload
+// malformado (endpoint de webhook roda sem auth quando EVOLUTION_WEBHOOK_TOKEN
+// não está configurado — ver middleware/webhookAuth.js) gravaria lixo uma
+// única vez e bloquearia pra sempre a resolução correta do mesmo lid, já que
+// a política de conflito nunca corrige um valor já cacheado.
+const TELEFONE_ALT_VALIDO = /^\d{8,15}$/
+
+function altTelefoneValido(alt) {
+  return TELEFONE_ALT_VALIDO.test(alt)
+}
+
 // Consulta o cache (fail-closed: qualquer erro ou timeout vira "não
 // mapeado", nunca lança e nunca inventa telefone).
 async function buscarMapeamento({ lid, instanceName, correlationId }) {
@@ -137,12 +151,17 @@ export async function resolverTelefoneReal({ remoteJid, remoteJidAlt, instanceNa
   // effort, não bloqueia a resposta desta mensagem) para reaproveitar em
   // mensagens futuras do mesmo lid sem remoteJidAlt.
   const alt = digitosTelefone(remoteJidAlt ?? '')
-  if (alt) {
+  if (alt && altTelefoneValido(alt)) {
     registrarMapeamento({ lid, telefone: alt, instanceName, correlationId }).catch(() => {})
     return { telefone: alt, origem: 'remoteJidAlt' }
   }
+  if (alt) {
+    // remoteJidAlt veio preenchido mas não parece um telefone válido — trata
+    // como se não tivesse vindo (nunca usa nem cacheia lixo permanentemente).
+    console.warn(`[whatsapp-lid] remoteJidAlt com formato inesperado, ignorado correlationId=${correlationId ?? ''}`)
+  }
 
-  // Sem prova nesta mensagem — a única fonte legítima que resta é um
+  // Sem prova válida nesta mensagem — a única fonte legítima que resta é um
   // mapeamento já confirmado anteriormente (ver registrarMapeamento acima).
   // Nunca inventa a partir dos dígitos do lid.
   return buscarMapeamento({ lid, instanceName, correlationId })

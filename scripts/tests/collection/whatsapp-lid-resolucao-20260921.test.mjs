@@ -423,3 +423,28 @@ test('5. duplicidade/anti-loop: o mesmo evento entregue duas vezes não duplica 
   const { data: leads } = await supabase.from('leads').select('id').eq('telefone', telefoneSemPrefixo(telefone))
   assert.equal(leads.length, 1, 'reentrega do mesmo evento não pode criar um segundo lead pro mesmo telefone')
 })
+
+test('6. remoteJidAlt malformado: nunca vira telefone da mensagem nem cache permanente (achado da revisão da PR #116 — webhook roda sem auth quando EVOLUTION_WEBHOOK_TOKEN não está configurado)', async (t) => {
+  const lid = lidDeTeste()
+  t.after(async () => { await limparLid(lid) })
+
+  const chamadasClaudeAntes = fakeClaude.chamadasRecebidas.length
+  const { capturados, restaurar } = capturarLogs('warn')
+  let r
+  try {
+    // remoteJidAlt com letras não é um telefone plausível (E.164 é só dígitos,
+    // 8 a 15) — tratar como prova ausente, nunca como telefone de verdade.
+    r = await chamarWebhook(eventoLid({ lid, telefoneAlt: 'abc123XYZ', texto: 'remoteJidAlt malformado, nunca visto antes' }))
+    assert.equal(r.status, 200)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  } finally {
+    restaurar()
+  }
+
+  assert.equal(fakeClaude.chamadasRecebidas.length, chamadasClaudeAntes, 'Claude não pode ser chamado quando o único "telefone" disponível é um remoteJidAlt malformado')
+  const { data: mapeamento } = await supabase.from('whatsapp_lid_telefone').select('*').eq('lid', lid).maybeSingle()
+  assert.equal(mapeamento, null, 'remoteJidAlt malformado nunca pode virar uma linha permanente no cache lid->telefone')
+
+  const logIgnorado = capturados.find((m) => m.includes('[whatsapp-lid] remoteJidAlt com formato inesperado'))
+  assert.ok(logIgnorado, `esperava log de remoteJidAlt ignorado por formato inesperado, logs: ${JSON.stringify(capturados)}`)
+})
