@@ -26,6 +26,27 @@ test('Roteamento operacional multi-WhatsApp (cenários A-H)', async (t) => {
   const { enviarCobrancaComRoteamento } = await import('../../../src/lib/collection/collectionRouting.js')
   const { selecionarProximaInstancia } = await import('../../../src/lib/collection/whatsappInstances.js')
   const { invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
+  const { _resetCacheParaTeste } = await import('../../../src/lib/collection/financialSyncGuard.js')
+
+  // enviarCobrancaComRoteamento() sempre passa por verificarFrescorSync()
+  // (financialSyncGuard.js) antes de decidir motor — fail-closed se
+  // `sincronizacoes_financeiro` não tiver um ciclo recente sem erro.
+  // supabase/seed.sql não semeia essa tabela, então rodar este arquivo
+  // isolado num Postgres recém-resetado bloqueava A/B/D/F-G com
+  // status:'blocked' em vez de 'sent'/'failed' (achado 2026-09-21). Semente
+  // sintética mínima e própria, removida ao final via t.after.
+  const agoraSync = new Date().toISOString()
+  const { data: syncFrescoDeTeste, error: erroSyncFresco } = await supabase.from('sincronizacoes_financeiro').insert({
+    status: 'concluido', dry_run: false, iniciado_em: agoraSync, concluido_em: agoraSync,
+    total_lido: 0, total_atualizado: 0, total_sem_alteracao: 0, total_sem_match: 0,
+    total_conflito: 0, total_cancelado: 0, total_com_erro: 0,
+  }).select().single()
+  if (erroSyncFresco) throw erroSyncFresco
+  t.after(async () => {
+    const { error } = await supabase.from('sincronizacoes_financeiro').delete().eq('id', syncFrescoDeTeste.id)
+    if (error) throw error
+  })
+  _resetCacheParaTeste()
 
   async function setFlags({ multiWhatsapp, whatsappFailover = false }) {
     await supabase.from('automacoes_config').update({ multi_whatsapp: multiWhatsapp, whatsapp_failover: whatsappFailover }).eq('id', 1)
@@ -178,11 +199,31 @@ test('Roteamento operacional multi-WhatsApp (cenários A-H)', async (t) => {
     await setFlags({ multiWhatsapp: false })
   })
 
-  await t.test('H. Instância comercial (vivenzza/vivenzza-teste-cloud) nunca entra no pool financeiro, mesmo se cadastrada por engano', async () => {
+  await t.test('H. Instância comercial (vivenzza/vivenzza-teste-cloud) nunca entra no pool financeiro, mesmo se cadastrada por engano', async (t) => {
     await limparInstanciasDeTeste(supabase)
-    await criarInstancia(supabase, 'vivenzza', 1, 'principal') // priority 1 — venceria se não fosse bloqueada
-    await criarInstancia(supabase, 'vivenzza-teste-cloud', 2, 'reserva')
-    await criarInstancia(supabase, 'wa-financeiro-legitima', 3, 'reserva')
+
+    // Cleanup por ID registrado logo após cada criação (não um
+    // limparInstanciasDeTeste()/resetar() genérico no fim) — este é o
+    // ÚLTIMO subteste do arquivo, então sem isso 'vivenzza' e
+    // 'vivenzza-teste-cloud' vazavam em whatsapp_instances até o próximo
+    // reset externo do banco, contaminando qualquer arquivo que rode depois
+    // na mesma suíte e confie em ehInstanciaFinanceira('vivenzza')===false
+    // (achado 2026-09-21).
+    const vivenzza = await criarInstancia(supabase, 'vivenzza', 1, 'principal') // priority 1 — venceria se não fosse bloqueada
+    t.after(async () => {
+      const { error } = await supabase.from('whatsapp_instances').delete().eq('id', vivenzza.id)
+      if (error) throw error
+    })
+    const vivenzzaCloud = await criarInstancia(supabase, 'vivenzza-teste-cloud', 2, 'reserva')
+    t.after(async () => {
+      const { error } = await supabase.from('whatsapp_instances').delete().eq('id', vivenzzaCloud.id)
+      if (error) throw error
+    })
+    const financeiraLegitima = await criarInstancia(supabase, 'wa-financeiro-legitima', 3, 'reserva')
+    t.after(async () => {
+      const { error } = await supabase.from('whatsapp_instances').delete().eq('id', financeiraLegitima.id)
+      if (error) throw error
+    })
 
     const escolhida = await selecionarProximaInstancia({})
     assert.equal(escolhida?.instance_name, 'wa-financeiro-legitima', 'só a instância financeira legítima deveria ser elegível — comercial excluída mesmo com prioridade melhor')
