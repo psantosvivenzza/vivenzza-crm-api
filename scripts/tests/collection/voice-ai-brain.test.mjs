@@ -115,3 +115,27 @@ test('Voice AI: prova estática — sem Evolution, sem SQL arbitrário, sem muta
   const service = fs.readFileSync(path.join(SRC, 'lib/voice/ariCallService.js'), 'utf8')
   assert.equal(/console\.log\([^)]*textoTranscrito\)/.test(service), false, 'nunca logar o texto transcrito bruto (pode conter fala do interlocutor)')
 })
+
+test('Voice AI: prompt de voz trava o texto exato das duas regras de compliance (Art. 42 CDC / "já pagou")', () => {
+  const brain = fs.readFileSync(path.join(SRC, 'lib/voice/voiceBrain.js'), 'utf8')
+
+  assert.ok(
+    brain.includes(
+      'NUNCA mencione valor, título, vencimento ou a palavra "dívida"/"débito" antes de a pessoa confirmar que é a responsável pelo cadastro — expor o débito a um terceiro que atendeu o telefone é cobrança vexatória (Art. 42 do CDC). Enquanto não houver essa confirmação, apenas peça para falar com o responsável ou pergunte o melhor horário para retornar.'
+    ),
+    'prompt de voz perdeu (ou teve alterada) a regra de terceiro do Art. 42 CDC'
+  )
+
+  assert.ok(
+    brain.includes('Se a pessoa disser que já pagou, NUNCA discuta nem insista: agradeça, diga que vai verificar no sistema e encerre.'),
+    'prompt de voz perdeu (ou teve alterada) a regra de "já pagou"'
+  )
+
+  // Regra de "já pagou" é só reforço de PROMPT nesta PR — nada aqui pode virar
+  // confirmação real de pagamento nem atalho determinístico não revisado.
+  assert.equal(
+    /confirmo que (o pagamento|foi pago|est[áa] pago|est[áa] quitado)/i.test(brain),
+    false,
+    'prompt de voz não pode prometer confirmação de pagamento'
+  )
+})
