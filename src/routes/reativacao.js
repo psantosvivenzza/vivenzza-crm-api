@@ -172,7 +172,7 @@ function resumirHistorico(mensagens) {
   return mensagens.map((m) => `${m.direcao === 'entrada' ? 'Cliente' : 'Vivenzza'}: ${m.mensagem}`).join('\n') || '(sem histórico)'
 }
 
-async function enviarMensagemReativacao(lead) {
+export async function enviarMensagemReativacao(lead) {
   if (!dentroDaJanelaReativacao()) return null // não envia fora do horário/dia útil
 
   const tentativa = (lead.qtd_followups_automaticos ?? 0) + 1
@@ -209,14 +209,41 @@ async function enviarMensagemReativacao(lead) {
       enviado_em: new Date().toISOString(),
     })
 
-    await supabase.from('whatsapp_mensagens').insert({
+    // instance_name = EVOLUTION_INSTANCE (mesma constante server-side usada no
+    // evolutionApi.post acima, nunca o body do cliente) — é literalmente a
+    // instância que recebeu este envio. Mesmo achado b264e419 corrigido em
+    // sdr.js/whatsapp.js (PR #117): sem isso, análise por instância (health,
+    // volume comercial x financeiro) ficava cega pra todo follow-up automático
+    // de reativação.
+    const { error: erroInsertMensagem } = await supabase.from('whatsapp_mensagens').insert({
       lead_id: lead.id,
       mensagem,
       direcao: 'saida',
       telefone: numeroLimpo,
       status: 'enviado',
       evolution_id: envio?.key?.id ?? null,
+      instance_name: EVOLUTION_INSTANCE,
     })
+    if (erroInsertMensagem?.code === 'PGRST204') {
+      // Mesmo fallback já usado em webhook-handler.js/sdr.js/whatsapp.js para
+      // a mesma coluna: se instance_name ainda não existir neste ambiente
+      // (migration 20260101000041 não aplicada), regrava sem ela — nunca
+      // perde o registro local só porque uma coluna nova ainda não chegou, e
+      // nunca reenvia (o envio real via Evolution já aconteceu acima).
+      const { error: erroFallback } = await supabase.from('whatsapp_mensagens').insert({
+        lead_id: lead.id,
+        mensagem,
+        direcao: 'saida',
+        telefone: numeroLimpo,
+        status: 'enviado',
+        evolution_id: envio?.key?.id ?? null,
+      })
+      if (erroFallback) {
+        console.error(`[reativacao] erro ao gravar mensagem de saída (fallback sem instance_name) para ${lead.nome}:`, erroFallback.message)
+      }
+    } else if (erroInsertMensagem) {
+      console.error(`[reativacao] erro ao gravar mensagem de saída para ${lead.nome}:`, erroInsertMensagem.message)
+    }
 
     await incrementarMetrica('enviados')
     console.log(`[reativacao] mensagem enviada para ${lead.nome} (tentativa ${tentativa}/${MAX_TENTATIVAS})`)
