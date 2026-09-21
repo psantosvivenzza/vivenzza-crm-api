@@ -97,6 +97,13 @@ export function criarFakeEvolution() {
         return res.status(400).json({ message: 'Destinatário indisponível ou bloqueou o remetente' })
       case 'connection_drop':
         return req.socket.destroy() // simula ECONNRESET — TECHNICAL_RETRYABLE
+      // Simula um erro de validação real da Evolution que ecoa de volta o
+      // payload da requisição no corpo da resposta (número + texto enviado)
+      // — usado pelo teste adversarial de sanitização de log de sdr.js
+      // (achado da PR #111: um log que despejasse err.response.data bruto
+      // vazaria telefone/conteúdo através desse eco).
+      case 'echo_payload_error':
+        return res.status(400).json({ message: 'Erro simulado (payload ecoado)', number: req.body.number, text: req.body.text })
       case 'timeout':
       case 'pending_forever':
         return // nunca responde — cliente recebe ETIMEDOUT/ECONNABORTED

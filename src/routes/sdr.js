@@ -530,7 +530,10 @@ function parsearRespostaClaude(texto, contexto = {}) {
   // Claude retornou texto puro sem JSON — usa o texto como resposta para não
   // desperdiçar uma mensagem válida, preservando o estado atual da conversa.
   const textoLimpo = texto?.trim() ?? ''
-  console.warn('[sdr] parsearRespostaClaude: JSON inválido, usando texto puro. raw:', textoLimpo.slice(0, 100))
+  // Nunca loga o conteúdo do texto (é claudeRawText, pode conter dado do
+  // lead ecoado pelo modelo) — só tamanho e o correlationId do turno, quando
+  // disponível, para permitir achar o evento completo nos logs estruturados.
+  console.warn(`[sdr] parsearRespostaClaude: JSON inválido, usando texto puro (correlationId=${contexto.correlationId ?? 'nao_informado'}, len=${textoLimpo.length})`)
   return {
     resposta: textoLimpo || 'Pode repetir? Não entendi sua mensagem 😊',
     audio_script: null,
@@ -1056,9 +1059,12 @@ async function processarLara(event) {
     return acc
   }, [])
 
+  // Sanitizado (achado não bloqueante da revisão da PR #111): nunca loga
+  // telefone completo, texto do cliente ou resposta da Claude — só metadados
+  // (tamanhos, roles fixas 'user'/'assistant', etapa, estado) e correlationId.
   console.log('[sdr:debug]', JSON.stringify({
     correlationId,
-    tel: telefoneConversa,
+    tel: mascararTelefone(telefoneConversa),
     historicoLen: historico.length,
     historicoRoles: historico.map(h => h.role),
     messagesLen: messagesParaClaude.length,
@@ -1086,7 +1092,7 @@ async function processarLara(event) {
     } catch {}
     return null
   }
-  const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia })
+  const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia, correlationId })
 
   // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword
   // de B2B ou B2C é detectada na mensagem — cobre leads criados sem tipo definido.
@@ -1094,19 +1100,27 @@ async function processarLara(event) {
   if (turnoAtual <= 2) {
     const kwDetectada = detectarTipoKeyword(mensagem)
     if (kwDetectada) {
-      console.log(`[sdr:keyword] ${telefoneConversa} turno=${turnoAtual} ${kwDetectada.categoria.toUpperCase()} keyword="${kwDetectada.keyword}" tipo=${kwDetectada.tipo}`)
+      // keyword vem sempre de KEYWORDS_B2B/KEYWORDS_B2C (lista fixa no
+      // código, nunca texto livre do cliente) — seguro logar; telefone
+      // mascarado (achado não bloqueante da revisão da PR #111).
+      console.log(`[sdr:keyword] correlationId=${correlationId} tel=${mascararTelefone(telefoneConversa)} turno=${turnoAtual} ${kwDetectada.categoria.toUpperCase()} keyword="${kwDetectada.keyword}" tipo=${kwDetectada.tipo}`)
       parsed.tipo_lead = kwDetectada.tipo
     }
   }
 
+  // Sanitizado (achado não bloqueante da revisão da PR #111): a versão
+  // anterior logava claudeRawText e o início de parsed.resposta — ambos podem
+  // conter dado do lead (nome, telefone informado em texto, condição
+  // comercial etc.) que o modelo ecoa na conversa. Mantém só tamanhos e os
+  // campos de decisão fixos (etapa/estado), suficientes para depurar sem
+  // expor conteúdo.
   console.log('[sdr:debug]', JSON.stringify({
     correlationId,
-    tel: telefoneConversa,
+    tel: mascararTelefone(telefoneConversa),
     claudeRawLen: claudeRawText.length,
-    claudeRaw: claudeRawText.slice(0, 200),
     parsedEtapa: parsed.etapa_cadencia,
     parsedEstado: parsed.proximo_estado,
-    parsedRespostaStart: parsed.resposta?.slice(0, 60),
+    parsedRespostaLen: parsed.resposta?.length ?? 0,
   }))
 
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
@@ -1199,7 +1213,11 @@ async function processarLara(event) {
     })
     await registrarMensagemSaida({ telefone, mensagem: parsed.resposta, evolutionId: envioTexto?.key?.id ?? null, correlationId })
   } catch (textErr) {
-    console.error(`[sdr] erro ao enviar texto: correlationId=${correlationId}`, textErr.response?.data ? JSON.stringify(textErr.response.data) : textErr.message)
+    // Nunca loga textErr.response.data bruto (achado não bloqueante da
+    // revisão da PR #111): a Evolution pode ecoar o payload da requisição
+    // (número + texto enviado) no corpo de um erro de validação — status
+    // HTTP + err.message (mensagem fixa do axios, nunca o corpo) bastam.
+    console.error(`[sdr] erro ao enviar texto: correlationId=${correlationId} status=${textErr.response?.status ?? 'sem_status'}`, textErr.message)
   }
 
   if (ACOES_CATALOGO.includes(parsed.acao)) {
