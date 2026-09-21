@@ -27,6 +27,22 @@
 //
 // Além disso, TODOS os guards de reguaTentativas.js e externalPilotGuardrails.js
 // continuam rodando por telefone, e o limite global por hora/dia continua valendo.
+//
+// ACHADO DA AUDITORIA (21/09/2026, ativação controlada): collectionGuardsForVoice.js
+// já existia, testado, mas nenhum job/rota real o chamava (prova estática em
+// voice-nvoip-external-readiness.test.mjs, teste 21) — vw_fila_ligacao_cobranca
+// é só a PRIMEIRA peneira (ela mesma se descreve assim no COMMENT ON VIEW) e
+// não repete, no banco, os mesmos guards que já protegem o WhatsApp: ela não
+// consulta collection_do_not_contact (canal ligacao/todos) e sua noção de
+// "promessa" é só voice_calls.data_prometida (promessa feita numa ligação
+// anterior), nunca collection_promises (a tabela real, alimentada também por
+// WhatsApp/humano). Um cliente que pede pra não ser mais contatado por
+// telefone, ou que negocia uma promessa de pagamento pelo WhatsApp, ou cujo
+// título já foi baixado mas o `status` ainda não virou por atraso do sync,
+// continuaria elegível nesta view. CORRIGIDO: cada candidato agora passa
+// TAMBÉM pelos guards de collectionGuardsForVoice.js (mesmos já usados e
+// testados para o WhatsApp) antes de discar — ver
+// avaliarGuardsCobrancaDoCliente() abaixo. Nenhuma regra nova foi inventada.
 import 'dotenv/config'
 import axios from 'axios'
 import { pathToFileURL } from 'url'
@@ -37,6 +53,10 @@ import {
   avaliarLimiteGlobalPorHora,
   avaliarLimiteGlobalPorDia,
 } from '../../src/lib/voice/externalPilotGuardrails.js'
+import {
+  avaliarGuardsTituloParaLigacao,
+  avaliarGuardGlobalParaLigacao,
+} from '../../src/lib/voice/collectionGuardsForVoice.js'
 import { lerLimitesVoz, numeroNaAllowlistExterna } from '../../src/lib/voice/externalConfig.js'
 import { idempotencyKeyLigacaoExterna } from '../../src/lib/collection/idempotency.js'
 import { hojeBrtISO } from '../../src/lib/collection/collectionContactPolicy.js'
@@ -79,6 +99,43 @@ export function resolverAllowlistParaAutorizacao(numero, verificarNaAllowlist = 
   }
 }
 
+// Mesmo filtro da CTE `titulos` de vw_fila_ligacao_cobranca (supabase/migrations/
+// 20260101000069_fila_ligacao_cobranca.sql) — repetido aqui só pra obter os IDs
+// de contas_financeiras (a view nunca expõe título individual, só o cliente
+// agregado). tipo é comparado em memória (ILIKE no SQL original) por
+// simplicidade — mesma disciplina de doNotContactGuard.js (filtrar em JS
+// depois de uma leitura ampla, quando o cliente do banco em uso não garante
+// o mesmo operador em todo ambiente de teste).
+async function buscarTitulosElegiveisDoCliente(codigoCliente) {
+  const hoje = hojeBrtISO()
+  const { data, error } = await supabase
+    .from('contas_financeiras')
+    .select('id, tipo, em_revisao, em_revisao_financeira')
+    .eq('codigo_cliente', codigoCliente)
+    .in('status', ['vencida', 'aberta'])
+    .lt('vencimento', hoje)
+  if (error) throw error
+  return (data ?? []).filter((t) => /receb/i.test(t.tipo || '') && !t.em_revisao && !t.em_revisao_financeira)
+}
+
+// Guard de cobrança por CLIENTE (a fila é agregada por codigo_cliente, não
+// por título) — bloqueia se QUALQUER título aberto do cliente falhar um
+// guard (fail-closed: melhor não ligar do que ligar sobre um título quitado/
+// com promessa ativa só porque outro título do mesmo cliente estava limpo).
+// Exportado para ser testável isoladamente (mesmo padrão de
+// resolverAllowlistParaAutorizacao acima).
+export async function avaliarGuardsCobrancaDoCliente(codigoCliente, numero) {
+  const titulos = await buscarTitulosElegiveisDoCliente(codigoCliente)
+  if (!titulos.length) {
+    return { permitido: false, motivo: 'sem_titulo_elegivel_no_momento_da_ligacao' }
+  }
+  for (const titulo of titulos) {
+    const guard = await avaliarGuardsTituloParaLigacao(titulo.id, numero)
+    if (!guard.permitido) return guard
+  }
+  return { permitido: true, motivo: null }
+}
+
 async function main() {
   const config = await obterConfigCobranca()
   const limites = lerLimitesVoz()
@@ -109,6 +166,19 @@ async function main() {
   if (!CONFIRMAR) {
     log('')
     log('DRY RUN - nenhuma ligação foi feita. Use --confirm para discar de verdade.')
+    return
+  }
+
+  // Guard OPERACIONAL/GLOBAL (financialSyncGuard, via collectionGuardsForVoice.js)
+  // — mesmo guard que já protege o WhatsApp. Checado só a partir daqui (depois
+  // do dry-run, que é só visualização e nunca disca) — bloqueia a RODADA
+  // INTEIRA de discagem real, não só um cliente: discar com base em dados
+  // financeiros desatualizados é o mesmo risco de ligar pra quem já pagou
+  // (sync pode estar atrasado/parado).
+  const guardGlobal = await avaliarGuardGlobalParaLigacao()
+  if (!guardGlobal.permitido) {
+    console.error(`[fila-cobranca] ABORTADO: ${guardGlobal.motivo}`)
+    process.exitCode = 1
     return
   }
 
@@ -143,6 +213,25 @@ async function main() {
       estado = await buscarEstadoChamadasExternas({ numero })
     } catch (err) {
       log(`PULADO ${rotulo}: não consegui ler o histórico - ${err.message}`)
+      bloqueadas++
+      continue
+    }
+
+    // Guard de cobrança (título quitado/cancelado/em_revisao, promessa ativa
+    // em collection_promises, DNC/opt-out canal ligacao|todos) — ver
+    // avaliarGuardsCobrancaDoCliente() acima. A view já filtrou pela sua
+    // própria noção de elegibilidade; isto é a SEGUNDA peneira, com a mesma
+    // fonte de verdade do WhatsApp.
+    let guardCobranca
+    try {
+      guardCobranca = await avaliarGuardsCobrancaDoCliente(c.codigo_cliente, numero)
+    } catch (err) {
+      log(`BLOQUEADO ${rotulo}: erro_guard_cobranca: ${err.message}`)
+      bloqueadas++
+      continue
+    }
+    if (!guardCobranca.permitido) {
+      log(`BLOQUEADO ${rotulo}: ${guardCobranca.motivo}`)
       bloqueadas++
       continue
     }

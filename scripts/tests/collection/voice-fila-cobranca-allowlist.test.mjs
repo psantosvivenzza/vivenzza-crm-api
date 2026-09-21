@@ -245,6 +245,128 @@ test('VOICE FILA COBRANCA — bypass de allowlist (auditoria f8cb81c9)', async (
     assert.match(conteudo, /const isMain = process\.argv\[1\]/, 'guard de execução direta (isMain) precisa existir para o import deste teste ser seguro')
   })
 
+  // ACHADO DA AUDITORIA (21/09/2026, ativação controlada): collectionGuardsForVoice.js
+  // (título quitado/promessa ativa/DNC) existia, testado, mas nenhum job real o
+  // chamava — vw_fila_ligacao_cobranca é só a primeira peneira e não repete, no
+  // banco, DNC (canal ligacao/todos) nem promessas feitas fora de uma ligação
+  // (collection_promises, alimentada também por WhatsApp/humano). Os testes 18+
+  // provam que o dispatcher automático agora chama esses guards também.
+  await t.test('18. prova estática — rodar-fila-cobranca.mjs agora importa e chama collectionGuardsForVoice.js', () => {
+    const conteudo = fs.readFileSync(SCRIPT_PATH, 'utf8')
+    assert.match(conteudo, /from '.*collectionGuardsForVoice\.js'/, 'o dispatcher precisa importar os guards de cobrança já testados')
+    assert.match(conteudo, /avaliarGuardsTituloParaLigacao/)
+    assert.match(conteudo, /avaliarGuardGlobalParaLigacao/)
+  })
+
+  await t.test('19. prova estática — guard GLOBAL (financialSyncGuard) roda em main() ANTES de qualquer discagem real, mas DEPOIS do dry-run (dry-run continua só visualização, nunca disca, e não deveria abortar por causa de um guard que só protege discagem de verdade)', () => {
+    const conteudo = fs.readFileSync(SCRIPT_PATH, 'utf8')
+    const idxLeituraFila = conteudo.indexOf("from('vw_fila_ligacao_cobranca')")
+    const idxDryRun = conteudo.indexOf('DRY RUN - nenhuma ligação foi feita')
+    const idxGuardGlobal = conteudo.indexOf('avaliarGuardGlobalParaLigacao()')
+    const idxAriCheck = conteudo.indexOf("ARI_USER/ARI_PASSWORD não configurados")
+    assert.ok(idxLeituraFila > 0 && idxDryRun > 0 && idxGuardGlobal > 0 && idxAriCheck > 0, 'todos precisam existir no arquivo')
+    assert.ok(idxLeituraFila < idxDryRun, 'a fila precisa ser lida e exibida mesmo em dry-run')
+    assert.ok(idxDryRun < idxGuardGlobal, 'o guard global de sync só deveria ser checado depois do dry-run (dry-run nunca disca, não precisa ser bloqueado por ele)')
+    assert.ok(idxGuardGlobal < idxAriCheck, 'o guard global de sync precisa ser checado antes de qualquer tentativa de conectar no ARI/discar de verdade')
+  })
+
+  await t.test('20. INTEGRAÇÃO — título com saldo quitado (valor_pago cobre o valor) bloqueia via avaliarGuardsCobrancaDoCliente, mesmo que a view ainda não tenha refletido o status', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const codigoCliente = `TESTE-QUITADO-${Date.now()}`
+    const telefone = '5551999911001'
+    const { data: titulo, error } = await supabase.from('contas_financeiras').insert({
+      tipo: 'receber', pessoa_nome: 'Cliente Teste Quitado', valor: 500, valor_pago: 500,
+      vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10),
+      status: 'vencida', // status ainda não refletiu o pagamento — exatamente o gap da auditoria
+      telefone_cobranca: telefone, em_revisao_financeira: false, codigo_cliente: codigoCliente,
+    }).select().single()
+    assert.equal(error, null)
+    try {
+      const resultado = await avaliarGuardsCobrancaDoCliente(codigoCliente, telefone)
+      assert.equal(resultado.permitido, false)
+      assert.match(resultado.motivo, /titulo_quitado_cancelado_ou_em_revisao/)
+    } finally {
+      await supabase.from('contas_financeiras').delete().eq('id', titulo.id)
+    }
+  })
+
+  await t.test('21. INTEGRAÇÃO — promessa ATIVA em collection_promises (ex.: negociada por WhatsApp) bloqueia a ligação, mesmo sem nenhuma ligação de voz anterior', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const { registrarPromessa } = await import('../../../src/lib/collection/promises.js')
+    const codigoCliente = `TESTE-PROMESSA-${Date.now()}`
+    const telefone = '5551999911002'
+    const { data: titulo, error } = await supabase.from('contas_financeiras').insert({
+      tipo: 'receber', pessoa_nome: 'Cliente Teste Promessa', valor: 500, valor_pago: 0,
+      vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10),
+      status: 'vencida', telefone_cobranca: telefone, em_revisao_financeira: false, codigo_cliente: codigoCliente,
+    }).select().single()
+    assert.equal(error, null)
+    try {
+      await registrarPromessa({
+        contasFinanceirasId: titulo.id, clienteNome: 'Cliente Teste Promessa', clienteTelefone: telefone,
+        valor: 500, promisedDate: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10), origem: 'AI',
+      })
+      const resultado = await avaliarGuardsCobrancaDoCliente(codigoCliente, telefone)
+      assert.equal(resultado.permitido, false)
+      assert.match(resultado.motivo, /promessa_ativa/)
+    } finally {
+      await supabase.from('collection_promises').delete().eq('contas_financeiras_id', titulo.id)
+      await supabase.from('contas_financeiras').delete().eq('id', titulo.id)
+    }
+  })
+
+  await t.test('22. INTEGRAÇÃO — telefone em collection_do_not_contact (canal "ligacao") bloqueia, mesmo com título saudável e sem promessa', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const codigoCliente = `TESTE-DNC-${Date.now()}`
+    const telefone = '5551999911003'
+    const { data: titulo, error } = await supabase.from('contas_financeiras').insert({
+      tipo: 'receber', pessoa_nome: 'Cliente Teste DNC', valor: 500, valor_pago: 0,
+      vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10),
+      status: 'vencida', telefone_cobranca: telefone, em_revisao_financeira: false, codigo_cliente: codigoCliente,
+    }).select().single()
+    assert.equal(error, null)
+    const { error: erroDnc } = await supabase.from('collection_do_not_contact').insert({
+      cliente_telefone: telefone, motivo: 'pedido do cliente (teste)', canal: 'ligacao', expira_em: null,
+    })
+    assert.equal(erroDnc, null)
+    try {
+      const resultado = await avaliarGuardsCobrancaDoCliente(codigoCliente, telefone)
+      assert.equal(resultado.permitido, false)
+      assert.match(resultado.motivo, /opt_out/)
+    } finally {
+      await supabase.from('collection_do_not_contact').delete().eq('cliente_telefone', telefone)
+      await supabase.from('contas_financeiras').delete().eq('id', titulo.id)
+    }
+  })
+
+  await t.test('23. INTEGRAÇÃO — cliente saudável (título aberto, sem promessa, sem DNC) continua PERMITIDO — o novo guard não bloqueia quem está realmente elegível', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const codigoCliente = `TESTE-SAUDAVEL-${Date.now()}`
+    const telefone = '5551999911004'
+    const { data: titulo, error } = await supabase.from('contas_financeiras').insert({
+      tipo: 'receber', pessoa_nome: 'Cliente Teste Saudavel', valor: 500, valor_pago: 0,
+      vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10),
+      status: 'vencida', telefone_cobranca: telefone, em_revisao_financeira: false, codigo_cliente: codigoCliente,
+    }).select().single()
+    assert.equal(error, null)
+    try {
+      const resultado = await avaliarGuardsCobrancaDoCliente(codigoCliente, telefone)
+      assert.equal(resultado.permitido, true)
+      assert.equal(resultado.motivo, null)
+    } finally {
+      await supabase.from('contas_financeiras').delete().eq('id', titulo.id)
+    }
+  })
+
+  await t.test('24. INTEGRAÇÃO — cliente sem NENHUM título elegível no momento da ligação (todos já quitados/cancelados) bloqueia com motivo explícito', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const codigoCliente = `TESTE-SEMTITULO-${Date.now()}`
+    const telefone = '5551999911005'
+    const resultado = await avaliarGuardsCobrancaDoCliente(codigoCliente, telefone)
+    assert.equal(resultado.permitido, false)
+    assert.match(resultado.motivo, /sem_titulo_elegivel_no_momento_da_ligacao/)
+  })
+
   limparEnvAllowlist()
   await pararAmbienteDeTeste()
 })
