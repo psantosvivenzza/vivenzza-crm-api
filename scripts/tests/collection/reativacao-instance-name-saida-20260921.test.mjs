@@ -291,6 +291,15 @@ test('isolamento comercial/financeiro/SDR — instance_name da reativação nunc
   // suíte já tenha deixado uma instância 'principal' habilitada no banco
   // compartilhado; irrelevante para o que este teste verifica (só precisa
   // de um instance_name financeiro cadastrado, papel não importa aqui).
+  //
+  // Limpeza defensiva: mesmo achado pré-existente documentado em
+  // whatsapp-mensagens-instance-name-saida-20260921.test.mjs (PR #117) —
+  // multi-whatsapp-operational-routing.test.mjs (teste H) cadastra
+  // 'vivenzza'/'vivenzza-teste-cloud' em whatsapp_instances de propósito e
+  // não limpa depois (último subteste do arquivo). Sem isto, a pré-condição
+  // abaixo falha quando os arquivos rodam na mesma base compartilhada, sem
+  // nenhuma relação com a correção desta PR.
+  await supabase.from('whatsapp_instances').delete().in('instance_name', [INSTANCIA_COMERCIAL_ESPERADA, 'vivenzza-teste-cloud'])
   const { error: erroSeed } = await supabase.from('whatsapp_instances').upsert(
     { name: 'WhatsApp Financeiro (teste)', instance_name: 'vivenzza-financeiro', priority: 9, role: 'reserva', enabled: true },
     { onConflict: 'instance_name' },
