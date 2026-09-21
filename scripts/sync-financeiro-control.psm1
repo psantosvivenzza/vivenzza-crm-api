@@ -188,8 +188,17 @@ $script:ObterProcessoPorIdPadrao = {
   param($ProcessId)
   try {
     Get-Process -Id $ProcessId -ErrorAction Stop
+  } catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+    # BUGFIX 16/09: tipo de excecao e independente de idioma/cultura do
+    # SO - o match por mensagem abaixo falhava neste servidor porque o
+    # Windows esta em pt-BR ("Nao e possivel localizar um processo..."),
+    # nao em en-US ("cannot find a process..."), fazendo TODA consulta a
+    # um PID morto virar "falha ao consultar" (Sucesso=false) em vez de
+    # "confirmado morto" (Sucesso=true) - travava a reconciliacao pra
+    # sempre apos qualquer crash do worker.
+    return $null
   } catch {
-    if ($_.Exception.Message -match '(?i)cannot find a process') { return $null }
+    if ($_.Exception.Message -match '(?i)cannot find a process|n.o .{1,2} poss.vel localizar um processo') { return $null }
     throw
   }
 }
