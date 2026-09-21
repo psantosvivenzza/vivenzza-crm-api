@@ -20,6 +20,27 @@ const evolutionApi = axios.create({
 // "mediatype" (vindo de req.body) antes de virar segmento de path de Storage.
 const MEDIA_TYPES_STORAGE_VALIDOS = new Set(['image', 'video', 'audio', 'document'])
 
+// Registra uma mensagem de saída comercial em whatsapp_mensagens com
+// instance_name = INSTANCE (mesma constante server-side usada no
+// evolutionApi.post de cada rota abaixo, nunca o body do cliente) — é
+// literalmente a instância que recebeu o envio. Sem isso, análise por
+// instância (health, volume comercial x financeiro) ficava cega pra todo
+// envio manual/mídia feito por aqui (achado de auditoria b264e419).
+//
+// Mesmo fallback de src/routes/webhook-handler.js para a mesma coluna: se
+// instance_name ainda não existir neste ambiente (migration
+// 20260101000041 não aplicada), regrava sem ela — nunca perde o registro
+// local só porque uma coluna nova ainda não chegou.
+async function inserirMensagemSaida(payloadBase) {
+  const { error } = await supabase.from('whatsapp_mensagens').insert({ ...payloadBase, instance_name: INSTANCE })
+  if (error?.code === 'PGRST204') {
+    const { error: erroFallback } = await supabase.from('whatsapp_mensagens').insert(payloadBase)
+    if (erroFallback) console.error('[whatsapp] erro ao gravar mensagem de saída (fallback sem instance_name):', erroFallback.message)
+    return
+  }
+  if (error) console.error('[whatsapp] erro ao gravar mensagem de saída:', error.message)
+}
+
 // GET /api/whatsapp/media/:evolution_id — proxy para download de mídia via Evolution API
 // DEVE vir antes de /:lead_id para não ser capturado pelo catch-all
 router.get('/media/:evolution_id', async (req, res) => {
@@ -424,7 +445,7 @@ router.post('/enviar-audio', async (req, res) => {
     }
 
     if (lead_id) {
-      await supabase.from('whatsapp_mensagens').insert({
+      await inserirMensagemSaida({
         lead_id,
         mensagem: '[áudio]',
         direcao: 'saida',
@@ -507,7 +528,7 @@ router.post('/enviar-midia', async (req, res) => {
       : (caption ? `[arquivo: ${fileName}] ${caption}` : `[arquivo: ${fileName}]`)
 
     if (lead_id) {
-      await supabase.from('whatsapp_mensagens').insert({
+      await inserirMensagemSaida({
         lead_id,
         mensagem: msgTexto,
         direcao: 'saida',
@@ -551,7 +572,7 @@ router.post('/enviar', async (req, res) => {
     }
 
     if (lead_id) {
-      await supabase.from('whatsapp_mensagens').insert({
+      await inserirMensagemSaida({
         lead_id,
         mensagem,
         direcao: 'saida',
