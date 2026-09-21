@@ -240,7 +240,13 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
     }
   })
 
-  await t.test('21. collectionGuardsForVoice.js nunca é importado por nenhum job/rota de execução real (auditoria/preparação apenas, régua não ligada à voz)', () => {
+  await t.test('21. collectionGuardsForVoice.js não vaza para rotas HTTP nem jobs cron — único chamador real é scripts/voice/rodar-fila-cobranca.mjs (ver voice-fila-cobranca-allowlist.test.mjs, testes 18-24)', () => {
+    // ATUALIZADO (21/09/2026, ativação controlada): até aqui nenhum job/rota
+    // real chamava collectionGuardsForVoice.js — achado da auditoria, corrigido
+    // em rodar-fila-cobranca.mjs (o dispatcher real, um script standalone
+    // disparado pela Tarefa Agendada, nunca morou em src/jobs nem src/routes).
+    // Este teste continua provando que a régua de voz não vazou para dentro
+    // de rotas HTTP ou jobs cron — só o dispatcher dedicado a chama agora.
     const raiz = path.join(SRC)
     const proibidoEm = ['jobs', 'routes'].flatMap((dir) => {
       const p = path.join(raiz, dir)
@@ -249,7 +255,7 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
     })
     for (const arquivo of proibidoEm) {
       const conteudo = fs.readFileSync(arquivo, 'utf8')
-      assert.equal(conteudo.includes('collectionGuardsForVoice'), false, `${arquivo} não deveria importar collectionGuardsForVoice.js ainda — régua não ligada à voz nesta rodada`)
+      assert.equal(conteudo.includes('collectionGuardsForVoice'), false, `${arquivo} não deveria importar collectionGuardsForVoice.js — só o dispatcher dedicado (scripts/voice/rodar-fila-cobranca.mjs) deveria`)
     }
   })
 
