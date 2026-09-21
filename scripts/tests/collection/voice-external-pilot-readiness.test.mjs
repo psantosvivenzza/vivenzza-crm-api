@@ -31,17 +31,38 @@ const CONTEXTO_BASE = {
   idempotencyKey: 'chave-teste-001',
   chavesJaProcessadas: new Set(),
   chamadasAtivas: [],
-  horaAtual: new Date(2026, 0, 5, 10, 0), // segunda-feira 10:00 (2026-01-05 é segunda)
+  // ATUALIZADO 2026-09-17: instante em UTC EXPLÍCITO. new Date(ano, mes, dia,
+  // hora) usa o fuso LOCAL da máquina — o runner roda em UTC, então 10:00
+  // "local" era 07:00 em Brasília e o teste provava a janela errada. BRT =
+  // UTC-3 fixo (sem horário de verão desde 2019): 13:00Z = 10:00 BRT.
+  horaAtual: new Date('2026-01-05T13:00:00Z'), // segunda-feira, 10:00 BRT
   politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 9 * 60, fimMinutos: 18 * 60 }] },
   chamadasHoje: [],
   limiteDiario: 3,
 }
 
-test('VOICE EXTERNAL READINESS: sem trunk configurado -> SEMPRE bloqueado, mesmo com tudo mais correto', () => {
-  assert.throws(() => resolverDestino(TIPO_DESTINO.EXTERNAL), /fail-closed/)
-  const resultado = avaliarAutorizacaoChamadaExterna(CONTEXTO_BASE)
+// ATUALIZADO 2026-09-17: o trunk da Nvoip foi homologado em 16-17/09 e
+// TRUNK_EXTERNO_CONFIGURADO passou a ser true — a premissa original deste
+// teste ("nenhum trunk existe, logo nada pode ligar") deixou de valer. O que
+// ele precisa provar agora é o oposto e mais importante: mesmo COM trunk
+// real, as travas de flag e allowlist continuam bloqueando sozinhas.
+test('VOICE EXTERNAL READINESS: com trunk real, flag desabilitada ainda bloqueia sozinha', () => {
+  assert.equal(resolverDestino(TIPO_DESTINO.EXTERNAL), 'PJSIP/nvoip-endpoint')
+  const resultado = avaliarAutorizacaoChamadaExterna({
+    ...CONTEXTO_BASE,
+    flags: { voice_external_enabled: false },
+  })
   assert.equal(resultado.permitido, false)
-  assert.match(resultado.motivo, /sem_trunk/)
+  assert.match(resultado.motivo, /flag_desabilitada/)
+})
+
+test('VOICE EXTERNAL READINESS: com trunk real, número fora da allowlist ainda bloqueia sozinho', () => {
+  const resultado = avaliarAutorizacaoChamadaExterna({
+    ...CONTEXTO_BASE,
+    allowlist: ['+5511000000000'],
+  })
+  assert.equal(resultado.permitido, false)
+  assert.match(resultado.motivo, /fora_da_allowlist/)
 })
 
 test('VOICE EXTERNAL READINESS: INTERNAL continua resolvendo pro ramal já homologado', () => {
@@ -77,13 +98,27 @@ test('VOICE EXTERNAL READINESS: chamada já ativa pro mesmo número bloqueia', (
   assert.equal(avaliarChamadaDuplicadaAtiva('+5511999998888', encerrada), true)
 })
 
-test('VOICE EXTERNAL READINESS: horário fail-closed sem política configurada', () => {
-  assert.equal(avaliarHorarioPermitido(new Date(2026, 0, 5, 10, 0), null), false)
-  assert.equal(avaliarHorarioPermitido(new Date(2026, 0, 5, 10, 0), { janelas: [] }), false)
+// ATUALIZADO 2026-09-17: todos os instantes em UTC EXPLÍCITO. O guard agora
+// resolve a hora SEMPRE em horário de Brasília, independente do fuso do
+// processo — antes ele usava getHours() local, e num runner em UTC (o caso
+// aqui e o caso de qualquer servidor em nuvem) isso significava autorizar
+// ligação às 07:00 BRT achando que eram 10:00. BRT = UTC-3 fixo.
+test('VOICE EXTERNAL READINESS: horário fail-closed e sempre resolvido em BRT', () => {
   const politica = { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 9 * 60, fimMinutos: 18 * 60 }] }
-  assert.equal(avaliarHorarioPermitido(new Date(2026, 0, 5, 10, 0), politica), true) // segunda 10h
-  assert.equal(avaliarHorarioPermitido(new Date(2026, 0, 5, 20, 0), politica), false) // segunda 20h, fora da janela
-  assert.equal(avaliarHorarioPermitido(new Date(2026, 0, 4, 10, 0), politica), false) // domingo, fora dos dias
+  const segunda10hBrt = new Date('2026-01-05T13:00:00Z')
+  const segunda20hBrt = new Date('2026-01-05T23:00:00Z')
+  const segunda7hBrt = new Date('2026-01-05T10:00:00Z')
+  const domingo10hBrt = new Date('2026-01-04T13:00:00Z')
+
+  assert.equal(avaliarHorarioPermitido(segunda10hBrt, null), false)
+  assert.equal(avaliarHorarioPermitido(segunda10hBrt, { janelas: [] }), false)
+  assert.equal(avaliarHorarioPermitido(segunda10hBrt, politica), true)
+  assert.equal(avaliarHorarioPermitido(segunda20hBrt, politica), false, 'segunda 20h BRT está fora da janela')
+  assert.equal(avaliarHorarioPermitido(domingo10hBrt, politica), false, 'domingo está fora dos dias')
+  // A prova da correção: este instante é 10:00 UTC. O guard antigo (getHours()
+  // local, runner em UTC) diria "10h, autorizado" — mas em Brasília são 07:00,
+  // fora da janela legal estadual.
+  assert.equal(avaliarHorarioPermitido(segunda7hBrt, politica), false, '07:00 BRT (10:00 UTC) nunca pode ser autorizado')
 })
 
 test('VOICE EXTERNAL READINESS: limite diário por telefone bloqueia ao atingir o teto', () => {

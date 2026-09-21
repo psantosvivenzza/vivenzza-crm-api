@@ -33,7 +33,7 @@ const ENDPOINT_INTERNO = 'PJSIP/7001'
 // outboundExternalTest.js: `${endpointBase}/${numero}`), formando o
 // dial-string `PJSIP/nvoip-endpoint/<numero>` — mesma convenção do chan_pjsip
 // pra endpoint de trunk com URI de destino sobrescrita.
-const ENDPOINT_EXTERNO_NVOIP = 'PJSIP/nvoip-endpoint'
+export const ENDPOINT_EXTERNO_NVOIP = 'PJSIP/nvoip-endpoint'
 
 // Agora true: o adapter existe (ver comentário acima) — mas isto por si só
 // nunca autoriza uma chamada real, ver as 3 travas independentes acima.
