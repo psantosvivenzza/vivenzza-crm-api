@@ -4,19 +4,32 @@
 //   node scripts/voice/rodar-fila-cobranca.mjs                  (dry-run, mostra a fila)
 //   node scripts/voice/rodar-fila-cobranca.mjs --limite=5 --confirm   (liga de verdade)
 //
-// AUTORIZAÇÃO: na homologação, a trava era uma allowlist fixa de telefones
-// (VOICE_EXTERNAL_ALLOWLIST) - certa para "1 número, poucas chamadas", inútil
-// para operação. Aqui a fonte de autorização é a FILA
-// (vw_fila_ligacao_cobranca), que já aplica, no banco: título realmente
-// vencido, fora de revisão, WhatsApp enviado há mais de 2 dias, cliente não
-// respondeu, sem promessa em aberto, sem trava pós-contato, ciclo não
-// esgotado e nenhuma ligação hoje. Um número que não está na fila com
-// motivo_bloqueio NULL nunca é discado por este script.
+// AUTORIZAÇÃO: a FILA (vw_fila_ligacao_cobranca) é a fonte de ELEGIBILIDADE —
+// ela já aplica, no banco: título realmente vencido, fora de revisão,
+// WhatsApp enviado há mais de 2 dias, cliente não respondeu, sem promessa em
+// aberto, sem trava pós-contato, ciclo não esgotado e nenhuma ligação hoje.
+// Um número que não está na fila com motivo_bloqueio NULL nunca é discado
+// por este script.
+//
+// ACHADO DA AUDITORIA (f8cb81c9, 2026-09-21): a versão anterior deste script
+// montava, para cada item, uma allowlist de um único elemento contendo o
+// PRÓPRIO número da fila — que virava, sozinho, a allowlist usada por
+// avaliarAutorizacaoChamadaExterna(), o que fazia avaliarNumeroNaAllowlist()
+// devolver sempre true e desativava, na prática,
+// o gate de allowlist inteiro (elegibilidade na fila bastava pra "autorizar"
+// a si mesma). CORRIGIDO: a fila continua sendo a fonte de ELEGIBILIDADE,
+// mas a ALLOWLIST usada na autorização é sempre a externa/configurada
+// (VOICE_EXTERNAL_ALLOWLIST, mesma fonte usada por trigger-external-test.mjs)
+// — a fila NUNCA autoautoriza o próprio destinatário. Fail-closed: allowlist
+// ausente, vazia, malformada, ou qualquer erro ao lê-la/comparar bloqueia
+// ANTES de qualquer tentativa de originar (ver resolverAllowlistParaAutorizacao
+// abaixo).
 //
 // Além disso, TODOS os guards de reguaTentativas.js e externalPilotGuardrails.js
 // continuam rodando por telefone, e o limite global por hora/dia continua valendo.
 import 'dotenv/config'
 import axios from 'axios'
+import { pathToFileURL } from 'url'
 import { supabase } from '../../src/lib/collection/../supabase-admin.server.js'
 import { obterConfigCobranca } from '../../src/lib/collection/featureFlags.js'
 import {
@@ -24,7 +37,7 @@ import {
   avaliarLimiteGlobalPorHora,
   avaliarLimiteGlobalPorDia,
 } from '../../src/lib/voice/externalPilotGuardrails.js'
-import { lerLimitesVoz } from '../../src/lib/voice/externalConfig.js'
+import { lerLimitesVoz, numeroNaAllowlistExterna } from '../../src/lib/voice/externalConfig.js'
 import { idempotencyKeyLigacaoExterna } from '../../src/lib/collection/idempotency.js'
 import { hojeBrtISO } from '../../src/lib/collection/collectionContactPolicy.js'
 import { mascararTelefone } from '../../src/lib/telefone.js'
@@ -51,6 +64,20 @@ const POLITICA_HORARIO = {
 }
 
 function log(msg) { console.log(`[fila-cobranca] ${msg}`) }
+
+// Único ponto de decisão de allowlist do dispatcher automático — exportado
+// pra ser testável sem depender de Supabase/ARI (main() nunca é chamado ao
+// importar este módulo, ver isMain no fim do arquivo). NUNCA usa `numero`
+// como fonte da allowlist — só a externa/configurada. `verificarNaAllowlist`
+// é injetável só para teste (erro de leitura/comparação); em produção é
+// sempre numeroNaAllowlistExterna (env VOICE_EXTERNAL_ALLOWLIST).
+export function resolverAllowlistParaAutorizacao(numero, verificarNaAllowlist = numeroNaAllowlistExterna) {
+  try {
+    return { allowlist: verificarNaAllowlist(numero) ? [numero] : [], erro: null }
+  } catch (err) {
+    return { allowlist: [], erro: `erro_leitura_allowlist: ${err.message}` }
+  }
+}
 
 async function main() {
   const config = await obterConfigCobranca()
@@ -125,11 +152,21 @@ async function main() {
       diaBrt: hojeBrtISO(),
     })
 
-    // A fila É a fonte de autorização deste número (ver cabeçalho).
+    // A fila é a fonte de ELEGIBILIDADE; a allowlist é sempre a
+    // externa/configurada — nunca o próprio número (ver cabeçalho, achado
+    // f8cb81c9). Erro/ausência/vazio/malformado bloqueia ANTES de qualquer
+    // tentativa de originar.
+    const { allowlist, erro: erroAllowlist } = resolverAllowlistParaAutorizacao(numero)
+    if (erroAllowlist) {
+      log(`BLOQUEADO ${rotulo}: ${erroAllowlist}`)
+      bloqueadas++
+      continue
+    }
+
     const autorizacao = avaliarAutorizacaoChamadaExterna({
       flags: config,
       numero,
-      allowlist: [numero],
+      allowlist,
       idempotencyKey,
       chavesJaProcessadas: estado.chavesJaProcessadas,
       chamadasAtivas: estado.chamadasAtivas,
@@ -237,7 +274,16 @@ async function main() {
   log(`FIM - ${discadas} ligação(ões) disparada(s), ${bloqueadas} bloqueada(s).`)
 }
 
-main().catch((err) => {
-  console.error(`[fila-cobranca] ERRO FATAL: ${err.message}`)
-  process.exitCode = 1
-})
+// Só dispara main() quando o arquivo é executado diretamente (node
+// scripts/voice/rodar-fila-cobranca.mjs) — nunca ao ser importado por um
+// teste (que precisa de resolverAllowlistParaAutorizacao sem tocar
+// Supabase/ARI). pathToFileURL evita divergência de formato entre
+// process.argv[1] (caminho de SO, barra invertida no Windows) e
+// import.meta.url (sempre file:// com barra normal).
+const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url
+if (isMain) {
+  main().catch((err) => {
+    console.error(`[fila-cobranca] ERRO FATAL: ${err.message}`)
+    process.exitCode = 1
+  })
+}
