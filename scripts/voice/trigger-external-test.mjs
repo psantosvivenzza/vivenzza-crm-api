@@ -138,8 +138,12 @@ async function main() {
   try {
     payload = construirPayloadOriginateExterno({ numero: numeroArg, ariApp: ARI_APP, clienteNome: (process.argv.find((a) => a.startsWith('--nome=')) || '').split('=')[1] || null })
   } catch (err) {
-    // Esperado hoje: destinoResolver.js sempre lança pra EXTERNAL (sem
-    // trunk configurado) — este é o comportamento CORRETO, não um bug.
+    // ATUALIZADO 2026-09-21: destinoResolver.js não lança mais pra EXTERNAL
+    // desde que o adapter Nvoip existe (2026-09-16) — na prática este catch
+    // só dispara hoje por NVOIP_SIP_SERVER ausente (construirPayloadOriginateExterno).
+    // Continua sendo o comportamento CORRETO (fail-closed), não um bug — só
+    // que avaliarAutorizacaoChamadaExterna (linha acima) já bloqueia antes
+    // de chegar aqui na maioria dos casos, via avaliarTrunkPronto.
     return bloquear(`sem_trunk: ${err.message}`)
   }
 

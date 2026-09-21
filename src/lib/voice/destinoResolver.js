@@ -24,6 +24,12 @@
 // docs/cobranca-ai/NVOIP_HOMOLOGACAO.md continuam pendentes e continuam
 // exigindo confirmação humana ouvindo áudio real antes de qualquer chamada
 // de verdade.
+//
+// ACHADO REAL (21/09/2026, auditoria do kill switch): TRUNK_EXTERNO_CONFIGURADO
+// passar a true fez resolverDestino(EXTERNAL) nunca mais lançar — então
+// deixou de funcionar como "trava 4" por si só. A trava equivalente hoje é
+// avaliarTrunkPronto/NVOIP_SIP_SERVER (externalPilotGuardrails.js +
+// externalConfig.js) — ver comentário em avaliarAutorizacaoChamadaExterna.
 export const TIPO_DESTINO = Object.freeze({ INTERNAL: 'INTERNAL', EXTERNAL: 'EXTERNAL' })
 
 const ENDPOINT_INTERNO = 'PJSIP/7001'

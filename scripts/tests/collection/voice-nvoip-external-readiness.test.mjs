@@ -19,7 +19,7 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
   const { supabase } = await import('../../../src/lib/supabase-admin.server.js')
   const { obterConfigCobranca, invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
   const { TIPO_DESTINO, resolverDestino } = await import('../../../src/lib/voice/destinoResolver.js')
-  const { avaliarAutorizacaoChamadaExterna, avaliarLimiteGlobalPorHora, avaliarLimiteGlobalPorDia } = await import('../../../src/lib/voice/externalPilotGuardrails.js')
+  const { avaliarAutorizacaoChamadaExterna, avaliarLimiteGlobalPorHora, avaliarLimiteGlobalPorDia, avaliarTrunkPronto } = await import('../../../src/lib/voice/externalPilotGuardrails.js')
   const { lerConfigNvoip, descreverConfigNvoipSemSegredo, lerAllowlistExterna, numeroNaAllowlistExterna, lerLimitesVoz, avaliarLocalBindDiferenteDoRemoto } = await import('../../../src/lib/voice/externalConfig.js')
   const { idempotencyKeyLigacaoExterna } = await import('../../../src/lib/collection/idempotency.js')
   const { construirPayloadOriginateExterno } = await import('../../../src/lib/voice/outboundExternalTest.js')
@@ -283,10 +283,104 @@ test('VOICE NVOIP EXTERNAL READINESS', async (t) => {
     assert.equal(/username=(?!\$\{)[^\s;]+/.test(template), false, 'usuário nunca deveria estar preenchido com valor real no template')
   })
 
-  await t.test('24. dupla trava (voice_external_enabled + TRUNK_EXTERNO_CONFIGURADO) permanece intacta após a atualização dos parâmetros oficiais', async () => {
+  await t.test('24. dupla trava (voice_external_enabled + trunk pronto) — hoje via avaliarAutorizacaoChamadaExterna, não mais via resolverDestino', async () => {
+    // ATUALIZADO 21/09/2026: resolverDestino(EXTERNAL) não lança mais desde
+    // que TRUNK_EXTERNO_CONFIGURADO=true (adapter Nvoip existe) — este teste
+    // testava a trava ERRADA (a antiga). A trava real de "trunk pronto" hoje
+    // é avaliarTrunkPronto/NVOIP_SIP_SERVER dentro de
+    // avaliarAutorizacaoChamadaExterna — ver testes 2, 25 e 26 abaixo, que
+    // cobrem isso pela camada correta.
     const config = await obterConfigCobranca()
     assert.equal(config.voice_external_enabled, false)
-    assert.throws(() => resolverDestino(TIPO_DESTINO.EXTERNAL), /TRUNK_EXTERNO_CONFIGURADO|não configurado|trunk/i)
+    assert.doesNotThrow(() => resolverDestino(TIPO_DESTINO.EXTERNAL), 'adapter Nvoip existe — resolverDestino não é mais a trava, ver avaliarTrunkPronto')
+  })
+
+  await t.test('25. avaliarTrunkPronto: fail-closed puro — só true com sipServer realmente presente', () => {
+    assert.equal(avaliarTrunkPronto(undefined), false)
+    assert.equal(avaliarTrunkPronto(null), false)
+    assert.equal(avaliarTrunkPronto({}), false)
+    assert.equal(avaliarTrunkPronto({ sipServer: null }), false)
+    assert.equal(avaliarTrunkPronto({ sipServer: '' }), false)
+    assert.equal(avaliarTrunkPronto({ sipServer: 'app.nvoip.com.br' }), true)
+  })
+
+  await t.test('26. KILL SWITCH do trunk: flag=true + allowlist correta + NVOIP_SIP_SERVER ausente ainda BLOQUEIA (regressão do teste 2, via env real)', async () => {
+    delete process.env.NVOIP_SIP_SERVER // garante o estado padrão desta rodada, mesmo se outro teste tiver setado antes
+    await supabase.from('automacoes_config').update({ voice_external_enabled: true }).eq('id', 1)
+    invalidarCacheFlags()
+    const config = await obterConfigCobranca()
+    const numero = '+5511999998888'
+    const resultado = avaliarAutorizacaoChamadaExterna({
+      flags: config, numero, allowlist: [numero],
+      idempotencyKey: 'chave-teste-trunk-env', chavesJaProcessadas: new Set(),
+      chamadasAtivas: [], horaAtual: new Date(2026, 0, 5, 10, 0),
+      politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 9 * 60, fimMinutos: 18 * 60 }] },
+      chamadasHoje: [], limiteDiario: 3,
+    })
+    assert.equal(resultado.permitido, false)
+    assert.match(resultado.motivo, /sem_trunk/)
+
+    await supabase.from('automacoes_config').update({ voice_external_enabled: false }).eq('id', 1)
+    invalidarCacheFlags()
+  })
+
+  await t.test('27. com trunk "pronto" (NVOIP_SIP_SERVER setado) + flag=true + allowlist correta, autorização deixa de bloquear por trunk (prova que o guard não é falso-positivo permanente)', async () => {
+    process.env.NVOIP_SIP_SERVER = 'app.nvoip.com.br'
+    try {
+      await supabase.from('automacoes_config').update({ voice_external_enabled: true }).eq('id', 1)
+      invalidarCacheFlags()
+      const config = await obterConfigCobranca()
+      const numero = '+5511999998888'
+      const resultado = avaliarAutorizacaoChamadaExterna({
+        flags: config, numero, allowlist: [numero],
+        idempotencyKey: 'chave-teste-trunk-pronto', chavesJaProcessadas: new Set(),
+        chamadasAtivas: [], horaAtual: new Date(2026, 0, 5, 10, 0),
+        politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 9 * 60, fimMinutos: 18 * 60 }] },
+        chamadasHoje: [], limiteDiario: 3,
+      })
+      assert.equal(resultado.permitido, true, 'com flag=true, allowlist OK e trunk pronto, os demais guards (horário/idempotência/limite) já são suficientes')
+      assert.equal(resultado.motivo, null)
+    } finally {
+      delete process.env.NVOIP_SIP_SERVER
+      await supabase.from('automacoes_config').update({ voice_external_enabled: false }).eq('id', 1)
+      invalidarCacheFlags()
+    }
+  })
+
+  await t.test('28. flag AUSENTE (não só false) bloqueia — nunca tratar undefined/objeto vazio como "liberado"', async () => {
+    const { avaliarFlagExternalHabilitada } = await import('../../../src/lib/voice/externalPilotGuardrails.js')
+    assert.equal(avaliarFlagExternalHabilitada(undefined), false)
+    assert.equal(avaliarFlagExternalHabilitada(null), false)
+    assert.equal(avaliarFlagExternalHabilitada({}), false)
+    assert.equal(avaliarFlagExternalHabilitada({ voice_external_enabled: 'true' }), false, 'só bloco === true (boolean) autoriza — string "true" não conta')
+    assert.equal(avaliarFlagExternalHabilitada({ voice_external_enabled: 1 }), false)
+
+    // avaliarAutorizacaoChamadaExterna com flags totalmente ausente também bloqueia,
+    // mesmo passando allowlist/idempotência/horário/limite todos "verdes".
+    const numero = '+5511999998888'
+    const resultado = avaliarAutorizacaoChamadaExterna({
+      flags: undefined, numero, allowlist: [numero],
+      idempotencyKey: 'chave-teste-flag-ausente', chavesJaProcessadas: new Set(),
+      chamadasAtivas: [], horaAtual: new Date(2026, 0, 5, 10, 0),
+      politicaHorario: { janelas: [{ dias: [1, 2, 3, 4, 5], inicioMinutos: 9 * 60, fimMinutos: 18 * 60 }] },
+      chamadasHoje: [], limiteDiario: 3,
+    })
+    assert.equal(resultado.permitido, false)
+  })
+
+  await t.test('29. prova estática — featureFlags.js NUNCA engole erro de leitura do banco em default silencioso (obterConfigCobranca deve relançar)', () => {
+    const conteudo = fs.readFileSync(path.join(SRC, 'lib', 'collection', 'featureFlags.js'), 'utf8')
+    assert.match(conteudo, /if\s*\(\s*error\s*\)\s*throw\s+error/, 'erro do Supabase precisa ser relançado — nunca substituído por DEFAULTS silenciosamente (fail-closed real exige que o chamador veja a falha e pare, não que continue com voice_external_enabled=false "por acaso")')
+  })
+
+  await t.test('30. INTERNAL nunca é afetado pela checagem de trunk EXTERNAL (avaliarTrunkPronto é específico de EXTERNAL)', () => {
+    assert.equal(resolverDestino(TIPO_DESTINO.INTERNAL), 'PJSIP/7001')
+    // avaliarTrunkPronto só é consultado dentro do branch EXTERNAL de
+    // avaliarAutorizacaoChamadaExterna — não existe chamada de ligação
+    // interna passando por essa função (ver voice-outbound-internal.test.mjs,
+    // que testa o caminho interno isoladamente e não importa este arquivo).
+    const conteudoInterno = fs.readFileSync(path.join(SRC, 'lib', 'voice', 'outboundInternalTest.js'), 'utf8')
+    assert.equal(conteudoInterno.includes('externalPilotGuardrails'), false, 'fluxo interno não deveria depender dos guards externos')
   })
 
   await pararAmbienteDeTeste()
