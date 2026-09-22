@@ -134,3 +134,30 @@ janela legal.
 
 Enquanto o item 1 não for resolvido, `voice_external_enabled` permanece
 `false` e a tarefa permanece `Disabled` — nenhuma ligação real será feita.
+
+## Atualização 2026-09-22 — estado real diverge do "O que falta" acima
+
+O trecho anterior descreve a decisão de contenção tomada em 21/09. Ela
+**não é mais o estado atual**: em 22/09/2026 ~01:40 BRT, em sessão
+independente (gates 1–3 acima revalidados como verdes — serviço de voz em
+instância única e saudável, `VOICE_READY` com todos os componentes ok,
+trunk NVOIP `Registered`, fora da janela 16h/17h/18h), o usuário autorizou
+explicitamente a reativação e ela foi executada:
+
+- `voice_external_enabled` voltou para `true` em `automacoes_config`
+  (produção), lido de volta e confirmado.
+- `Enable-ScheduledTask -TaskName VivenzzaFilaCobrancaVoz` — estado lido de
+  volta: `Ready`, `NextRunTime = 22/09/2026 16:00:00`.
+
+Limites globais, allowlist e demais guardas seguem inalterados (nada foi
+ampliado além da reativação da flag e da tarefa).
+
+**Risco residual real, ainda não resolvido:** o fix estrutural do
+`.wslconfig` (`vmIdleTimeout=-1`) continua sem ter sido aplicado de fato —
+o arquivo foi escrito com backup, mas o `wsl --shutdown` necessário para o
+parâmetro pegar segue bloqueado pelo classificador de permissão,
+aguardando o usuário rodar via `!`. A cobertura da janela de 22/09 depende
+de uma ponte manual (`keepalive.sh`), não de uma solução durável. Antes de
+confiar em disparos de dias seguintes sem checagem, reconfirmar se o
+`wsl --shutdown` já foi aplicado e revalidar a estabilidade do
+Asterisk/WSL antes de cada janela 16h/17h/18h.

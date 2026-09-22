@@ -6,7 +6,7 @@
   </RegistrationInfo>
   <Principals>
     <Principal id="Author">
-      <UserId>S-1-5-21-2884674747-3540336234-3413949707-1000</UserId>
+      <UserId>[REDACTED-LOCAL-SID]</UserId>
       <LogonType>InteractiveToken</LogonType>
     </Principal>
   </Principals>
