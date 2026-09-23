@@ -28,17 +28,34 @@ if ($existente) {
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
 
-# Gatilho 1: no boot (com atraso de 2 min pra WSL Service/rede assentarem).
-$triggerBoot = New-ScheduledTaskTrigger -AtStartup
-$triggerBoot.Delay = 'PT2M'
+# O gatilho "no boot" (AtStartup) so pode ser REGISTRADO a partir de uma
+# sessao elevada (Administrador) — isso e exigencia do proprio Task
+# Scheduler do Windows, nao depende do RunLevel da tarefa em si. Se esta
+# sessao nao estiver elevada, o instalador segue em frente sem esse
+# gatilho (login + horario diario ja cobrem o dia a dia) e avisa como
+# completar depois. Rodar este instalador de novo, ja elevado, e
+# suficiente para adicionar o gatilho de boot (idempotente).
+$isElevado = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-# Gatilho 2: no login do usuario atual (com atraso de 1 min).
+$triggers = @()
+if ($isElevado) {
+    $triggerBoot = New-ScheduledTaskTrigger -AtStartup
+    $triggerBoot.Delay = 'PT2M'
+    $triggers += $triggerBoot
+} else {
+    Write-Host "AVISO: sessao nao elevada — o gatilho 'no boot' (AtStartup) exige Administrador e foi PULADO nesta instalacao." -ForegroundColor Yellow
+    Write-Host "  Para cobrir tambem o boot: abra PowerShell como Administrador e rode este instalador de novo (e idempotente, so adiciona o gatilho que falta)." -ForegroundColor Yellow
+}
+
+# Gatilho: no login do usuario atual (com atraso de 1 min).
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $triggerLogon.Delay = 'PT1M'
+$triggers += $triggerLogon
 
-# Gatilho 3: todo dia as 15:45, antes da primeira janela de discagem (16h).
+# Gatilho: todo dia as 15:45, antes da primeira janela de discagem (16h).
 # Cobre o caso de a maquina ficar ligada varios dias sem reboot/login.
 $triggerPreJanela = New-ScheduledTaskTrigger -Daily -At '15:45'
+$triggers += $triggerPreJanela
 
 # RunLevel Limited (nao Highest) de proposito: nada no script da ancora
 # precisa de elevacao do Windows — o systemctl roda como root DENTRO do
@@ -59,7 +76,7 @@ $settings = New-ScheduledTaskSettingsSet `
 try {
     Register-ScheduledTask -TaskName $TaskName `
         -Action $action `
-        -Trigger @($triggerBoot, $triggerLogon, $triggerPreJanela) `
+        -Trigger $triggers `
         -Principal $principal `
         -Settings $settings `
         -Description 'Vivenzza: mantem WSL2/Asterisk (e verifica NVOIP/ARI/Ollama/STT/TTS/servico de voz) disponiveis antes da janela de cobranca por voz (16h-18h). NAO executa fila, NAO disca, NAO altera allowlist. Rollback: scripts/voice/desinstalar-ancora-wsl-asterisk.ps1' `
@@ -74,6 +91,9 @@ if (-not $confirmada) {
     throw "Register-ScheduledTask nao lancou erro, mas a tarefa '$TaskName' nao aparece em Get-ScheduledTask. Aborting."
 }
 
-Write-Host "Tarefa '$TaskName' registrada/atualizada com sucesso." -ForegroundColor Green
+Write-Host "Tarefa '$TaskName' registrada/atualizada com sucesso ($($triggers.Count) gatilho(s))." -ForegroundColor Green
 $confirmada | Select-Object TaskName, State | Format-Table -AutoSize
 $confirmada.Triggers | Format-Table -AutoSize
+if (-not $isElevado) {
+    Write-Host "Cobertura atual: login + diario as 15:45. Gatilho de boot ainda PENDENTE (rode como Administrador para completar)." -ForegroundColor Yellow
+}

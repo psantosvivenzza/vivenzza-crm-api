@@ -63,6 +63,15 @@ mutex nomeado dentro do proprio script), `-StartWhenAvailable` (roda assim
 que possivel se o horario foi perdido, ex. notebook suspenso as 15:45),
 limite de execucao de 10 minutos.
 
+**Nota sobre o gatilho de boot**: o Windows so permite *registrar* um
+gatilho `AtStartup` a partir de uma sessao PowerShell elevada
+(Administrador) — isso e uma exigencia do proprio Task Scheduler, nao do
+RunLevel da tarefa. Rodar o instalador sem elevacao registra a tarefa
+normalmente com os gatilhos de login + horario diario, e avisa que o
+gatilho de boot ficou pendente. Para adicionar boot: abrir PowerShell
+como Administrador e rodar `instalar-ancora-wsl-asterisk.ps1` de novo
+(idempotente — so acrescenta o gatilho que falta, nao duplica nada).
+
 ## Logs
 
 `logs/ancora-wsl-asterisk.log` (pasta `logs/` ja esta no `.gitignore` do
