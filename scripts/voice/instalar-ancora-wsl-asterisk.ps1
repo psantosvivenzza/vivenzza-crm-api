@@ -40,7 +40,13 @@ $triggerLogon.Delay = 'PT1M'
 # Cobre o caso de a maquina ficar ligada varios dias sem reboot/login.
 $triggerPreJanela = New-ScheduledTaskTrigger -Daily -At '15:45'
 
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+# RunLevel Limited (nao Highest) de proposito: nada no script da ancora
+# precisa de elevacao do Windows — o systemctl roda como root DENTRO do
+# WSL, que e um contexto de privilegio totalmente independente do Windows.
+# RunLevel Highest exigiria registrar a tarefa a partir de uma sessao
+# PowerShell ja elevada (Executar como administrador), o que nao e o caso
+# do operador no dia a dia.
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 
 $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
@@ -50,14 +56,24 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 2)
 
-Register-ScheduledTask -TaskName $TaskName `
-    -Action $action `
-    -Trigger @($triggerBoot, $triggerLogon, $triggerPreJanela) `
-    -Principal $principal `
-    -Settings $settings `
-    -Description 'Vivenzza: mantem WSL2/Asterisk (e verifica NVOIP/ARI/Ollama/STT/TTS/servico de voz) disponiveis antes da janela de cobranca por voz (16h-18h). NAO executa fila, NAO disca, NAO altera allowlist. Rollback: scripts/voice/desinstalar-ancora-wsl-asterisk.ps1' `
-    -Force | Out-Null
+try {
+    Register-ScheduledTask -TaskName $TaskName `
+        -Action $action `
+        -Trigger @($triggerBoot, $triggerLogon, $triggerPreJanela) `
+        -Principal $principal `
+        -Settings $settings `
+        -Description 'Vivenzza: mantem WSL2/Asterisk (e verifica NVOIP/ARI/Ollama/STT/TTS/servico de voz) disponiveis antes da janela de cobranca por voz (16h-18h). NAO executa fila, NAO disca, NAO altera allowlist. Rollback: scripts/voice/desinstalar-ancora-wsl-asterisk.ps1' `
+        -Force -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host "FALHA ao registrar a tarefa '$TaskName': $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+
+$confirmada = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if (-not $confirmada) {
+    throw "Register-ScheduledTask nao lancou erro, mas a tarefa '$TaskName' nao aparece em Get-ScheduledTask. Aborting."
+}
 
 Write-Host "Tarefa '$TaskName' registrada/atualizada com sucesso." -ForegroundColor Green
-Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State | Format-Table -AutoSize
-(Get-ScheduledTask -TaskName $TaskName).Triggers | Format-Table -AutoSize
+$confirmada | Select-Object TaskName, State | Format-Table -AutoSize
+$confirmada.Triggers | Format-Table -AutoSize
