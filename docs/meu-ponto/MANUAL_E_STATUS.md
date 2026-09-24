@@ -81,6 +81,14 @@ equipamento não for verificável; SOLICITAÇÃO + aprovação humana PODE (e
 deve) criar uma marcação, isso é o design; piloto desativado bloqueia
 solicitações novas e aprovações, mas não bloqueia rejeitar.
 
+- **`GET /api/ponto-admin/prontidao`** (novo, 2026-09-24): checagem
+  operacional agregada — confirma ao vivo se as 12 tabelas do módulo
+  existem, se o bucket `ponto-fotos` foi criado (e se está privado), que a
+  marcação direta continua travada por código, o estado do piloto e
+  contagens de habilitados/equipamentos. Somente leitura, sem nenhum dado
+  pessoal (nenhuma foto, nenhuma marcação individual). Existe pra responder
+  direto o que motivou a reconciliação da seção 5 — sem precisar de
+  arqueologia manual em código/produção de novo.
 - Habilitação por colaborador (flag, não role), com histórico de alteração;
   revogação vale imediatamente mesmo com JWT antigo ainda válido (testado).
 - **Bloqueio estrutural de marcação direta**: `POST /marcacoes` (criação
@@ -171,8 +179,19 @@ solicitações novas e aprovações, mas não bloqueia rejeitar.
 - **Bucket `ponto-fotos` no Supabase**: não foi criado em nenhum ambiente
   real (nem staging, nem produção) — só existe como comportamento
   verificado em armazenamento local de teste. Passo manual pendente.
-- **Migrations `20260101000048`/`20260101000049`**: validadas num Postgres
-  local isolado, **não aplicadas em produção**.
+  Confirmável em produção, a qualquer momento, via
+  `GET /api/ponto-admin/prontidao` (seção 4) — sem precisar ler código nem
+  histórico de commit.
+- **Migrations `20260101000048`–`20260101000053` (+ `070`, RLS)**: **status
+  reconciliado em 2026-09-24** — esta seção dizia "não aplicadas em
+  produção" desde 11/09, mas o commit `ad13e8b` (18/09/2026) já havia
+  versionado no repo a RLS dessas 12 tabelas descrevendo-as como "já
+  aplicado em produção via MCP" (leitura com a chave pública testada antes
+  e depois, virou zero linha). Essa auditoria de 24/09 NÃO conseguiu (nem
+  tentou) confirmar isso com uma query ao vivo em produção — é evidência
+  documental forte (commit do próprio responsável pelo projeto), não uma
+  verificação direta. Use `GET /api/ponto-admin/prontidao` para a resposta
+  definitiva sem depender de arqueologia em commit nenhum.
 - **Equivalência com Supabase/PostgREST real**: os testes rodam contra
   Postgres real (constraints, UNIQUE INDEX, triggers, transações reais),
   mas não contra o Supabase real — comportamento HTTP-específico do
@@ -183,10 +202,15 @@ solicitações novas e aprovações, mas não bloqueia rejeitar.
 ## 6. Pendências honestas para ir além do piloto interno
 
 **Segurança operacional:**
-- Aplicar as duas migrations em produção (manualmente, como todo o resto
-  do projeto — não há pipeline automático).
+- Confirmar com uma chamada real a `GET /api/ponto-admin/prontidao` se as
+  migrations 048–053/070 já estão aplicadas em produção (ver seção 5 —
+  evidência forte de que sim, mas não confirmada ao vivo nesta revisão) e,
+  se não estiverem, aplicá-las manualmente (como todo o resto do projeto —
+  não há pipeline automático).
 - Criar o bucket privado `ponto-fotos` e confirmar que credenciais
-  públicas não alcançam Storage nenhum.
+  públicas não alcançam Storage nenhum — `GET /api/ponto-admin/prontidao`
+  responde `bucket_fotos.existe`/`bucket_fotos.publico` sem precisar checar
+  manualmente no dashboard do Supabase.
 - Decidir e implementar o componente local de identificação de
   equipamento (ou aceitar operar permanentemente no modelo de solicitação
   auditada + aprovação humana, documentando essa escolha).

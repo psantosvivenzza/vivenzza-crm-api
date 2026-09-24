@@ -25,7 +25,7 @@ const ASSINATURAS = {
   'image/png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
 }
 
-function usaArmazenamentoLocal() {
+export function usaArmazenamentoLocal() {
   return Boolean(process.env.LOCAL_PG_URL)
 }
 
@@ -99,3 +99,19 @@ export async function gerarUrlAssinada(storagePath, { expiraEmSegundos = 300 } =
 }
 
 export const PONTO_FOTOS_TAMANHO_MAXIMO_BYTES = TAMANHO_MAXIMO_BYTES
+
+// Só metadados do bucket (existe? está público?) — nunca lista nem lê nenhum
+// arquivo dentro dele. Existe pra dar resposta real ao "passo manual
+// pendente" descrito no cabeçalho deste arquivo, em vez de arqueologia
+// manual em código/produção toda vez que alguém precisar saber se o bucket
+// já foi criado (usado por GET /api/ponto-admin/prontidao).
+export async function verificarBucket() {
+  if (usaArmazenamentoLocal()) {
+    return { verificavel: false, existe: null, publico: null, motivo: 'modo_local_sem_storage_real' }
+  }
+  const { data, error } = await supabase.storage.getBucket(BUCKET)
+  if (error) {
+    return { verificavel: true, existe: false, publico: null, motivo: error.message || 'bucket_nao_encontrado' }
+  }
+  return { verificavel: true, existe: true, publico: data?.public === true, motivo: null }
+}
