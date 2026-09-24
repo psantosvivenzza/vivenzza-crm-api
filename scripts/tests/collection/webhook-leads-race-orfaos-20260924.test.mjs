@@ -156,3 +156,96 @@ test('distribuicao.js: retry controlado da RPC proximo_vendedor_atomic', async (
 
   await pararAmbienteDeTeste()
 })
+
+// Prova adicional pedida explicitamente pra fechar a PR#128: os testes acima já
+// provam ausência de duplicação/órfão, mas só com 1 vendedora no rodízio (o
+// caso trivial em que não há disputa de "pra quem vai o próximo lead"). Este
+// bloco usa 3 vendedoras sintéticas (mesma cardinalidade real de Ana/Taís/
+// Nicole — ver docs sobre o rodízio) pra provar que, mesmo com múltiplas
+// candidatas elegíveis disputando o mesmo lock de rodízio (distribuicao_leads
+// id=1) sob concorrência real, o resultado continua sendo exatamente 1 lead
+// e 1 responsável por contato — nunca 2 leads pro mesmo telefone, nunca 2
+// vendedoras "donas" do mesmo lead, nunca um responsavel_id perdido apesar de
+// vendedoras ativas existirem. Cobre também o lado "nenhuma notificação/
+// tarefa duplicada": confirmado por leitura de código (webhook-handler.js)
+// que este fluxo não cria linha em `tarefas` nem em `notifications` — a prova
+// aqui é negativa e explícita (zero linhas), não a ausência de um teste.
+test('rateio entre vendedoras: 3 vendedoras sintéticas, corrida concorrente nunca duplica lead/responsável nem gera tarefa/notificação', async (t) => {
+  await iniciarAmbienteDeTeste()
+  const { supabase } = await import('../../../src/lib/supabase-admin.server.js')
+  const { processWhatsappEvent } = await import('../../../src/routes/webhook-handler.js')
+
+  await t.test('1. rajada concorrente de contatos DISTINTOS com 3 vendedoras elegíveis: 1 lead por telefone, sempre com responsável, rodízio realmente gira (não trava numa só)', async () => {
+    await Promise.all([
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Ana' }),
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Tais' }),
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Nicole' }),
+    ])
+
+    const N = 9
+    const telefones = Array.from({ length: N }, () => telefoneDeTeste())
+    await Promise.all(
+      telefones.map((telefoneJid, i) =>
+        processWhatsappEvent(eventoWhatsapp({ telefoneJid, msgId: `rateio-3vend-${telefoneJid}-${i}`, texto: `contato ${i}` }))
+      )
+    )
+
+    const semPrefixos = telefones.map((tel) => tel.replace(/^55/, ''))
+    const { data: leadsCriados } = await supabase.from('leads').select('id, telefone, responsavel_id').in('telefone', semPrefixos)
+
+    assert.equal(leadsCriados.length, N, `esperava exatamente 1 lead por telefone (${N} contatos distintos), achou ${leadsCriados.length} — duplicação sob concorrência`)
+    const telefonesVistos = new Set(leadsCriados.map((l) => l.telefone))
+    assert.equal(telefonesVistos.size, N, 'cada telefone só pode aparecer em exatamente 1 lead')
+    for (const lead of leadsCriados) {
+      assert.ok(lead.responsavel_id, `lead ${lead.id} não pode ficar órfão (responsavel_id NULL) havendo vendedoras ativas elegíveis`)
+    }
+
+    // Rodízio realmente girando sob concorrência: com 3+ vendedoras elegíveis
+    // e 9 contatos concorrentes, uma trava/condição de corrida no avanço
+    // circular (distribuicao_leads.id=1) se manifestaria como "todo mundo caiu
+    // na mesma vendedora" — >=2 responsavel_id distintos já descarta esse bug
+    // (não exigimos fairness exata de 3-a-3 porque o pool de vendedoras ativas
+    // no banco de teste compartilhado pode ter sobra de outros arquivos da
+    // suíte, rodados no mesmo processo Postgres — ver run-collection-tests.mjs).
+    const responsaveisDistintos = new Set(leadsCriados.map((l) => l.responsavel_id))
+    assert.ok(responsaveisDistintos.size >= 2, `rodízio deveria distribuir entre múltiplas vendedoras sob concorrência, mas todos os ${N} leads caíram em ${responsaveisDistintos.size} vendedora(s) só — indício de trava no avanço circular`)
+
+    // Nenhum efeito colateral duplicado (nem sequer criado) em tabelas
+    // dependentes de lead_id — escopado só aos leads deste teste.
+    const leadIds = leadsCriados.map((l) => l.id)
+    const { data: tarefasCriadas } = await supabase.from('tarefas').select('id').in('lead_id', leadIds)
+    assert.equal(tarefasCriadas?.length ?? 0, 0, 'criação de lead via webhook não deveria gerar nenhuma tarefa automática (e muito menos duplicada) sob concorrência')
+
+    const { data: notificacoesCriadas } = await supabase.from('notifications').select('id').in('conversation_id', leadIds)
+    assert.equal(notificacoesCriadas?.length ?? 0, 0, 'criação de lead via webhook não deveria gerar nenhuma notificação automática (e muito menos duplicada) sob concorrência')
+  })
+
+  await t.test('2. rajada concorrente do MESMO telefone com 3 vendedoras elegíveis: continua 1 lead, 1 responsável só, zero tarefa/notificação', async () => {
+    await Promise.all([
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Ana 2' }),
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Tais 2' }),
+      criarVendedorDeTeste(supabase, { nome: 'Vendedora Race Nicole 2' }),
+    ])
+
+    const telefoneJid = telefoneDeTeste()
+    const N = 6
+    await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        processWhatsappEvent(eventoWhatsapp({ telefoneJid, msgId: `rateio-3vend-mesmo-tel-${telefoneJid}-${i}`, texto: `msg ${i}` }))
+      )
+    )
+
+    const semPrefixo = telefoneJid.replace(/^55/, '')
+    const { data: leadsCriados } = await supabase.from('leads').select('id, responsavel_id').eq('telefone', semPrefixo)
+    assert.equal(leadsCriados.length, 1, `esperava exatamente 1 lead mesmo com 3 vendedoras elegíveis disputando e ${N} eventos concorrentes do mesmo telefone, achou ${leadsCriados.length}`)
+    assert.ok(leadsCriados[0].responsavel_id, 'lead não pode ficar órfão havendo vendedoras ativas elegíveis')
+
+    const { data: tarefasCriadas } = await supabase.from('tarefas').select('id').eq('lead_id', leadsCriados[0].id)
+    assert.equal(tarefasCriadas?.length ?? 0, 0, 'nenhuma tarefa (única ou duplicada) deveria ter sido criada por este fluxo')
+
+    const { data: notificacoesCriadas } = await supabase.from('notifications').select('id').eq('conversation_id', leadsCriados[0].id)
+    assert.equal(notificacoesCriadas?.length ?? 0, 0, 'nenhuma notificação (única ou duplicada) deveria ter sido criada por este fluxo')
+  })
+
+  await pararAmbienteDeTeste()
+})
