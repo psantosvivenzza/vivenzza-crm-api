@@ -30,12 +30,22 @@ function log(msg) { console.log(`[pre-voo] ${msg}`) }
 function processoDoServico() {
   // PowerShell porque so o Win32_Process traz a linha de comando E a hora de
   // inicio juntas; tasklist nao traz nenhuma das duas de forma confiavel.
-  const saida = execFileSync('powershell.exe', [
-    '-NoProfile', '-Command',
-    "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
-    "Where-Object { $_.CommandLine -match 'run-voice-service' } | " +
-    "Select-Object -First 1 | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CreationDate.ToString('o') }",
-  ], { encoding: 'utf8', timeout: 30000 }).trim()
+  let saida
+  try {
+    saida = execFileSync('powershell.exe', [
+      '-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+      "Where-Object { $_.CommandLine -match 'run-voice-service' } | " +
+      "Select-Object -First 1 | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CreationDate.ToString('o') }",
+    ], { encoding: 'utf8', timeout: 30000 }).trim()
+  } catch (erro) {
+    // Timeout ou qualquer outra falha ao consultar o processo: nao sabemos
+    // se o servico esta no ar, entao tratamos como se nao estivesse (mesmo
+    // fail-closed do caso "servico parado" abaixo, so que com causa raiz
+    // registrada em vez de um crash nao tratado.
+    log(`NAO CONSEGUI CONFIRMAR O SERVICO DE VOZ (${erro.code || erro.message}). Nao vou discar por seguranca.`)
+    process.exit(1)
+  }
   if (!saida) return null
   const [pid, criadoEm] = saida.split('|')
   return { pid: Number(pid), criadoEm: new Date(criadoEm) }
