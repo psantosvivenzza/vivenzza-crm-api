@@ -367,6 +367,40 @@ test('VOICE FILA COBRANCA — bypass de allowlist (auditoria f8cb81c9)', async (
     assert.match(resultado.motivo, /sem_titulo_elegivel_no_momento_da_ligacao/)
   })
 
+  // GAP FECHADO (auditoria 24/09/2026 — retomada da PR #123): os testes 20-24
+  // acima provam quitado/promessa/DNC/saudável/sem-título, mas nenhum provava
+  // o quinto caso pedido — ERRO DE CONSULTA (Supabase indisponível/timeout ao
+  // ler contas_financeiras do cliente). Sem este teste, um bug que fizesse
+  // avaliarGuardsCobrancaDoCliente ENGOLIR o erro e devolver permitido:true
+  // silenciosamente passaria despercebido. Os testes 25-26 fecham isso:
+  // 25 prova que o erro SOBE (não é engolido pela função de guard, que
+  // recebe a consulta explosiva só por injeção de dependência — mesmo padrão
+  // do teste 7 para allowlist); 26 prova, estaticamente, que quem CHAMA essa
+  // função no loop real (main()) trata esse erro como bloqueio fail-closed
+  // (bloqueadas++, continue) ANTES de qualquer tentativa de originar.
+  await t.test('25. ERRO DE CONSULTA ao ler títulos do cliente NÃO é engolido — avaliarGuardsCobrancaDoCliente propaga o erro (fail-closed; dependência injetada só para este teste)', async () => {
+    const { avaliarGuardsCobrancaDoCliente } = await import('../../voice/rodar-fila-cobranca.mjs')
+    const explosivo = async () => { throw new Error('falha simulada de consulta a contas_financeiras') }
+    await assert.rejects(
+      () => avaliarGuardsCobrancaDoCliente('QUALQUER-CLIENTE', '5551999911006', explosivo),
+      /falha simulada de consulta a contas_financeiras/,
+      'erro de consulta precisa subir, nunca virar permitido:true por engano'
+    )
+  })
+
+  await t.test('26. prova estática — erro ao AVALIAR GUARD DE COBRANÇA do cliente (avaliarGuardsCobrancaDoCliente) continua BLOQUEANDO esse item, nunca originando nem derrubando o script inteiro', () => {
+    const conteudo = fs.readFileSync(SCRIPT_PATH, 'utf8')
+    assert.match(
+      conteudo,
+      /try\s*\{\s*\n\s*guardCobranca = await avaliarGuardsCobrancaDoCliente\(c\.codigo_cliente, numero\)\s*\n\s*\} catch \(err\) \{\s*\n\s*log\(`BLOQUEADO \$\{rotulo\}: erro_guard_cobranca:[^]*?\n\s*bloqueadas\+\+\s*\n\s*continue\s*\n\s*\}/,
+      'erro ao avaliar o guard de cobrança do cliente (título quitado/promessa/DNC) precisa continuar bloqueando esse item (bloqueadas++, continue), nunca prosseguindo para a allowlist/originação'
+    )
+    const idxCatchGuard = conteudo.indexOf('erro_guard_cobranca')
+    const idxOriginar = conteudo.indexOf("cliente.post('/channels'")
+    assert.ok(idxCatchGuard > 0 && idxOriginar > 0, 'ambos precisam existir no arquivo')
+    assert.ok(idxCatchGuard < idxOriginar, 'o tratamento de erro do guard de cobrança precisa vir ANTES de qualquer tentativa de originar')
+  })
+
   limparEnvAllowlist()
   await pararAmbienteDeTeste()
 })

@@ -123,9 +123,12 @@ async function buscarTitulosElegiveisDoCliente(codigoCliente) {
 // guard (fail-closed: melhor não ligar do que ligar sobre um título quitado/
 // com promessa ativa só porque outro título do mesmo cliente estava limpo).
 // Exportado para ser testável isoladamente (mesmo padrão de
-// resolverAllowlistParaAutorizacao acima).
-export async function avaliarGuardsCobrancaDoCliente(codigoCliente, numero) {
-  const titulos = await buscarTitulosElegiveisDoCliente(codigoCliente)
+// resolverAllowlistParaAutorizacao acima). `buscarTitulos` é injetável só
+// para teste (erro de consulta a contas_financeiras); em produção é sempre
+// buscarTitulosElegiveisDoCliente. Erro aqui SOBE (não é engolido) — quem
+// chama (main(), no loop principal) trata com try/catch fail-closed.
+export async function avaliarGuardsCobrancaDoCliente(codigoCliente, numero, buscarTitulos = buscarTitulosElegiveisDoCliente) {
+  const titulos = await buscarTitulos(codigoCliente)
   if (!titulos.length) {
     return { permitido: false, motivo: 'sem_titulo_elegivel_no_momento_da_ligacao' }
   }
