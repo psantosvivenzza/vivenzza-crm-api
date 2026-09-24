@@ -8,8 +8,24 @@ import { logarErroPonto } from '../lib/ponto/log.js'
 import { EQUIPAMENTO_VERIFICACAO_IMPLEMENTADA, MENSAGEM_EQUIPAMENTO_NAO_IMPLEMENTADO } from '../lib/ponto/equipamento.js'
 import { iniciarVinculoEquipamento, ErroEquipamento } from '../lib/ponto/equipamentoService.js'
 import { isUuidValido, exigirUuidNoParam } from '../lib/ponto/validacao.js'
+import { verificarProntidao } from '../lib/ponto/prontidao.js'
 
 const router = Router()
+
+// GET /api/ponto-admin/prontidao — checagem operacional agregada (tabelas
+// presentes, bucket de fotos, trava de marcação direta, piloto, contagens).
+// Somente leitura, sem nenhum dado pessoal — nenhuma foto, nenhuma marcação
+// individual. Pensado pra responder direto o que hoje só tinha resposta via
+// arqueologia manual em código/produção (ver docs/meu-ponto/MANUAL_E_STATUS.md).
+router.get('/prontidao', async (req, res) => {
+  try {
+    const prontidao = await verificarProntidao()
+    res.json(prontidao)
+  } catch (err) {
+    logarErroPonto('admin_prontidao', err?.code)
+    res.status(500).json({ erro: 'Não foi possível verificar a prontidão do módulo.' })
+  }
+})
 
 // GET /api/ponto-admin/habilitacoes
 router.get('/habilitacoes', async (req, res) => {
