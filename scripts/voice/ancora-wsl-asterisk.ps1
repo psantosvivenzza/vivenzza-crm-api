@@ -116,6 +116,17 @@ try {
 
     Write-Log '--- Ancora WSL/Asterisk: fim ---'
 }
+catch {
+    # Qualquer falha aqui (wsl.exe travado, systemctl sem resposta, WSL2
+    # lento para acordar depois de horas ocioso, etc.) virava um stack trace
+    # cru do PowerShell e nada no log — quem olhasse o log via achar que a
+    # ancora nao tinha rodado. Agora vira uma linha objetiva e saida != 0.
+    # Fail-closed sem efeito colateral: esta ancora nunca disca nem altera
+    # configuracao, entao falhar aqui so significa evidencia incompleta
+    # nesta rodada, nao um estado inseguro.
+    Write-Log "FALHA NA ANCORA: $($_.Exception.Message)"
+    exit 1
+}
 finally {
     $mutex.ReleaseMutex() | Out-Null
     $mutex.Dispose()
