@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
-import { proximoVendedor } from '../lib/distribuicao.js'
+import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
@@ -313,7 +313,6 @@ export async function processWhatsappEvent(payload) {
     lead = leads?.[0] ?? null
 
     if (!lead && !fromMe) {
-      const vendedor = await proximoVendedor()
       // BUG CRÍTICO corrigido na Fase 3 (2026-08-10): leads.origem tem CHECK
       // constraint que só aceita 'whatsapp'|'instagram'|'site'|'manual'.
       // detectarAnuncio()/detectarCampanha() (removidas) retornavam valores
@@ -327,42 +326,61 @@ export async function processWhatsappEvent(payload) {
       const origem = 'whatsapp'
       const campanha_origem = detectarCampanhaOrigem(msg, texto)
       const ctwa_clid = detectarCtwaClid(msg)
-      const { data: novoLead, error } = await supabase
-        .from('leads')
-        .insert({
-          nome: `Lead WhatsApp ${semPrefixo}`,
-          telefone: semPrefixo,
-          etapa: 'novo',
-          origem,
-          campanha_origem,
-          ctwa_clid,
-          responsavel_id: vendedor?.id ?? null,
-        })
-        .select('id, nome, responsavel_id')
-        .single()
 
-      if (!error && novoLead) {
-        lead = novoLead
-        // novoLead.nome embute o telefone completo (`Lead WhatsApp ${semPrefixo}`,
-        // acima) — nunca logar esse campo aqui; o id já identifica o lead pra
-        // quem for investigar, sem repetir o telefone completo no log (mesmo
-        // achado de segurança 2026-09-13 do log operacional logo acima).
-        console.log('[webhook] novo lead criado:', novoLead.id, '→ vendedor:', vendedor?.nome, '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
+      // Achado real (investigação de leads órfãos/duplicados, 2026-09-24): o
+      // SELECT acima e o INSERT antigo eram duas chamadas separadas, sem lock
+      // nenhum — uma rajada de reconexão da Evolution API reenviando várias
+      // mensagens do MESMO contato quase ao mesmo tempo fazia cada chamada
+      // concorrente achar "nenhum lead ainda" no SELECT e criar um lead
+      // duplicado (46 leads órfãos/duplicados reais em 22-23/09).
+      // criarOuObterLeadWhatsapp() é atômica (advisory lock por telefone
+      // canônico + retry controlado — ver src/lib/distribuicao.js) e nunca
+      // cria um segundo lead pro mesmo telefone, mesmo sob concorrência real.
+      const resultado = await criarOuObterLeadWhatsapp({
+        candidatos,
+        telefone: semPrefixo,
+        nome: `Lead WhatsApp ${semPrefixo}`,
+        origem,
+        campanhaOrigem: campanha_origem,
+        ctwaClid: ctwa_clid,
+      })
 
-        // Tenta vincular ao cadastro do ERP pelo telefone — não bloqueia a criação do lead se falhar.
-        try {
-          const clienteErp = await buscarClienteErpPorTelefone(semPrefixo)
-          if (clienteErp) {
-            await supabase.from('leads').update({ cliente_erp_id: clienteErp.legacy_id }).eq('id', novoLead.id)
-            console.log('[webhook] lead vinculado ao cliente ERP:', clienteErp.legacy_id, clienteErp.razao_social)
+      if (resultado) {
+        lead = resultado
+        if (resultado.criado) {
+          // resultado.nome embute o telefone completo (`Lead WhatsApp ${semPrefixo}`,
+          // acima) — nunca logar esse campo aqui; o id já identifica o lead pra
+          // quem for investigar, sem repetir o telefone completo no log (mesmo
+          // achado de segurança 2026-09-13 do log operacional logo acima). O
+          // vendedor sorteado já não passa mais por aqui como objeto JS (a
+          // atribuição agora acontece dentro da própria função atômica) —
+          // resultado.responsavel_id já identifica quem recebeu.
+          console.log('[webhook] novo lead criado:', resultado.id, '→ responsavel_id:', resultado.responsavel_id ?? 'nenhum (sem vendedor ativo)', '| origem:', origem, '| campanha:', campanha_origem, '| ctwa_clid:', ctwa_clid ?? 'nenhum')
+
+          // Tenta vincular ao cadastro do ERP pelo telefone — não bloqueia a criação do lead se falhar.
+          try {
+            const clienteErp = await buscarClienteErpPorTelefone(semPrefixo)
+            if (clienteErp) {
+              await supabase.from('leads').update({ cliente_erp_id: clienteErp.legacy_id }).eq('id', resultado.id)
+              console.log('[webhook] lead vinculado ao cliente ERP:', clienteErp.legacy_id, clienteErp.razao_social)
+            }
+          } catch (err) {
+            console.error('[webhook] erro ao vincular cliente_erp:', err.message)
           }
-        } catch (err) {
-          console.error('[webhook] erro ao vincular cliente_erp:', err.message)
+        } else {
+          // Outra chamada concorrente pro mesmo telefone venceu a corrida —
+          // o lead já existia quando o advisory lock foi liberado. Nunca
+          // reatribui responsavel_id nem recria o lead; só segue com o
+          // existente (o bloco de ctwa_clid retroativo logo abaixo cobre
+          // igual, seja o lead achado aqui ou no SELECT lá em cima).
+          console.log('[webhook] lead já existia para este telefone (corrida concorrente evitada):', resultado.id)
         }
       } else {
-        console.error('[webhook] erro ao criar lead:', error?.message)
+        console.error('[webhook] erro ao criar/obter lead (após retries)')
       }
-    } else if (lead && !fromMe && !lead.ctwa_clid) {
+    }
+
+    if (lead && !fromMe && !lead.ctwa_clid) {
       // Lead já existia (contato anterior — a maioria dos telefones, dado o
       // histórico de WhatsApp desde 2019) — se ESTA mensagem veio de um clique
       // em anúncio (referral/ctwa_clid) e o lead nunca teve isso registrado,
