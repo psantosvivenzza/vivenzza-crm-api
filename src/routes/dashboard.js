@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { verificarStatusSyncFiscal } from '../lib/vendaFiscalSyncStatus.js'
 import { verificarStatusSyncGerencial } from '../lib/vendaGerencialSyncStatus.js'
+import { criarCacheComSingleFlight } from '../lib/singleFlightCache.js'
 
 const router = Router()
 
@@ -338,135 +339,213 @@ router.get('/', async (req, res) => {
   })
 })
 
+// Timeout fail-fast por chamada ao Supabase — mesmo padrão de
+// SDR_QUERY_TIMEOUT_MS em src/routes/sdr.js: sem isto, uma instabilidade
+// pontual do Postgres/PostgREST trava a chamada indefinidamente (um
+// try/catch não pega uma promise que nunca resolve nem rejeita). Passado o
+// tempo configurado, a chamada resolve com `{ data: null, error }` — mesmo
+// formato de qualquer outro erro do postgrest-js — então o tratamento de
+// erro já existente (throw -> catch -> 500) cobre isso sem alteração.
+// Configurável só pra teste; produção sempre usa o default.
+const ATENDIMENTO_QUERY_TIMEOUT_MS = Number(process.env.ATENDIMENTO_QUERY_TIMEOUT_MS) || 10000
+
+// Teto de páginas por consulta paginada — rede de segurança independente do
+// timeout por chamada: limita quanto uma única requisição pode escanear no
+// total, mesmo que cada página individual responda rápido. 50 páginas de
+// 1000 linhas = 50.000 linhas, bem acima do necessário pro volume atual
+// (~5.400 leads ativos), mas finito — nunca escala sem limite junto com o
+// crescimento da tabela.
+const ATENDIMENTO_MAX_PAGINAS = 50
+
+// Cache curto + single-flight por escopo (vendedor_id, ou 'geral' pra
+// admin sem filtro) — ver src/lib/singleFlightCache.js para o motivo.
+// TTL igual ao intervalo de poll do frontend (Dashboard.jsx, 30s): no pior
+// caso (1 única aba aberta) o cache não evita a consulta seguinte, mas com
+// vários vendedores/admins de painel aberto ao mesmo tempo, todos os polls
+// do mesmo escopo dentro da janela colapsam numa única execução real.
+const ATENDIMENTO_CACHE_TTL_MS = Number(process.env.ATENDIMENTO_CACHE_TTL_MS) || 30000
+
 // GET /api/dashboard/atendimento — indicadores de espera de resposta no WhatsApp
 // (Fase 3 do atendimento avançado): reaproveita get_ultima_mensagem_por_lead (Fase 1)
 // pra não duplicar a lógica de "aguardando_vendedor" já usada em /whatsapp/status-espera.
+async function calcularAtendimento(filtroVendedorId) {
+  // Só leads ativos — 'fechado'/'perdido' são os estados terminais do funil.
+  // Paginado: PostgREST limita a 1000 linhas por padrão — sem isso, com milhares de
+  // leads ativos, os indicadores contavam só os primeiros 1000.
+  const leads = []
+  const PAGE_LEADS = 1000
+  for (let offset = 0, pagina = 0; ; offset += PAGE_LEADS, pagina++) {
+    if (pagina >= ATENDIMENTO_MAX_PAGINAS) {
+      throw new Error(`teto de ${ATENDIMENTO_MAX_PAGINAS} páginas atingido ao buscar leads ativos`)
+    }
+    let leadsQuery = supabase
+      .from('leads')
+      .select('id, responsavel_id, usuarios!leads_responsavel_id_fkey(nome)')
+      .not('etapa', 'in', '(fechado,perdido)')
+      .range(offset, offset + PAGE_LEADS - 1)
+      .abortSignal(AbortSignal.timeout(ATENDIMENTO_QUERY_TIMEOUT_MS))
+    if (filtroVendedorId) leadsQuery = leadsQuery.eq('responsavel_id', filtroVendedorId)
+    const { data, error } = await leadsQuery
+    if (error) throw error
+    leads.push(...data)
+    if (data.length < PAGE_LEADS) break
+  }
+
+  if (leads.length === 0) {
+    return {
+      aguardando_agora: 0,
+      criticas: 0,
+      tempo_medio_primeira_resposta_min: null,
+      pendencias_por_vendedor: [],
+    }
+  }
+
+  const leadsPorId = new Map(leads.map((l) => [l.id, l]))
+  const leadIds = leads.map((l) => l.id)
+
+  // Paginado: PostgREST limita a 1000 linhas por padrão, inclusive em RPC.
+  const ultimaPorLead = []
+  const PAGE = 1000
+  for (let offset = 0, pagina = 0; ; offset += PAGE, pagina++) {
+    if (pagina >= ATENDIMENTO_MAX_PAGINAS) {
+      throw new Error(`teto de ${ATENDIMENTO_MAX_PAGINAS} páginas atingido ao buscar última mensagem por lead`)
+    }
+    const { data, error } = await supabase
+      .rpc('get_ultima_mensagem_por_lead', { p_lead_ids: leadIds })
+      .range(offset, offset + PAGE - 1)
+      .abortSignal(AbortSignal.timeout(ATENDIMENTO_QUERY_TIMEOUT_MS))
+    if (error) throw error
+    ultimaPorLead.push(...data)
+    if (data.length < PAGE) break
+  }
+
+  const agora = Date.now()
+  let aguardandoAgora = 0
+  let criticas = 0
+  const pendenciasPorVendedor = new Map() // responsavel_id (ou 'sem_vendedor') -> resumo
+
+  for (const item of ultimaPorLead) {
+    if (item.direcao !== 'entrada') continue
+    const lead = leadsPorId.get(item.lead_id)
+    if (!lead) continue
+
+    const minutos = (agora - new Date(item.created_at).getTime()) / 60000
+    aguardandoAgora++
+    const critica = minutos >= 30
+    if (critica) criticas++
+
+    const chave = lead.responsavel_id || 'sem_vendedor'
+    if (!pendenciasPorVendedor.has(chave)) {
+      pendenciasPorVendedor.set(chave, {
+        vendedor_id: lead.responsavel_id,
+        nome: lead.usuarios?.nome || 'Sem vendedor',
+        aguardando: 0,
+        criticas: 0,
+      })
+    }
+    const resumo = pendenciasPorVendedor.get(chave)
+    resumo.aguardando++
+    if (critica) resumo.criticas++
+  }
+
+  // Tempo médio de primeira resposta: pra cada lead ativo, mede o intervalo entre
+  // uma mensagem de entrada e a próxima de saída que vier depois dela, nos últimos
+  // 7 dias — calculado em JS (sem RPC nova) pra não depender de outra migration.
+  //
+  // Restrito aos leads do próprio escopo (leadIds) sempre que há filtro de
+  // vendedor: achado real do incidente de sobrecarga do Supabase — sem este
+  // filtro, o painel de UM vendedor com poucas dezenas de leads baixava as
+  // mensagens da empresa INTEIRA nos últimos 7 dias (whatsapp_mensagens não
+  // tem responsavel_id direto, então antes o filtro só existia em memória
+  // DEPOIS do download completo). Em chunks de 200 ids — mesmo tamanho de
+  // lote já usado em monitoramento-resposta.js — pra nunca montar uma URL/IN
+  // gigante mesmo se um vendedor acumular uma carteira grande.
+  //
+  // Sem filtro por lead_id quando é visão "geral" (admin sem vendedor_id):
+  // aí o próprio escopo pedido já é a empresa toda, então não há lista menor
+  // pra restringir a busca — mantém o scan por período, com o mesmo teto de
+  // páginas/timeout do resto da função.
+  const seteDiasAtras = new Date(agora - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const mensagensRecentes = []
+  const PAGE_MSG = 1000
+  let paginasMsg = 0
+
+  async function paginarMensagens(filtroExtra) {
+    for (let offset = 0; ; offset += PAGE_MSG) {
+      if (paginasMsg >= ATENDIMENTO_MAX_PAGINAS) {
+        throw new Error(`teto de ${ATENDIMENTO_MAX_PAGINAS} páginas atingido ao buscar mensagens recentes`)
+      }
+      paginasMsg++
+      let query = supabase
+        .from('whatsapp_mensagens')
+        .select('lead_id, direcao, created_at')
+        .gte('created_at', seteDiasAtras)
+        .order('created_at', { ascending: true })
+        .range(offset, offset + PAGE_MSG - 1)
+        .abortSignal(AbortSignal.timeout(ATENDIMENTO_QUERY_TIMEOUT_MS))
+      if (filtroExtra) query = filtroExtra(query)
+      const { data, error } = await query
+      if (error) throw error
+      mensagensRecentes.push(...data)
+      if (data.length < PAGE_MSG) break
+    }
+  }
+
+  if (filtroVendedorId) {
+    const CHUNK = 200
+    for (let i = 0; i < leadIds.length; i += CHUNK) {
+      const chunk = leadIds.slice(i, i + CHUNK)
+      await paginarMensagens((q) => q.in('lead_id', chunk))
+    }
+  } else {
+    await paginarMensagens(null)
+  }
+
+  const mensagensPorLead = new Map()
+  for (const m of mensagensRecentes) {
+    if (!leadsPorId.has(m.lead_id)) continue
+    if (!mensagensPorLead.has(m.lead_id)) mensagensPorLead.set(m.lead_id, [])
+    mensagensPorLead.get(m.lead_id).push(m)
+  }
+
+  const temposResposta = []
+  for (const mensagens of mensagensPorLead.values()) {
+    let aguardandoDesde = null
+    for (const m of mensagens) {
+      if (m.direcao === 'entrada') {
+        if (aguardandoDesde === null) aguardandoDesde = m.created_at
+      } else if (m.direcao === 'saida' && aguardandoDesde !== null) {
+        temposResposta.push((new Date(m.created_at).getTime() - new Date(aguardandoDesde).getTime()) / 60000)
+        aguardandoDesde = null
+      }
+    }
+  }
+  const tempoMedio = temposResposta.length > 0
+    ? temposResposta.reduce((a, b) => a + b, 0) / temposResposta.length
+    : null
+
+  return {
+    aguardando_agora: aguardandoAgora,
+    criticas,
+    tempo_medio_primeira_resposta_min: tempoMedio !== null ? Math.round(tempoMedio) : null,
+    pendencias_por_vendedor: [...pendenciasPorVendedor.values()].sort((a, b) => b.aguardando - a.aguardando),
+  }
+}
+
+const cacheAtendimento = criarCacheComSingleFlight({
+  ttlMs: ATENDIMENTO_CACHE_TTL_MS,
+  computar: calcularAtendimento,
+})
+
 router.get('/atendimento', async (req, res) => {
   try {
     let filtroVendedorId = null
     if (req.user.role === 'vendedor') filtroVendedorId = req.user.id
     else if (req.user.role === 'admin' && req.query.vendedor_id) filtroVendedorId = req.query.vendedor_id
 
-    // Só leads ativos — 'fechado'/'perdido' são os estados terminais do funil.
-    // Paginado: PostgREST limita a 1000 linhas por padrão — sem isso, com milhares de
-    // leads ativos, os indicadores contavam só os primeiros 1000.
-    const leads = []
-    const PAGE_LEADS = 1000
-    for (let offset = 0; ; offset += PAGE_LEADS) {
-      let leadsQuery = supabase
-        .from('leads')
-        .select('id, responsavel_id, usuarios!leads_responsavel_id_fkey(nome)')
-        .not('etapa', 'in', '(fechado,perdido)')
-        .range(offset, offset + PAGE_LEADS - 1)
-      if (filtroVendedorId) leadsQuery = leadsQuery.eq('responsavel_id', filtroVendedorId)
-      const { data, error } = await leadsQuery
-      if (error) throw error
-      leads.push(...data)
-      if (data.length < PAGE_LEADS) break
-    }
-
-    if (leads.length === 0) {
-      return res.json({
-        aguardando_agora: 0,
-        criticas: 0,
-        tempo_medio_primeira_resposta_min: null,
-        pendencias_por_vendedor: [],
-      })
-    }
-
-    const leadsPorId = new Map(leads.map((l) => [l.id, l]))
-    const leadIds = leads.map((l) => l.id)
-
-    // Paginado: PostgREST limita a 1000 linhas por padrão, inclusive em RPC.
-    const ultimaPorLead = []
-    const PAGE = 1000
-    for (let offset = 0; ; offset += PAGE) {
-      const { data, error } = await supabase
-        .rpc('get_ultima_mensagem_por_lead', { p_lead_ids: leadIds })
-        .range(offset, offset + PAGE - 1)
-      if (error) throw error
-      ultimaPorLead.push(...data)
-      if (data.length < PAGE) break
-    }
-
-    const agora = Date.now()
-    let aguardandoAgora = 0
-    let criticas = 0
-    const pendenciasPorVendedor = new Map() // responsavel_id (ou 'sem_vendedor') -> resumo
-
-    for (const item of ultimaPorLead) {
-      if (item.direcao !== 'entrada') continue
-      const lead = leadsPorId.get(item.lead_id)
-      if (!lead) continue
-
-      const minutos = (agora - new Date(item.created_at).getTime()) / 60000
-      aguardandoAgora++
-      const critica = minutos >= 30
-      if (critica) criticas++
-
-      const chave = lead.responsavel_id || 'sem_vendedor'
-      if (!pendenciasPorVendedor.has(chave)) {
-        pendenciasPorVendedor.set(chave, {
-          vendedor_id: lead.responsavel_id,
-          nome: lead.usuarios?.nome || 'Sem vendedor',
-          aguardando: 0,
-          criticas: 0,
-        })
-      }
-      const resumo = pendenciasPorVendedor.get(chave)
-      resumo.aguardando++
-      if (critica) resumo.criticas++
-    }
-
-    // Tempo médio de primeira resposta: pra cada lead ativo, mede o intervalo entre
-    // uma mensagem de entrada e a próxima de saída que vier depois dela, nos últimos
-    // 7 dias — calculado em JS (sem RPC nova) pra não depender de outra migration.
-    // Sem filtro por lead_id na query (evita um IN(...) gigante com milhares de ids);
-    // filtra em memória contra leadsPorId, que já é só os leads ativos.
-    const seteDiasAtras = new Date(agora - 7 * 24 * 60 * 60 * 1000).toISOString()
-    const mensagensRecentes = []
-    const PAGE_MSG = 1000
-    for (let offset = 0; ; offset += PAGE_MSG) {
-      const { data, error } = await supabase
-        .from('whatsapp_mensagens')
-        .select('lead_id, direcao, created_at')
-        .gte('created_at', seteDiasAtras)
-        .order('created_at', { ascending: true })
-        .range(offset, offset + PAGE_MSG - 1)
-      if (error) throw error
-      mensagensRecentes.push(...data)
-      if (data.length < PAGE_MSG) break
-    }
-
-    const mensagensPorLead = new Map()
-    for (const m of mensagensRecentes) {
-      if (!leadsPorId.has(m.lead_id)) continue
-      if (!mensagensPorLead.has(m.lead_id)) mensagensPorLead.set(m.lead_id, [])
-      mensagensPorLead.get(m.lead_id).push(m)
-    }
-
-    const temposResposta = []
-    for (const mensagens of mensagensPorLead.values()) {
-      let aguardandoDesde = null
-      for (const m of mensagens) {
-        if (m.direcao === 'entrada') {
-          if (aguardandoDesde === null) aguardandoDesde = m.created_at
-        } else if (m.direcao === 'saida' && aguardandoDesde !== null) {
-          temposResposta.push((new Date(m.created_at).getTime() - new Date(aguardandoDesde).getTime()) / 60000)
-          aguardandoDesde = null
-        }
-      }
-    }
-    const tempoMedio = temposResposta.length > 0
-      ? temposResposta.reduce((a, b) => a + b, 0) / temposResposta.length
-      : null
-
-    res.json({
-      aguardando_agora: aguardandoAgora,
-      criticas,
-      tempo_medio_primeira_resposta_min: tempoMedio !== null ? Math.round(tempoMedio) : null,
-      pendencias_por_vendedor: [...pendenciasPorVendedor.values()].sort((a, b) => b.aguardando - a.aguardando),
-    })
+    const chaveCache = filtroVendedorId || 'geral'
+    const resultado = await cacheAtendimento.obter(chaveCache, filtroVendedorId)
+    res.json(resultado)
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
