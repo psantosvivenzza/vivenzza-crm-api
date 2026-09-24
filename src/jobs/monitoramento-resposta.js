@@ -14,6 +14,22 @@ const LIMIAR_15MIN = 15
 const LIMIAR_30MIN = 30
 const LIMIAR_2H = 120
 
+// Timeout fail-fast por chamada ao Supabase — mesmo padrão de
+// SDR_QUERY_TIMEOUT_MS em src/routes/sdr.js. Sem isto, uma chamada que trava
+// (nunca resolve nem rejeita) nunca dispara o `finally` de
+// runMonitoramentoResposta abaixo — `emExecucao` ficaria `true` pra sempre e
+// o job pararia de rodar silenciosamente (só o log de "pulando este ciclo",
+// sem erro nenhum). Passado o tempo configurado, a chamada resolve com
+// `{ data: null, error }` — mesmo formato de qualquer outro erro do
+// postgrest-js — então o tratamento de erro já existente cobre isso sem
+// alteração. Configurável só pra teste; produção sempre usa o default.
+const MONITORAMENTO_QUERY_TIMEOUT_MS = Number(process.env.MONITORAMENTO_QUERY_TIMEOUT_MS) || 10000
+
+// Teto de páginas por consulta paginada — independente do timeout por
+// chamada, limita quanto UMA execução pode escanear no total. 50 páginas de
+// 1000 linhas = 50.000, bem acima do volume atual (~5.400 leads ativos).
+const MONITORAMENTO_MAX_PAGINAS = 50
+
 const TITULOS_POR_NIVEL = {
   1: 'Cliente aguardando resposta',
   2: 'Cliente aguardando há 30 min',
@@ -29,6 +45,7 @@ async function buscarUltimaMensagemEntradaId(leadId) {
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
+    .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
   return data?.id ?? null
 }
 
@@ -60,12 +77,17 @@ async function executar() {
   // leads ativos, só os primeiros 1000 eram verificados e o resto nunca escalonava.
   const leadsAtivos = []
   const PAGE_LEADS = 1000
-  for (let offset = 0; ; offset += PAGE_LEADS) {
+  for (let offset = 0, pagina = 0; ; offset += PAGE_LEADS, pagina++) {
+    if (pagina >= MONITORAMENTO_MAX_PAGINAS) {
+      console.error(`[monitoramento-resposta] teto de ${MONITORAMENTO_MAX_PAGINAS} páginas atingido ao buscar leads — abortando ciclo`)
+      return { verificados: 0, notificados: 0 }
+    }
     const { data, error } = await supabase
       .from('leads')
       .select('id, nome, responsavel_id')
       .not('etapa', 'in', '(fechado,perdido)')
       .range(offset, offset + PAGE_LEADS - 1)
+      .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
     if (error) {
       console.error('[monitoramento-resposta] erro ao buscar leads:', error.message)
       return { verificados: 0, notificados: 0 }
@@ -82,10 +104,15 @@ async function executar() {
   // Paginado por segurança: PostgREST limita a 1000 linhas por padrão, inclusive em RPC.
   const ultimaPorLead = []
   const PAGE = 1000
-  for (let offset = 0; ; offset += PAGE) {
+  for (let offset = 0, pagina = 0; ; offset += PAGE, pagina++) {
+    if (pagina >= MONITORAMENTO_MAX_PAGINAS) {
+      console.error(`[monitoramento-resposta] teto de ${MONITORAMENTO_MAX_PAGINAS} páginas atingido na RPC — abortando ciclo`)
+      return { verificados: 0, notificados: 0 }
+    }
     const { data, error } = await supabase
       .rpc('get_ultima_mensagem_por_lead', { p_lead_ids: leadIds })
       .range(offset, offset + PAGE - 1)
+      .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
     if (error) {
       console.error('[monitoramento-resposta] erro na RPC:', error.message)
       return { verificados: 0, notificados: 0 }
@@ -94,7 +121,11 @@ async function executar() {
     if (data.length < PAGE) break
   }
 
-  const { data: admins } = await supabase.from('usuarios').select('id').eq('role', 'admin')
+  const { data: admins } = await supabase
+    .from('usuarios')
+    .select('id')
+    .eq('role', 'admin')
+    .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
   const adminIds = (admins || []).map((a) => a.id)
 
   // Quais leads REALMENTE têm episódio de escalonamento aberto.
@@ -106,11 +137,16 @@ async function executar() {
   const leadsComEscalonamento = new Set()
   {
     const PAGE = 1000
-    for (let offset = 0; ; offset += PAGE) {
+    for (let offset = 0, pagina = 0; ; offset += PAGE, pagina++) {
+      if (pagina >= MONITORAMENTO_MAX_PAGINAS) {
+        console.error(`[monitoramento-resposta] teto de ${MONITORAMENTO_MAX_PAGINAS} páginas atingido ao ler escalation_log — abortando ciclo`)
+        return { verificados: leadsAtivos.length, notificados: 0 }
+      }
       const { data, error } = await supabase
         .from('escalation_log')
         .select('lead_id, level')
         .range(offset, offset + PAGE - 1)
+        .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
       if (error) {
         console.error('[monitoramento-resposta] erro ao ler escalation_log:', error.message)
         return { verificados: leadsAtivos.length, notificados: 0 }
@@ -195,7 +231,7 @@ async function executar() {
           conversation_id: lead.id,
           message_id: mensagemId,
           escalation_level: nivel,
-        })
+        }).abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
         if (notifError) {
           console.error('[monitoramento-resposta] erro ao criar notificação:', notifError.message)
           continue
@@ -214,6 +250,7 @@ async function executar() {
         .from('escalation_log')
         .delete()
         .in('lead_id', aLimpar.slice(i, i + 200))
+        .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
       if (error) console.error('[monitoramento-resposta] erro ao limpar escalation_log:', error.message)
     }
   }
@@ -223,6 +260,7 @@ async function executar() {
       const { error } = await supabase
         .from('escalation_log')
         .upsert(aInserir.slice(i, i + 200), { onConflict: 'lead_id,level', ignoreDuplicates: true })
+        .abortSignal(AbortSignal.timeout(MONITORAMENTO_QUERY_TIMEOUT_MS))
       if (error) console.error('[monitoramento-resposta] erro ao gravar escalation_log:', error.message)
     }
   }

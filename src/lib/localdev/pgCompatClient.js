@@ -235,7 +235,21 @@ class QueryBuilder {
 
   insert(data) { this._op = 'insert'; this._insertData = data; this._returning = false; return this }
   update(data) { this._op = 'update'; this._updateData = data; this._returning = false; return this }
-  upsert(data, opts = {}) { this._op = 'upsert'; this._insertData = data; this._upsertConflict = opts.onConflict || 'id'; this._returning = false; return this }
+  // 2026-09-24 — achado real: faltava ler `opts.ignoreDuplicates` (usado por
+  // monitoramento-resposta.js para escalation_log, onde TODAS as colunas
+  // inseridas — lead_id, level — também são as colunas de conflito).
+  // `_executeUpsert` sempre montava `ON CONFLICT (...) DO UPDATE SET
+  // <cols_fora_do_conflito>` — com zero colunas fora do conflito, isso virava
+  // `DO UPDATE SET` sem nada depois, erro de sintaxe do Postgres, mascarado
+  // até agora por nenhum teste local exercitar upsert+ignoreDuplicates.
+  upsert(data, opts = {}) {
+    this._op = 'upsert'
+    this._insertData = data
+    this._upsertConflict = opts.onConflict || 'id'
+    this._upsertIgnoreDuplicates = !!opts.ignoreDuplicates
+    this._returning = false
+    return this
+  }
   // 2026-08-15 — achado real (regressão própria, pegada antes do merge):
   // faltava zerar _returning aqui, diferente de insert/update/upsert acima
   // — herdava o `true` default do construtor (que existe pra SELECT puro),
@@ -651,8 +665,15 @@ class QueryBuilder {
     const conflictCols = String(this._upsertConflict).split(',').map((c) => assertIdent(c.trim(), 'coluna'))
     const updateSet = cols.filter((c) => !conflictCols.includes(c)).map((c) => `${c} = EXCLUDED.${c}`).join(', ')
     const returning = this._returning ? `RETURNING ${this._selectCols === '*' ? '*' : this._selectCols}` : ''
+    // ignoreDuplicates: true -> DO NOTHING, igual ao supabase-js real (em
+    // conflito, o Postgres não escreve nada e RETURNING, se pedido, volta
+    // vazio pras linhas em conflito). Sem isto, quando todas as colunas
+    // inseridas coincidem com as colunas de conflito (ex: escalation_log:
+    // lead_id+level), `updateSet` fica vazio e "DO UPDATE SET " sem nada
+    // depois é erro de sintaxe do Postgres.
+    const acaoConflito = this._upsertIgnoreDuplicates ? 'DO NOTHING' : `DO UPDATE SET ${updateSet}`
     const sql = `INSERT INTO ${this.table} (${cols.join(', ')}) VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (${conflictCols.join(', ')}) DO UPDATE SET ${updateSet} ${returning}`
+      `ON CONFLICT (${conflictCols.join(', ')}) ${acaoConflito} ${returning}`
     const res = await this.pool.query(sql, values)
     const rows = res.rows
     // 2026-08-15 — faltava aqui (só _executeInsert/_executeUpdate/_executeSelect
@@ -756,24 +777,77 @@ export function createLocalPgClient(connectionString) {
     return new QueryBuilder(pool, table)
   }
 
-  async function rpc(fnName, params = {}) {
-    assertIdent(fnName, 'função')
-    const keys = Object.keys(params)
-    const args = keys.map((k, i) => `${assertIdent(k, 'parâmetro')} := $${i + 1}`).join(', ')
-    const values = keys.map((k) => params[k])
-    const sql = `SELECT * FROM ${fnName}(${args})`
-    try {
-      const res = await pool.query(sql, values)
-      // RETURNS jsonb (função escalar): 1 linha, 1 coluna — desembrulha pro valor
-      // cru, igual ao supabase-js faz para funções não-tabulares.
-      if (res.rows.length === 1 && Object.keys(res.rows[0]).length === 1) {
+  // 2026-09-24 — achado real ao escrever o primeiro teste local pra GET
+  // /api/dashboard/atendimento: até aqui, `rpc()` era uma função async pura,
+  // devolvia uma Promise crua — sem `.range()` nem `.abortSignal()`. Mas o
+  // código de produção usa `supabase.rpc(fn, params).range(...)` (dashboard.js,
+  // monitoramento-resposta.js, whatsapp.js#status-espera) e, desde a correção
+  // do incidente de sobrecarga do Supabase, também `.abortSignal(...)`
+  // (dashboard.js, monitoramento-resposta.js) — igual ao supabase-js real,
+  // cujo `.rpc()` devolve o mesmo builder encadeável de `.from().select()`.
+  // Nenhum teste local tinha exercitado esse caminho antes (RPC nenhuma
+  // usada com paginação tinha teste local até agora), então o gap nunca
+  // apareceu — `.range is not a function` estourava direto, mascarado por
+  // zero cobertura. RpcBuilder abaixo fecha o gap: é um thenable (então
+  // `await supabase.rpc(fn, params)` sem encadear nada continua idêntico a
+  // antes) que também aceita `.range()` (LIMIT/OFFSET real na SQL) e
+  // `.abortSignal()` (mesma corrida contra o sinal de QueryBuilder._run()).
+  class RpcBuilder {
+    constructor(pool, fnName, params) {
+      this.pool = pool
+      this.fnName = assertIdent(fnName, 'função')
+      this.params = params
+      this._range = null
+      this._abortSignal = null
+    }
+
+    range(from, to) { this._range = [from, to]; return this }
+    abortSignal(signal) { this._abortSignal = signal; return this }
+
+    async _executar() {
+      const keys = Object.keys(this.params)
+      const args = keys.map((k, i) => `${assertIdent(k, 'parâmetro')} := $${i + 1}`).join(', ')
+      const values = keys.map((k) => this.params[k])
+      let sql = `SELECT * FROM ${this.fnName}(${args})`
+      if (this._range) sql += ` LIMIT ${this._range[1] - this._range[0] + 1} OFFSET ${this._range[0]}`
+      const res = await this.pool.query(sql, values)
+      // RETURNS jsonb (função escalar): 1 linha, 1 coluna — desembrulha pro
+      // valor cru, igual ao supabase-js faz para funções não-tabulares. Só
+      // se aplica sem `.range()`: uma chamada paginada é sempre uma função
+      // RETURNS TABLE (o código chamador espera array, nunca escalar).
+      if (!this._range && res.rows.length === 1 && Object.keys(res.rows[0]).length === 1) {
         return { data: Object.values(res.rows[0])[0], error: null }
       }
       // RETURNS TABLE: array de linhas, igual ao supabase-js.
       return { data: res.rows, error: null }
-    } catch (err) {
-      return { data: null, error: { message: err.message, code: err.code } }
     }
+
+    // Mesma corrida contra o AbortSignal de QueryBuilder._run() (ver
+    // comentário junto de .abortSignal() na classe QueryBuilder acima) —
+    // abortar cancela só a ESPERA, nunca a query já em curso no Postgres.
+    async _run() {
+      try {
+        if (!this._abortSignal) return await this._executar()
+        if (this._abortSignal.aborted) throw Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })
+        return await new Promise((resolve, reject) => {
+          this._abortSignal.addEventListener(
+            'abort',
+            () => reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })),
+            { once: true }
+          )
+          this._executar().then(resolve, reject)
+        })
+      } catch (err) {
+        return { data: null, error: { message: err.message, code: err.code, name: err.name } }
+      }
+    }
+
+    then(resolve, reject) { return this._run().then(resolve, reject) }
+    catch(reject) { return this._run().catch(reject) }
+  }
+
+  function rpc(fnName, params = {}) {
+    return new RpcBuilder(pool, fnName, params)
   }
 
   return { from, rpc, _pool: pool }
