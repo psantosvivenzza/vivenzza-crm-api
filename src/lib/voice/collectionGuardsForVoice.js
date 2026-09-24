@@ -5,10 +5,17 @@
 // duplica a regra (mesmo racional de doNotContactGuard.js/estaEmDoNotContact
 // pro caminho WhatsApp).
 //
-// NÃO é chamado por nenhum job/rota de execução real ainda — a régua de
-// cobrança continua 100% desligada da voz nesta rodada (pedido explícito).
-// `avaliarGuardsCobrancaParaLigacao()` existe pra já estar pronta e testada
-// quando essa decisão futura for tomada, não pra rodar sozinha agora.
+// ATUALIZAÇÃO (PR #123, merge 0aaa6b1, 2026-09-21): scripts/voice/
+// rodar-fila-cobranca.mjs — o job real que disca a fila de cobrança — já
+// chama avaliarGuardsTituloParaLigacao() e avaliarGuardGlobalParaLigacao()
+// (ver avaliarGuardsCobrancaDoCliente() naquele arquivo) para CADA cliente,
+// antes de qualquer tentativa de originar ligação. Não editar esse
+// comentário de volta para "não é chamado" sem reconferir
+// scripts/voice/rodar-fila-cobranca.mjs em origin/main primeiro — checkouts
+// locais desatualizados já causaram essa confusão (ver histórico de
+// auditoria de 24/09/2026). `avaliarGuardsCobrancaParaLigacao()` abaixo
+// continua disponível/testada para qualquer chamador futuro que precise da
+// composição título+global num único título/telefone.
 import { tituloEstaQuitado } from '../collection/paymentGuard.js'
 import { promessaAtivaPara } from '../collection/promises.js'
 import { estaEmDoNotContact } from '../collection/doNotContactGuard.js'
