@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
+import { candidatosTelefone, mascararTelefone, normalizarTelefone } from '../lib/telefone.js'
 import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
@@ -411,6 +411,54 @@ export async function processWhatsappEvent(payload) {
       }
     }
     } // fim do if (!ehFinanceiro) — lead permanece null pra qualquer mensagem financeira
+
+    // ACHADO (25/09/2026): data_resposta/status='respondida' em
+    // cobrancas_whatsapp só era gravado via PATCH manual — nenhuma rotina
+    // detectava a resposta real do cliente. Efeito: 723 cobranças enviadas
+    // desde 28/07, só 1 marcada respondida, métrica de resposta da régua
+    // inútil (não mede nada). Correção mínima: mensagem financeira recebida
+    // (ehFinanceiro && !fromMe) casa por telefone com a cobrança pendente
+    // mais recente em status 'enviada' e marca respondida — só grava um
+    // timestamp, não decide nada sobre o conteúdo, não envia nada.
+    if (ehFinanceiro && !fromMe) {
+      try {
+        // cliente_telefone em cobrancas_whatsapp é salvo formatado ("(41)
+        // 9910-2787"), não em dígitos puros como `telefone` (vindo do JID do
+        // WhatsApp) — um .in() direto nunca bateria. Estreita candidatas por
+        // sufixo (ilike nos últimos 4 dígitos, que sobrevivem à formatação
+        // por estarem sempre no fim da string) e confirma o match de
+        // verdade em JS com normalizarTelefone() + candidatosTelefone(), que
+        // já cobre as variações de 9º dígito/DDI usadas no resto do fluxo.
+        const ultimosDigitos = telefone.replace(/\D/g, '').slice(-4)
+        const candidatosResposta = new Set(candidatosTelefone(telefone))
+        const { data: candidatas, error: erroBusca } = await supabase
+          .from('cobrancas_whatsapp')
+          .select('id, cliente_telefone, data_envio')
+          .eq('status', 'enviada')
+          .ilike('cliente_telefone', `%${ultimosDigitos}`)
+          .order('data_envio', { ascending: false })
+          .limit(10)
+        const cobrancaPendente = ultimosDigitos.length === 4
+          ? (candidatas ?? []).find((c) => candidatosResposta.has(normalizarTelefone(c.cliente_telefone)))
+          : null
+        if (erroBusca) {
+          console.error('[webhook] erro buscando cobranca pendente pra marcar resposta:', erroBusca.message)
+        } else if (cobrancaPendente) {
+          const { error: erroUpdateResposta } = await supabase
+            .from('cobrancas_whatsapp')
+            .update({ status: 'respondida', data_resposta: new Date().toISOString() })
+            .eq('id', cobrancaPendente.id)
+          if (erroUpdateResposta) {
+            console.error('[webhook] erro marcando cobranca respondida:', cobrancaPendente.id, '|', erroUpdateResposta.message)
+          } else {
+            console.log('[webhook] cobranca_whatsapp marcada respondida automaticamente:', cobrancaPendente.id)
+          }
+        }
+      } catch (erroRespostaCobranca) {
+        // Best-effort: nunca pode derrubar o processamento do webhook.
+        console.error('[webhook] falha inesperada marcando resposta de cobranca (não crítico):', erroRespostaCobranca.message)
+      }
+    }
 
     const evolutionId = msg.key?.id ?? null
 
