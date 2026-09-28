@@ -182,27 +182,38 @@ router.post('/', async (req, res) => {
     // duplicado quando o cliente respondia pelo WhatsApp.
     const telefoneNormalizado = normalizarTelefone(telefone)
 
-    const lead = await breakerLeads.executar(async () => {
+    // Duplicidade de telefone é uma decisão de NEGÓCIO, não uma falha do
+    // Supabase — fica fora do breakerLeads.executar() que envolve a
+    // inserção. Um 409 esperado (ex: webhook reenviando a mesma mensagem)
+    // não pode contar como falha pro circuit breaker: 5 tentativas de
+    // criar o mesmo lead duplicado, de resto normais, abririam o circuito
+    // e derrubariam GET/POST/PUT/DELETE de /api/leads inteiro mesmo com o
+    // Supabase saudável — o próprio incidente que esta PR existe pra evitar,
+    // só que autoinfligido.
+    if (telefoneNormalizado) {
       // Sem constraint UNIQUE no banco, um telefone repetido era inserido sem aviso — a
       // vendedora não tinha como saber que já existia lead pra esse número.
-      if (telefoneNormalizado) {
-        const { data: existente, error: erroExistente } = await supabase
+      const existente = await breakerLeads.executar(async () => {
+        const { data, error } = await supabase
           .from('leads')
           .select('id, nome')
           .in('telefone', candidatosTelefone(telefoneNormalizado))
           .limit(1)
           .maybeSingle()
           .abortSignal(AbortSignal.timeout(LEADS_QUERY_TIMEOUT_MS))
-        if (erroExistente) throw erroExistente
+        if (error) throw error
+        return data
+      })
 
-        if (existente) {
-          const conflito = new Error(`Já existe um lead com esse telefone: "${existente.nome}".`)
-          conflito.status = 409
-          conflito.leadId = existente.id
-          throw conflito
-        }
+      if (existente) {
+        return res.status(409).json({
+          erro: `Já existe um lead com esse telefone: "${existente.nome}".`,
+          lead_id: existente.id,
+        })
       }
+    }
 
+    const lead = await breakerLeads.executar(async () => {
       const { data: novoLead, error: leadError } = await supabase
         .from('leads')
         .insert({ nome, email: email || null, telefone: telefoneNormalizado, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
@@ -228,9 +239,6 @@ router.post('/', async (req, res) => {
     cacheListaLeads.invalidar()
     res.status(201).json(lead)
   } catch (err) {
-    if (err.status === 409) {
-      return res.status(409).json({ erro: err.message, lead_id: err.leadId })
-    }
     responderErroSupabase(res, err)
   }
 })
@@ -238,27 +246,32 @@ router.post('/', async (req, res) => {
 // PUT /api/leads/:id — atualizar
 router.put('/:id', async (req, res) => {
   try {
-    const data = await breakerLeads.executar(async () => {
-      if (req.user.role === 'vendedor') {
-        const { data: lead, error: erroLead } = await supabase
+    // Checagem de posse é decisão de AUTORIZAÇÃO, não falha do Supabase —
+    // fica fora do breakerLeads.executar() que envolve a escrita (mesmo
+    // motivo do 409 de telefone duplicado no POST /: um 403 esperado sob
+    // uso normal não pode contar como falha pro circuit breaker).
+    if (req.user.role === 'vendedor') {
+      const lead = await breakerLeads.executar(async () => {
+        const { data, error } = await supabase
           .from('leads').select('responsavel_id').eq('id', req.params.id).single()
           .abortSignal(AbortSignal.timeout(LEADS_QUERY_TIMEOUT_MS))
-        if (erroLead && erroLead.code !== 'PGRST116') throw erroLead
-        if (!lead || lead.responsavel_id !== req.user.id) {
-          const semPermissao = new Error('Sem permissão para editar este lead')
-          semPermissao.status = 403
-          throw semPermissao
-        }
+        if (error && error.code !== 'PGRST116') throw error
+        return data
+      })
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar este lead' })
       }
+    }
 
-      const campos = req.body
-      delete campos.id
-      delete campos.created_at
+    const campos = req.body
+    delete campos.id
+    delete campos.created_at
 
-      if (campos.telefone !== undefined) {
-        campos.telefone = normalizarTelefone(campos.telefone)
-      }
+    if (campos.telefone !== undefined) {
+      campos.telefone = normalizarTelefone(campos.telefone)
+    }
 
+    const data = await breakerLeads.executar(async () => {
       // Detecta transição para/de 'fechado' para registrar fechado_em
       if (campos.etapa !== undefined) {
         const { data: atual, error: erroAtual } = await supabase
@@ -290,7 +303,6 @@ router.put('/:id', async (req, res) => {
     if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
     res.json(data)
   } catch (err) {
-    if (err.status === 403) return res.status(403).json({ erro: err.message })
     responderErroSupabase(res, err)
   }
 })
@@ -298,6 +310,22 @@ router.put('/:id', async (req, res) => {
 // PUT /api/leads/:id/etapa — mover no pipeline
 router.put('/:id/etapa', async (req, res) => {
   try {
+    // Checagem de posse é decisão de AUTORIZAÇÃO, não falha do Supabase —
+    // fica fora do breakerLeads.executar() (mesmo motivo documentado em
+    // PUT /:id acima).
+    if (req.user.role === 'vendedor') {
+      const lead = await breakerLeads.executar(async () => {
+        const { data, error } = await supabase
+          .from('leads').select('responsavel_id').eq('id', req.params.id).single()
+          .abortSignal(AbortSignal.timeout(LEADS_QUERY_TIMEOUT_MS))
+        if (error && error.code !== 'PGRST116') throw error
+        return data
+      })
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para mover este lead' })
+      }
+    }
+
     const { etapa } = req.body
     const etapasValidas = ['novo', 'contato', 'proposta', 'negociacao', 'fechado', 'perdido']
     if (!etapa || !etapasValidas.includes(etapa)) {
@@ -305,18 +333,6 @@ router.put('/:id/etapa', async (req, res) => {
     }
 
     const data = await breakerLeads.executar(async () => {
-      if (req.user.role === 'vendedor') {
-        const { data: lead, error: erroLead } = await supabase
-          .from('leads').select('responsavel_id').eq('id', req.params.id).single()
-          .abortSignal(AbortSignal.timeout(LEADS_QUERY_TIMEOUT_MS))
-        if (erroLead && erroLead.code !== 'PGRST116') throw erroLead
-        if (!lead || lead.responsavel_id !== req.user.id) {
-          const semPermissao = new Error('Sem permissão para mover este lead')
-          semPermissao.status = 403
-          throw semPermissao
-        }
-      }
-
       const agora = new Date().toISOString()
       const updateData = { etapa, updated_at: agora }
       // Registra o momento exato em que o lead foi movido para fechado
@@ -341,7 +357,6 @@ router.put('/:id/etapa', async (req, res) => {
     if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
     res.json(data)
   } catch (err) {
-    if (err.status === 403) return res.status(403).json({ erro: err.message })
     responderErroSupabase(res, err)
   }
 })
@@ -349,19 +364,23 @@ router.put('/:id/etapa', async (req, res) => {
 // PUT /api/leads/:id/devolver-lara — devolve o lead para Lara (atendimento_humano = false)
 router.put('/:id/devolver-lara', async (req, res) => {
   try {
-    const data = await breakerLeads.executar(async () => {
-      if (req.user.role === 'vendedor') {
-        const { data: lead, error: erroLead } = await supabase
+    // Checagem de posse é decisão de AUTORIZAÇÃO, não falha do Supabase —
+    // fica fora do breakerLeads.executar() (mesmo motivo documentado em
+    // PUT /:id acima).
+    if (req.user.role === 'vendedor') {
+      const lead = await breakerLeads.executar(async () => {
+        const { data, error } = await supabase
           .from('leads').select('responsavel_id').eq('id', req.params.id).single()
           .abortSignal(AbortSignal.timeout(LEADS_QUERY_TIMEOUT_MS))
-        if (erroLead && erroLead.code !== 'PGRST116') throw erroLead
-        if (!lead || lead.responsavel_id !== req.user.id) {
-          const semPermissao = new Error('Sem permissão para editar este lead')
-          semPermissao.status = 403
-          throw semPermissao
-        }
+        if (error && error.code !== 'PGRST116') throw error
+        return data
+      })
+      if (!lead || lead.responsavel_id !== req.user.id) {
+        return res.status(403).json({ erro: 'Sem permissão para editar este lead' })
       }
+    }
 
+    const data = await breakerLeads.executar(async () => {
       const { data: atualizado, error } = await supabase
         .from('leads')
         .update({ atendimento_humano: false, handoff_alerta_nivel: 0, updated_at: new Date().toISOString() })
@@ -380,7 +399,6 @@ router.put('/:id/devolver-lara', async (req, res) => {
     if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
     res.json({ sucesso: true, lead: data })
   } catch (err) {
-    if (err.status === 403) return res.status(403).json({ erro: err.message })
     responderErroSupabase(res, err)
   }
 })

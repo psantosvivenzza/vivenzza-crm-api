@@ -68,6 +68,24 @@ function chamar(porta, { token } = {}) {
   })
 }
 
+// Variante genérica (método + corpo JSON) — usada pelos testes 8/9 abaixo
+// (POST duplicado / PUT sem permissão), que `chamar()` (só GET) não cobre.
+function chamarJson(porta, { method = 'GET', path, token, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = { 'content-type': 'application/json' }
+    if (token) headers.authorization = `Bearer ${token}`
+    const payload = body !== undefined ? JSON.stringify(body) : null
+    const req = http.request({ host: '127.0.0.1', port: porta, method, path, headers }, (res) => {
+      let chunks = ''
+      res.on('data', (c) => { chunks += c })
+      res.on('end', () => resolve({ status: res.statusCode, body: chunks ? JSON.parse(chunks) : null }))
+    })
+    req.on('error', reject)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
 // Instala um atraso artificial em toda consulta supabase.from('leads') —
 // simula "Supabase travado/lento" (Cloudflare 522) sem depender de travar o
 // Postgres local por um tempo determinístico. A query real ainda roda contra
@@ -253,6 +271,80 @@ test('GET /api/leads: contenção de cascata sob degradação do Supabase (incid
       assert.equal(lento.contagem(), 2, 'escopos com filtros diferentes precisam de execução própria — nunca podem compartilhar o resultado um do outro')
     } finally {
       lento.restaurar()
+      await new Promise((resolve) => servidor.close(resolve))
+    }
+  })
+
+  await t.test('8. erro de NEGÓCIO (409 telefone duplicado) NÃO conta como falha pro circuit breaker', async () => {
+    // Achado de revisão adversarial da PR: o 409 de telefone duplicado era
+    // lançado DE DENTRO de breakerLeads.executar() — o breaker não distingue
+    // "Supabase falhou" de "a aplicação decidiu rejeitar", então cada 409
+    // contava como falha. Sob uso normal (ex: webhook reenviando a mesma
+    // mensagem), algumas tentativas de duplicidade em sequência abririam o
+    // circuito e derrubariam TODO /api/leads (GET incluso) com o Supabase
+    // 100% saudável — o próprio incidente que esta PR existe pra evitar,
+    // autoinfligido por uma regra de negócio comum.
+    process.env.LEADS_QUERY_TIMEOUT_MS = '5000'
+    process.env.LEADS_LIST_CACHE_TTL_MS = '10'
+    process.env.LEADS_BREAKER_FALHAS_PARA_ABRIR = '2' // baixo de propósito
+    const { servidor, porta } = await subirApp('business-409-nao-abre-breaker')
+
+    // Fixture via insert direto (como criarLeadDeTeste), não via POST
+    // HTTP: só precisamos que a checagem de duplicidade (SELECT id, nome —
+    // colunas que sempre existem) encontre o telefone já cadastrado. Ir
+    // pelo INSERT completo da rota dependeria de colunas do baseline local
+    // de teste que não fazem parte deste achado (gap de ambiente, não do
+    // circuit breaker sob teste aqui).
+    const telefoneDuplicado = `5551977${String(Date.now()).slice(-6)}`
+    const { data: fixture, error: erroFixture } = await supabase
+      .from('leads')
+      .insert({ nome: 'Lead Duplicidade Teste (fixture)', telefone: telefoneDuplicado, origem: 'manual' })
+      .select('id')
+      .single()
+    if (erroFixture) throw erroFixture
+    idsCriados.push(fixture.id)
+
+    try {
+      // Mais tentativas do que falhasParaAbrir (2) — se o 409 contasse como
+      // falha, a 3ª tentativa já veria o circuito aberto (503), não 409.
+      for (let i = 0; i < 4; i++) {
+        const r = await chamarJson(porta, { method: 'POST', path: '/api/leads', token: tokenAdmin, body: { nome: 'Lead Duplicidade Teste', telefone: telefoneDuplicado } })
+        assert.equal(r.status, 409, `tentativa ${i + 1} de telefone duplicado deveria continuar 409, nunca virar 503 (circuito aberto por engano)`)
+      }
+
+      // Prova final: uma leitura real ainda passa direto — circuito nunca
+      // saiu de "fechado" por causa dos conflitos de negócio acima.
+      const leitura = await chamar(porta, { token: tokenAdmin })
+      assert.equal(leitura.status, 200, 'circuito deveria continuar fechado — 409 de negócio não é falha de infraestrutura')
+    } finally {
+      await new Promise((resolve) => servidor.close(resolve))
+    }
+  })
+
+  await t.test('9. erro de AUTORIZAÇÃO (403 sem permissão) NÃO conta como falha pro circuit breaker', async () => {
+    // Mesmo achado do teste 8, aplicado à checagem de posse (PUT /:id,
+    // /:id/etapa, /:id/devolver-lara): um vendedor tentando editar lead
+    // alheio é um 403 esperado sob uso normal (UI desatualizada, múltiplas
+    // vendedoras no mesmo board) — não pode abrir o circuito.
+    process.env.LEADS_QUERY_TIMEOUT_MS = '5000'
+    process.env.LEADS_LIST_CACHE_TTL_MS = '10'
+    process.env.LEADS_BREAKER_FALHAS_PARA_ABRIR = '2' // baixo de propósito
+    const { servidor, porta } = await subirApp('business-403-nao-abre-breaker')
+
+    const tokenVendedorForasteiro = jwt.sign({ id: 'vendedor-forasteiro-teste', email: 'forasteiro@teste.com', role: 'vendedor' }, process.env.JWT_SECRET)
+    const leadId = await criarLeadDeTeste(supabase, 'posse-403')
+
+    try {
+      // Mais tentativas do que falhasParaAbrir (2) — se o 403 contasse como
+      // falha, a 3ª tentativa já veria o circuito aberto (503), não 403.
+      for (let i = 0; i < 4; i++) {
+        const r = await chamarJson(porta, { method: 'PUT', path: `/api/leads/${leadId}`, token: tokenVendedorForasteiro, body: { observacoes: 'tentativa indevida' } })
+        assert.equal(r.status, 403, `tentativa ${i + 1} sem permissão deveria continuar 403, nunca virar 503 (circuito aberto por engano)`)
+      }
+
+      const leitura = await chamar(porta, { token: tokenAdmin })
+      assert.equal(leitura.status, 200, 'circuito deveria continuar fechado — 403 de autorização não é falha de infraestrutura')
+    } finally {
       await new Promise((resolve) => servidor.close(resolve))
     }
   })
