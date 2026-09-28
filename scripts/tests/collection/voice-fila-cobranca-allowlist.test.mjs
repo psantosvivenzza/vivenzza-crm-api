@@ -29,12 +29,13 @@ test('VOICE FILA COBRANCA — bypass de allowlist (auditoria f8cb81c9)', async (
 
   function limparEnvAllowlist() {
     delete process.env.VOICE_EXTERNAL_ALLOWLIST
+    delete process.env.VOICE_QUEUE_GENERAL_ENABLED
     delete process.env.NVOIP_SIP_SERVER
   }
 
-  await t.test('0. prova estática — script NUNCA mais monta allowlist:[numero] (assinatura exata do bypass)', () => {
+  await t.test('0. prova estática — modo geral exige opt-in explícito e fica restrito ao dispatcher da fila', () => {
     const conteudo = fs.readFileSync(SCRIPT_PATH, 'utf8')
-    assert.equal(conteudo.includes('allowlist: [numero]'), false, 'a fila não pode se autoautorizar montando allowlist com o próprio número')
+    assert.match(conteudo, /filaVozProducaoGeralHabilitada/, 'a fila deve consultar o opt-in explícito do modo geral')
     assert.match(conteudo, /resolverAllowlistParaAutorizacao/, 'o dispatcher deveria usar a função de resolução de allowlist externa')
     assert.match(conteudo, /numeroNaAllowlistExterna/, 'a allowlist usada deveria vir de externalConfig.js (VOICE_EXTERNAL_ALLOWLIST), nunca do próprio número')
   })
@@ -89,6 +90,28 @@ test('VOICE FILA COBRANCA — bypass de allowlist (auditoria f8cb81c9)', async (
     process.env.VOICE_EXTERNAL_ALLOWLIST = '+5511000000001' // allowlist real configurada, mas NÃO inclui o número da fila
     const comAllowlistDiferente = resolverAllowlistParaAutorizacao(numeroDaFila)
     assert.deepEqual(comAllowlistDiferente.allowlist, [], 'o número da fila não está na allowlist real configurada — não pode passar')
+    limparEnvAllowlist()
+  })
+
+  await t.test('6b. PRODUÇÃO GERAL — só o opt-in explícito da fila autoriza candidato; falso/ausente continua piloto', () => {
+    limparEnvAllowlist()
+    const numeroDaFila = '+5551999900001'
+
+    process.env.VOICE_QUEUE_GENERAL_ENABLED = 'false'
+    assert.deepEqual(resolverAllowlistParaAutorizacao(numeroDaFila).allowlist, [])
+
+    process.env.VOICE_QUEUE_GENERAL_ENABLED = 'true'
+    const geral = resolverAllowlistParaAutorizacao(numeroDaFila)
+    assert.deepEqual(geral.allowlist, [numeroDaFila])
+    assert.equal(geral.modo, 'producao_geral')
+    limparEnvAllowlist()
+  })
+
+  await t.test('6c. CHAMADA MANUAL — opt-in da fila não altera numeroNaAllowlistExterna', async () => {
+    limparEnvAllowlist()
+    process.env.VOICE_QUEUE_GENERAL_ENABLED = 'true'
+    const { numeroNaAllowlistExterna } = await import('../../../src/lib/voice/externalConfig.js')
+    assert.equal(numeroNaAllowlistExterna('+5551999900001'), false, 'chamadas manuais/canário continuam exigindo VOICE_EXTERNAL_ALLOWLIST')
     limparEnvAllowlist()
   })
 
