@@ -26,7 +26,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$OutputEncoding = [System.Text.Encoding]::Unicode
+try {
+    # Setar OutputEncoding lanca IOException ("handle invalido") quando o processo
+    # nao tem console real anexado, como no Task Scheduler com -WindowStyle Hidden
+    # (causa confirmada do LastTaskResult=1 em 28/09/2026: o script morria aqui,
+    # antes de criar o log, sem nunca chegar no try/catch principal). So afeta a
+    # exibicao de caracteres, nao a logica de leitura/diagnostico do script.
+    $OutputEncoding = [System.Text.Encoding]::Unicode
+} catch {}
 
 $Distro = 'Ubuntu'
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')

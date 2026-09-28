@@ -98,3 +98,58 @@ Remove só a tarefa agendada. **Não** desliga WSL/Asterisk que já estejam
 rodando (proposital — a ligação/serviço ao vivo não deve cair só porque a
 âncora foi desinstalada). Para desligar a VM manualmente depois:
 `wsl --shutdown`.
+
+## Incidentes conhecidos
+
+### 28/09/2026 — LastTaskResult=1 (handle inválido no OutputEncoding)
+
+A tarefa passou a terminar com `LastTaskResult=1` (HRESULT `0x80070001`,
+`ERROR_INVALID_FUNCTION`) em algumas execuções agendadas, sem nenhuma
+linha nova em `logs/ancora-wsl-asterisk.log` — evidência de que o script
+morria antes mesmo de entrar no `try/catch` principal (que sempre grava
+`--- Ancora WSL/Asterisk: inicio ---` como primeira linha).
+
+**Causa mais provável** (alta confiança por evidência estática +
+temporal; não confirmada por reprodução ao vivo — a execução manual do
+script foi bloqueada pelo classificador de automação da sessão que
+investigou):
+
+```powershell
+$OutputEncoding = [System.Text.Encoding]::Unicode
+```
+
+Essa linha ficava *fora* do `try/catch` (adicionado no commit
+`d579047`, mas só protegendo o corpo do script, não essa linha) e com
+`$ErrorActionPreference = 'Stop'` já ativo. Setar `$OutputEncoding`
+reconfigura o console real subjacente; quando o processo não tem console
+anexado — caso do Task Scheduler com `-WindowStyle Hidden` — a chamada
+lança `IOException: handle inválido`, que vira um erro terminante sem
+nenhum log. Evidência temporal: no evento de falha (28/09 08:05:29–33),
+o motor PowerShell viveu ~4s, tempo insuficiente para completar sequer a
+primeira chamada `wsl.exe` do script (que sozinha já leva mais que isso).
+
+**Correção aplicada** (commit `06509aa`, worktree
+`producao-voz-runtime`): a atribuição foi envolvida em
+`try { ... } catch {}`. Não muda nenhuma leitura/diagnóstico do script —
+só evita que uma falha de exibição de encoding derrube a execução
+inteira. Sintaxe validada via
+`[System.Management.Automation.Language.Parser]::ParseFile` (sem
+executar). Nenhuma tarefa foi habilitada nem allowlist alterada para
+investigar isso.
+
+### 28/09/2026 — `VivenzzaVozSobeAntesDaFila` apontava para o checkout principal
+
+A tarefa (permanece `Disabled`) executava `SUBIR-TUDO.ps1` do checkout
+principal (`vivenzza-crm-api\SUBIR-TUDO.ps1`, script local não
+versionado), que sobe o serviço de voz (`run-voice-service.mjs`) a
+partir de lá — a mesma classe de risco encontrada no incidente de
+25/09/2026 (serviço de voz rodando fora do runtime estável e
+sincronizado). Criada uma cópia adaptada em
+`.claude/worktrees/producao-voz-runtime\SUBIR-TUDO.ps1` (idêntica,
+só troca a variável `$projeto` para apontar para este worktree; também
+não versionada, mesmo padrão do arquivo original) e a Action da tarefa
+foi atualizada via `Set-ScheduledTask -Action` para apontar para essa
+cópia, com `WorkingDirectory` também no worktree. A tarefa continuou
+`Disabled` antes e depois da mudança (verificado). Backups XML da
+definição anterior e posterior preservados fora do repositório (job de
+automação que aplicou a mudança).
