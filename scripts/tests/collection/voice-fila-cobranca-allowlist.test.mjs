@@ -401,6 +401,52 @@ test('VOICE FILA COBRANCA — bypass de allowlist (auditoria f8cb81c9)', async (
     assert.ok(idxCatchGuard < idxOriginar, 'o tratamento de erro do guard de cobrança precisa vir ANTES de qualquer tentativa de originar')
   })
 
+  // ACHADO DA INVESTIGAÇÃO (28/09/2026, rollout piloto real, 3 candidatos):
+  // a leitura ao vivo mostrou o 1º candidato da fila bloqueado por
+  // fora_da_allowlist e levantou a suspeita de divergência de
+  // normalização/formatação entre a allowlist configurada (env, formato
+  // mascarado "(DD) 9XXXX-XXXX") e o telefone bruto da fila (só dígitos, ex:
+  // "82999258886", vindo de contas_financeiras/clientes). Investigação
+  // confirmou que NÃO é bug de normalização — telefonesEquivalentes() já
+  // trata corretamente máscara/parênteses/hífen/espaço, com/sem "+55", tanto
+  // que o 2º e 3º números aprovados bateram certo na execução real. O
+  // bloqueio do 1º candidato foi o gate funcionando como projetado: a fila
+  // (elegibilidade financeira) é dinâmica e, entre a aprovação manual dos 3
+  // números-piloto e a execução real, um novo título entrou em prioridade
+  // mais alta — um cliente fora do piloto aprovado. Este teste fecha a
+  // lacuna real: nenhum teste anterior cobria a allowlist real no formato
+  // EXATO usado em produção (mistura de "+55DDXXXXXXXXX" cru, "(DD)
+  // 9XXXX-XXXX" mascarado e dígitos crus sem máscara, todos na mesma env
+  // var, mesmo separador vírgula) comparada contra telefones de fila
+  // vindos como dígitos puros do banco.
+  await t.test('27. FORMATOS REAIS DE PRODUÇÃO — allowlist mista (E.164 cru, mascarado com parênteses/hífen, dígitos crus) reconhece corretamente cada número aprovado e bloqueia quem não está nela', () => {
+    // Mesmo shape de VOICE_EXTERNAL_ALLOWLIST visto em produção: canário em
+    // E.164, dois aprovados com máscara humana (parênteses+espaço+hífen) e
+    // um aprovado só em dígitos crus.
+    process.env.VOICE_EXTERNAL_ALLOWLIST = '+5551991567661,(95) 99902-6785,82999258886,(84) 99119-0660'
+    try {
+      const casos = [
+        // [telefone como viria da fila (dígitos crus, sem máscara), deveria estar na allowlist?]
+        ['5551991567661', true, 'canário, formato cru sem "+"'],
+        ['95999026785', true, 'aprovado mascarado no env — fila entrega sem máscara'],
+        ['82999258886', true, 'aprovado já cru no env — bate exato'],
+        ['84991190660', true, 'aprovado mascarado no env — fila entrega sem máscara'],
+        ['5595999026785', true, 'aprovado mascarado no env, mas telefone da fila COM DDI 55 na frente'],
+        ['5584991190660', true, 'aprovado mascarado no env, mas telefone da fila COM DDI 55 na frente'],
+        ['5511988887777', false, 'número de cliente qualquer, fora da allowlist'],
+        ['84999119066', false, 'quase-sufixo do aprovado (84) 99119-0660 mas dígitos embaralhados — não pode "casar" por acidente'],
+      ]
+      for (const [telefone, esperado, descricao] of casos) {
+        const { allowlist, erro } = resolverAllowlistParaAutorizacao(telefone)
+        assert.equal(erro, null, `não deveria dar erro de leitura — ${descricao}`)
+        const naAllowlist = allowlist.length === 1 && allowlist[0] === telefone
+        assert.equal(naAllowlist, esperado, `telefone=${telefone} (${descricao}) — esperado na_allowlist=${esperado}, obtido=${naAllowlist}`)
+      }
+    } finally {
+      limparEnvAllowlist()
+    }
+  })
+
   limparEnvAllowlist()
   await pararAmbienteDeTeste()
 })
