@@ -202,10 +202,26 @@ test('montarMensagem: quantidadeTitulos=1 (default) produz texto BYTE-A-BYTE id�
   }
 })
 
-test('montarMensagem: quantidadeTitulos>=2 adiciona a nota de consolidação, mantendo o valor já somado', () => {
+// Requisito de negócio (correção do incidente real de 2026-09-28): a mensagem
+// consolidada NUNCA pode mencionar quantidade de títulos, soma ou qualquer
+// explicação extra — precisa ser byte-a-byte igual à de um título único, só
+// com o valor (já somado) diferente. `quantidadeTitulos` é aceito só por
+// compatibilidade de assinatura com os call sites, sem efeito no texto.
+test('montarMensagem: quantidadeTitulos>=2 mantém o valor já somado, SEM nenhuma nota de consolidação', () => {
   for (let etapa = 1; etapa <= 8; etapa++) {
-    const msg = montarMensagem(etapa, { nome: 'Ana', valor: 1627.8, vencimento: '2026-08-30', diasAtraso: 5, quantidadeTitulos: 2 })
-    assert.match(msg, /1\.627,80/)
-    assert.match(msg, /Esse valor corresponde a 2 títulos com o mesmo vencimento\./)
+    const msgConsolidada = montarMensagem(etapa, { nome: 'Ana', valor: 1627.8, vencimento: '2026-08-30', diasAtraso: 5, quantidadeTitulos: 2 })
+    const msgUnica = montarMensagem(etapa, { nome: 'Ana', valor: 1627.8, vencimento: '2026-08-30', diasAtraso: 5 })
+    assert.match(msgConsolidada, /1\.627,80/)
+    assert.equal(msgConsolidada.includes('títulos'), false, 'mensagem nunca deve mencionar "títulos"')
+    assert.equal(msgConsolidada.includes('corresponde a'), false, 'mensagem nunca deve mencionar que houve soma/correspondência')
+    assert.equal(msgConsolidada, msgUnica, 'mensagem consolidada deve ser byte-a-byte idêntica à de um título único, exceto o valor')
+  }
+})
+
+test('montarMensagem: assinatura é Andrieli em todas as etapas', () => {
+  for (let etapa = 1; etapa <= 8; etapa++) {
+    const msg = montarMensagem(etapa, { nome: 'Ana', valor: 500, vencimento: '2026-08-30', diasAtraso: 5 })
+    assert.match(msg, /_Andrieli — Financeiro Vivenzza_$/)
+    assert.equal(msg.includes('Jeffeson'), false)
   }
 })

@@ -110,7 +110,7 @@ test('processWhatsappEvent: separação real Financeiro x Comercial', async (t) 
     const telefone = telefoneUnico()
     evolutionIdsCriados.push(`fin-out-${telefone}`)
     await processWhatsappEvent(eventoUpsert({
-      instance: 'vivenzza-financeiro', telefone, texto: 'Olá! Aqui é Jeffeson, do Financeiro Vivenzza...', fromMe: true, evolutionId: `fin-out-${telefone}`,
+      instance: 'vivenzza-financeiro', telefone, texto: 'Olá! Aqui é Andrieli, do Financeiro Vivenzza...', fromMe: true, evolutionId: `fin-out-${telefone}`,
     }))
     const { data: leads } = await supabase.from('leads').select('id').eq('telefone', telefone)
     assert.equal(leads.length, 0, 'eco de mensagem financeira enviada também não deveria criar lead')

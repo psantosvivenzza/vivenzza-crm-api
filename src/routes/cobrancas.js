@@ -4,6 +4,7 @@ import { calcularEtapa, montarMensagem } from '../lib/reguaCobranca.js'
 import { enviarCobrancaComRoteamento } from '../lib/collection/collectionRouting.js'
 import { executarReguaCobranca } from '../jobs/cobranca-whatsapp.js'
 import { verificarFrescorSync } from '../lib/collection/financialSyncGuard.js'
+import { analisarIdentificadores } from '../lib/collection/consolidacaoParcelas.js'
 import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
@@ -42,7 +43,7 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
 
     const { data: contas, error } = await supabase
       .from('contas_financeiras')
-      .select('id, valor, valor_pago, vencimento, telefone_cobranca')
+      .select('id, valor, valor_pago, vencimento, telefone_cobranca, legacy_id')
       .eq('tipo', 'receber')
       .in('status', ['aberta', 'vencida', 'pago_parcial'])
       .eq('em_revisao_financeira', false)
@@ -61,8 +62,21 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
       .filter((c) => c.saldo > 0)
     if (!comSaldo.length) return res.status(400).json({ erro: 'Todos os títulos deste cliente já estão quitados (baixa parcial cobre o valor total)' })
 
-    const valorTotal = comSaldo.reduce((soma, c) => soma + c.saldo, 0)
-    const pior = comSaldo.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
+    // Mesma proteção do cron (ver consolidacaoParcelas.js): duplicata técnica de
+    // sync (mesmo legacy_id repetido) não pode dobrar o valor cobrado, e 2+
+    // títulos sem legacy_id no grupo não têm como provar que são distintos —
+    // nesses casos, bloqueia e pede revisão humana em vez de arriscar somar errado.
+    const analise = analisarIdentificadores(comSaldo)
+    if (analise.ambiguo) {
+      return res.status(409).json({
+        erro: 'Não foi possível determinar com segurança os títulos distintos deste cliente (duplicata sem identificador) — revise manualmente antes de cobrar.',
+        motivo: analise.motivo,
+      })
+    }
+    const deduplicados = analise.deduplicados
+
+    const valorTotal = deduplicados.reduce((soma, c) => soma + c.saldo, 0)
+    const pior = deduplicados.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
     const diasAtraso = diasAtrasoDe(pior.vencimento)
     // Disparo manual pode ser clicado fora das janelas exatas da régua (ex.: título vence
     // daqui a 10 dias) — nesse caso não há template aplicável ainda; usa a etapa 1 como
