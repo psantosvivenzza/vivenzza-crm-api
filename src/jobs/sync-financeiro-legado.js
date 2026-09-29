@@ -358,7 +358,33 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
         if (decisao.acao === 'nenhuma') { contadores.total_sem_alteracao++; continue }
         if (decisao.acao === 'conflito') {
           contadores.total_conflito++
-          erros.push({ legacy_id: conta.legacy_id, mensagem: `CONFLITO: ${decisao.motivo}` })
+          const mensagemConflito = `CONFLITO: ${decisao.motivo}`
+          erros.push({ legacy_id: conta.legacy_id, mensagem: mensagemConflito })
+
+          // Fail-closed: uma divergência entre o valor pago já reconhecido no
+          // CRM e o valor retornado pelo NetVision não pode permanecer na
+          // régua automática. Antes, o conflito era apenas contado/logado e o
+          // título continuava com em_revisao_financeira=false, permitindo
+          // cobrança por WhatsApp e voz. A revisão só será retirada pela RPC
+          // quando uma sincronização posterior resolver a divergência.
+          if (!dryRun && !conta.em_revisao_financeira) {
+            const { error: erroRevisao } = await supabase
+              .from('contas_financeiras')
+              .update({
+                em_revisao_financeira: true,
+                motivo_revisao: mensagemConflito,
+                em_revisao_desde: new Date().toISOString(),
+              })
+              .eq('id', conta.id)
+
+            if (erroRevisao) {
+              contadores.total_com_erro++
+              erros.push({
+                legacy_id: conta.legacy_id,
+                mensagem: `FALHA AO BLOQUEAR CONFLITO: ${erroRevisao.message}`,
+              })
+            }
+          }
           continue
         }
 
