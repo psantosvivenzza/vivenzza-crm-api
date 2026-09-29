@@ -4,6 +4,7 @@
 // — supabase-admin.server.js decide client real vs. local na primeira
 // importação, então a env var precisa existir antes do primeiro `import`.
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
+import { adquirirLockDeTeste, liberarLockDeTeste } from './_lock.mjs'
 import { criarFakeEvolution } from '../fakes/fakeEvolution.js'
 
 process.env.NODE_ENV = 'test'
@@ -15,6 +16,7 @@ process.env.AI_PROVIDER = 'mock'
 let fakeEvolutionInstance = null
 
 export async function iniciarAmbienteDeTeste() {
+  await adquirirLockDeTeste()
   if (!fakeEvolutionInstance) {
     fakeEvolutionInstance = await criarFakeEvolution().iniciar()
     process.env.EVOLUTION_API_URL = fakeEvolutionInstance.url
@@ -23,6 +25,7 @@ export async function iniciarAmbienteDeTeste() {
 }
 
 export async function pararAmbienteDeTeste() {
+  await liberarLockDeTeste()
   if (fakeEvolutionInstance) {
     await fakeEvolutionInstance.parar()
     fakeEvolutionInstance = null

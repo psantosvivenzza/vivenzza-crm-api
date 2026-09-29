@@ -32,7 +32,12 @@ export function tituloElegivelParaConsolidacao(titulo) {
 // Ambiguidade real: 2+ títulos SEM legacy_id no mesmo grupo — sem identificador
 // nenhum pra provar que são títulos distintos (nem que são duplicata), não dá
 // pra decidir com segurança. Nesse caso o grupo inteiro fica `ambiguo`.
-function analisarIdentificadores(titulos) {
+//
+// Exportada (2026-09-28) pra ser reusada por qualquer caminho que precise
+// somar títulos com segurança — ex: disparar-individual em cobrancas.js, que
+// antes somava direto do banco sem checar duplicata técnica nem ambiguidade.
+// Mesma função, mesmo comportamento, agora com um único ponto de manutenção.
+export function analisarIdentificadores(titulos) {
   const vistos = new Map()
   const semIdentificador = []
   for (const t of titulos) {
