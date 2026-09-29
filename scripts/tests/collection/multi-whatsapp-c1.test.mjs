@@ -295,7 +295,7 @@ test('Central Multi-WhatsApp: failover só em falha TÉCNICA inequívoca', async
     await comFailoverLigado()
 
     // Telefone terminado em "000" = FakeEvolution simula "não existe no WhatsApp".
-    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: '5551988877000' })
+    const conta = await criarContaDeTeste(supabase, { telefone_cobranca: `5551${String(Date.now()).slice(-6)}000` })
     const resultado = await enviarComFailover({
       contasFinanceirasId: conta.id, etapa: 3, clienteNome: conta.pessoa_nome, clienteTelefone: conta.telefone_cobranca,
       valor: conta.valor, mensagem: 'Teste número inválido', origem: 'manual',
