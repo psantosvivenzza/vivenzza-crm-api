@@ -284,6 +284,16 @@ test('Fase 2B — persistência de estado final de sincronizacoes_financeiro', a
     const avisoConflito = logs.find((l) => /AVISO.*sincronizacao_financeiro_erros/.test(l))
     assert.ok(avisoConflito, 'precisa existir um log explícito avisando que o registro de detalhe do erro falhou — nunca silencioso')
     assert.match(avisoConflito, /erro simulado ao inserir detalhe de erro/)
+
+    const { data: contaDepois, error: erroContaDepois } = await supabase
+      .from('contas_financeiras')
+      .select('em_revisao_financeira, motivo_revisao, em_revisao_desde')
+      .eq('id', conta.id)
+      .single()
+    assert.ifError(erroContaDepois)
+    assert.equal(contaDepois.em_revisao_financeira, true, 'conflito precisa bloquear imediatamente o título na régua automática')
+    assert.match(contaDepois.motivo_revisao, /^CONFLITO:/)
+    assert.ok(contaDepois.em_revisao_desde, 'bloqueio do conflito precisa registrar quando a revisão começou')
   })
 
   await t.test('6. dry-run: continua sem criar ou atualizar registros de sincronização, mesmo com o hardening', async () => {
