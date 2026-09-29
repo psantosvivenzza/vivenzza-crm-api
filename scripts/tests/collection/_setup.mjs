@@ -5,6 +5,7 @@
 // importação, então a env var precisa existir antes do primeiro `import`.
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 import { adquirirLockDeTeste, liberarLockDeTeste } from './_lock.mjs'
+import { randomBytes, randomInt } from 'node:crypto'
 import { criarFakeEvolution } from '../fakes/fakeEvolution.js'
 
 process.env.NODE_ENV = 'test'
@@ -33,11 +34,16 @@ export async function pararAmbienteDeTeste() {
 }
 
 let contador = 0
+// Identificadores de teste NÃO podem derivar de Date.now(): testes que congelam
+// o relógio (t.mock.timers.enable({ apis: ['Date'] })) devolveriam o mesmo valor
+// a cada execução, e o banco local persiste entre execuções — `TESTE-<now>-<n>`
+// colidia com linha de execução anterior (clientes_erp_legacy_id_unique, 23505).
+// crypto não é afetado por mock.timers.
 // Telefone de teste único por chamada — evita colisão entre testes que rodam
 // em paralelo/sequência sem depender de limpeza total do banco a cada teste.
 export function telefoneDeTeste() {
   contador++
-  return `5551988${String(Date.now()).slice(-6)}${String(contador).padStart(2, '0')}`
+  return `5551988${String(randomInt(0, 1_000_000)).padStart(6, '0')}${String(contador).padStart(2, '0')}`
 }
 
 export async function criarContaDeTeste(supabase, overrides = {}) {
@@ -53,7 +59,7 @@ export async function criarContaDeTeste(supabase, overrides = {}) {
   // (DESCONHECIDO)"; passe `clienteErpAtivo: false` pra testar "INATIVO".
   let codigoCliente = overrides.codigo_cliente
   if (codigoCliente === undefined) {
-    codigoCliente = `TESTE-${Date.now()}-${contador}`
+    codigoCliente = `TESTE-${randomBytes(6).toString('hex')}-${contador}`
     const { error: erroCliente } = await supabase.from('clientes_erp').insert({
       legacy_id: codigoCliente,
       tipo: overrides.tipo || 'PJ',
