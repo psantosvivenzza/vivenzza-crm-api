@@ -6,7 +6,7 @@ REM atendimento (10 de 12) contra 25%% antes das 11h (4 de 16). Mesma operacao,
 REM mesmo custo, quase 3x mais gente atendendo.
 REM
 REM Os guards continuam todos valendo: janela legal ate 18h40 (lei estadual RS
-REM 15.608/2014), teto de 8 ligacoes/hora e 40/dia, 1 por telefone por dia, e a
+REM 15.608/2014), teto de 8 ligacoes/hora e 50/dia, 3 por telefone por dia, e a
 REM fila so traz quem esta realmente elegivel.
 cd /d "%~dp0"
 
