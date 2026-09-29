@@ -189,3 +189,24 @@ test('6. formatação BRL correta no valor consolidado (separador de milhar e v�
   assert.equal(Number(resultado.body.valor), 2442.58)
   assert.match(resultado.body.mensagem_enviada, /R\$ 2\.442,58/, 'formatação BRL com separador de milhar e vírgula decimal')
 })
+
+test('7. vencimentos DIFERENTES → soma só o grupo do vencimento mais atrasado; outros vencimentos ficam de fora', async () => {
+  const pessoaNome = `Cliente Vencimentos Distintos ${Date.now()}`
+  const codigoCliente = `DEDUP-VENC-${Date.now()}`
+  const telefone = telefoneDeTeste()
+  const dia = (delta) => new Date(Date.now() + delta * 86400000).toISOString().slice(0, 10)
+
+  // 2 títulos no vencimento mais antigo (entram na soma)
+  const a = await criarContaDeTeste(supabase, { pessoa_nome: pessoaNome, codigo_cliente: codigoCliente, telefone_cobranca: telefone, vencimento: dia(-10), valor: 100.1 })
+  await supabase.from('contas_financeiras').update({ legacy_id: `LEG-V-A-${a.id}` }).eq('id', a.id)
+  const b = await criarContaDeTeste(supabase, { pessoa_nome: pessoaNome, codigo_cliente: codigoCliente, telefone_cobranca: telefone, vencimento: dia(-10), valor: 200.2 })
+  await supabase.from('contas_financeiras').update({ legacy_id: `LEG-V-B-${b.id}` }).eq('id', b.id)
+  // outro vencimento (NÃO entra), inclusive sem legacy_id em dobro — não deve gerar 409 pro grupo certo
+  await criarContaDeTeste(supabase, { pessoa_nome: pessoaNome, codigo_cliente: codigoCliente, telefone_cobranca: telefone, vencimento: dia(-2), valor: 999 })
+  await criarContaDeTeste(supabase, { pessoa_nome: pessoaNome, codigo_cliente: codigoCliente, telefone_cobranca: telefone, vencimento: dia(-2), valor: 999 })
+
+  const resultado = await dispararIndividual(pessoaNome)
+  assert.equal(resultado.status, 201, JSON.stringify(resultado.body))
+  assert.equal(Number(resultado.body.valor), 300.3, 'soma exata só do mesmo vencimento (100.10 + 200.20), sem deriva de ponto flutuante')
+  assert.equal(String(resultado.body.vencimento).slice(0, 10), dia(-10))
+})

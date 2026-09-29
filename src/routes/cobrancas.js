@@ -9,6 +9,11 @@ import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
 
+// Chave de comparação de vencimento: o driver pode devolver string ou Date.
+function chaveVencimento(v) {
+  return v instanceof Date ? v.toISOString().slice(0, 10) : String(v ?? '').slice(0, 10)
+}
+
 function diasAtrasoDe(vencimento) {
   const hojeBrt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
   const umDia = 24 * 60 * 60 * 1000
@@ -34,7 +39,7 @@ router.post('/disparar', adminOnly, async (req, res) => {
 
 // POST /api/cobrancas/disparar-individual/:pessoaNome — ação manual por cliente.
 // Agrupado por pessoa_nome (não por título) porque um cliente pode ter vários títulos
-// em aberto — soma o total devido, usa o pior atraso pra decidir a mensagem, manda 1
+// em aberto — soma só os do mesmo vencimento (o mais atrasado), manda 1
 // mensagem consolidada. Não passa pelo switch (é ação humana pontual) nem pela trava
 // de "1x por etapa" do cron (origem='manual' fica fora do índice único).
 router.post('/disparar-individual/:pessoaNome', async (req, res) => {
@@ -62,11 +67,18 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
       .filter((c) => c.saldo > 0)
     if (!comSaldo.length) return res.status(400).json({ erro: 'Todos os títulos deste cliente já estão quitados (baixa parcial cobre o valor total)' })
 
+    // Regra de negócio: só soma títulos do MESMO vencimento (o do título mais
+    // atrasado) — títulos de outros vencimentos não entram no valor cobrado
+    // (a mensagem cita um único vencimento; somar vencimentos distintos
+    // geraria um valor que não corresponde a nenhuma parcela real).
+    const piorBruto = comSaldo.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
+    const doMesmoVencimento = comSaldo.filter((c) => chaveVencimento(c.vencimento) === chaveVencimento(piorBruto.vencimento))
+
     // Mesma proteção do cron (ver consolidacaoParcelas.js): duplicata técnica de
     // sync (mesmo legacy_id repetido) não pode dobrar o valor cobrado, e 2+
     // títulos sem legacy_id no grupo não têm como provar que são distintos —
     // nesses casos, bloqueia e pede revisão humana em vez de arriscar somar errado.
-    const analise = analisarIdentificadores(comSaldo)
+    const analise = analisarIdentificadores(doMesmoVencimento)
     if (analise.ambiguo) {
       return res.status(409).json({
         erro: 'Não foi possível determinar com segurança os títulos distintos deste cliente (duplicata sem identificador) — revise manualmente antes de cobrar.',
@@ -75,8 +87,9 @@ router.post('/disparar-individual/:pessoaNome', async (req, res) => {
     }
     const deduplicados = analise.deduplicados
 
-    const valorTotal = deduplicados.reduce((soma, c) => soma + c.saldo, 0)
-    const pior = deduplicados.reduce((a, b) => (diasAtrasoDe(a.vencimento) > diasAtrasoDe(b.vencimento) ? a : b))
+    // Centavos inteiros: evita deriva de ponto flutuante na soma.
+    const valorTotal = deduplicados.reduce((soma, c) => soma + Math.round(c.saldo * 100), 0) / 100
+    const pior = deduplicados[0]
     const diasAtraso = diasAtrasoDe(pior.vencimento)
     // Disparo manual pode ser clicado fora das janelas exatas da régua (ex.: título vence
     // daqui a 10 dias) — nesse caso não há template aplicável ainda; usa a etapa 1 como

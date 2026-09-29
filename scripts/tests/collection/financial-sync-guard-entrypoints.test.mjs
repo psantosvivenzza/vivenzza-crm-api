@@ -104,15 +104,19 @@ test('10. disparo individual (POST /api/cobrancas/disparar-individual/:pessoaNom
   const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
   const porta = server.address().port
 
+  // nome único + legacy_id: linhas de outros testes com o mesmo nome (sem legacy_id)
+  // fariam o disparo manual bloquear por ambiguidade (409) antes de chegar no guard.
+  const nomeUnico = `Cliente Teste Guard Individual ${Date.now()}`
   const conta = await criarContaDeTeste(supabase, {
-    pessoa_nome: 'Cliente Teste Guard Individual',
+    pessoa_nome: nomeUnico,
     vencimento: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10),
   })
+  await supabase.from('contas_financeiras').update({ legacy_id: `LEG-GUARD-${conta.id}` }).eq('id', conta.id)
 
   const resultado = await new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1', port: porta, method: 'POST',
-      path: `/api/cobrancas/disparar-individual/${encodeURIComponent('Cliente Teste Guard Individual')}`,
+      path: `/api/cobrancas/disparar-individual/${encodeURIComponent(nomeUnico)}`,
       headers: { authorization: 'Bearer chave-teste-sync-guard', 'content-type': 'application/json' },
     }, (res) => {
       let chunks = ''
