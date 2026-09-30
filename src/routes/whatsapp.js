@@ -200,32 +200,38 @@ router.get('/recentes', async (req, res) => {
     const { desde } = req.query
     if (!desde) return res.status(400).json({ erro: 'Parâmetro "desde" obrigatório' })
 
-    let leadIds = null
-
+    // Vendedor: filtra pelo relacionamento embutido (leads!inner + eq no responsavel_id)
+    // em vez de montar uma lista de IDs e usar .in(...) — vendedoras com milhares de
+    // leads (ex.: 3.400+) geravam uma query string longa demais e o gateway do
+    // Supabase rejeitava com 400 Bad Request (achado 30/09).
+    let query
     if (req.user.role === 'vendedor') {
-      const { data: meusLeads } = await supabase
-        .from('leads')
-        .select('id')
-        .eq('responsavel_id', req.user.id)
-      leadIds = (meusLeads || []).map(l => l.id)
-      if (leadIds.length === 0) return res.json({ data: [] })
+      query = supabase
+        .from('whatsapp_mensagens')
+        .select('id, lead_id, mensagem, telefone, direcao, media_tipo, created_at, leads!inner(id, nome, responsavel_id)')
+        .eq('direcao', 'entrada')
+        .eq('leads.responsavel_id', req.user.id)
+        .gt('created_at', desde)
+        .order('created_at', { ascending: false })
+        .limit(20)
+    } else {
+      // Admin/financeiro veem tudo, inclusive mensagens sem lead vinculado
+      // (lead_id null) — por isso aqui o embed continua sem !inner.
+      query = supabase
+        .from('whatsapp_mensagens')
+        .select('id, lead_id, mensagem, telefone, direcao, media_tipo, created_at, leads(id, nome)')
+        .eq('direcao', 'entrada')
+        .gt('created_at', desde)
+        .order('created_at', { ascending: false })
+        .limit(20)
     }
-
-    let query = supabase
-      .from('whatsapp_mensagens')
-      .select('id, lead_id, mensagem, telefone, direcao, media_tipo, created_at, leads(id, nome)')
-      .eq('direcao', 'entrada')
-      .gt('created_at', desde)
-      .order('created_at', { ascending: false })
-      .limit(20)
-
-    if (leadIds) query = query.in('lead_id', leadIds)
 
     const { data, error } = await query
     if (error) throw error
 
     res.json({ data: data || [] })
   } catch (err) {
+    console.error('[whatsapp/recentes] erro:', err.message)
     res.status(500).json({ erro: err.message })
   }
 })
