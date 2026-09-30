@@ -106,6 +106,7 @@ function iniciarServicoLocal() {
         PONTO_LOCAL_SERVICO_PORTA: String(servicoPorta),
         PONTO_LOCAL_SERVICO_CONFIG_DIR: configDir,
         PONTO_LOCAL_SERVICO_ORIGENS_PERMITIDAS: ORIGEM_LEGITIMA,
+        PONTO_LOCAL_SERVICO_API_PERMITIDAS: `http://127.0.0.1:${dubleBackendPorta}`,
         PONTO_LOCAL_SERVICO_AUTO_CONFIRMAR: 'true', // só este teste automatizado — nunca em uso real (ver servico.mjs)
       },
       windowsHide: true,
