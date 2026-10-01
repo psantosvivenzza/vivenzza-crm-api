@@ -74,7 +74,14 @@ function montarLead(c) {
     ativo: c.ativo ?? true,
     cidade: c.endereco?.cidade || null,
     estado: c.endereco?.estado || null,
-    responsavel_id: c.vendedor_responsavel_usuario_id || null,
+    // ACHADO 2026-10-01 (pós-rodada): NÃO copiar vendedor_responsavel_usuario_id
+    // pra responsavel_id aqui. Esse campo em clientes_erp é carteira histórica
+    // importada do NetVision — majoritariamente ex-funcionário inativo — e
+    // leads.js filtra o Pipeline do vendedor por responsavel_id. Copiar direto
+    // fez ~535 clientes "surgirem" no CRM de vendedoras ativas que não eram
+    // delas de verdade. Nasce sempre sem responsável; atribuição correta é
+    // manual, via PUT /api/admin/erp/clientes/:id/vendedor (tem motivo + histórico).
+    responsavel_id: null,
   }
 }
 
