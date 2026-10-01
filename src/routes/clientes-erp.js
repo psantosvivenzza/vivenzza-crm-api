@@ -16,7 +16,7 @@ router.get('/busca', async (req, res) => {
       .from('clientes_erp')
       .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, endereco, contatos, data_ultima_compra')
       .eq('ativo', true)
-      .or(`razao_social.ilike.${like},nome_fantasia.ilike.${like},cnpj_cpf.ilike.${like}`)
+      .or(`razao_social.ilike.${like},nome_fantasia.ilike.${like},cnpj_cpf.ilike.${like},legacy_id.ilike.${like}`)
       .order('razao_social')
       .limit(15)
 
