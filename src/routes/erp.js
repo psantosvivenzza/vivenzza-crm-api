@@ -249,16 +249,26 @@ router.put('/clientes/:id/vendedor', async (req, res) => {
     const vendedorAnteriorId = clienteAtual.vendedor_responsavel_usuario_id || null
     const vendedorNovoId = vendedor_novo_id || null
 
-    // Sem mudança real: não grava histórico nem faz update à toa.
+    // Sem mudança de vendedor: não grava histórico nem faz update de
+    // vendedor_responsavel_usuario_id à toa — mas ainda assim trava a
+    // atribuição como manual (vendedor_atribuicao_manual=true), senão um
+    // "confirmar responsável atual" pela tela não protegeria o cliente do
+    // próximo sync do NetVision.
     if (vendedorAnteriorId === vendedorNovoId) {
+      await supabase.from('clientes_erp').update({ vendedor_atribuicao_manual: true }).eq('id', req.params.id)
       return res.json({ alterado: false, mensagem: 'Vendedor responsável já é este — nenhuma alteração feita.' })
     }
 
-    // Atualiza SOMENTE clientes_erp.vendedor_responsavel_usuario_id — nunca
-    // toca pedidos/comissoes/contas_financeiras, por regra explícita.
+    // Atualiza clientes_erp.vendedor_responsavel_usuario_id — nunca toca
+    // pedidos/comissoes/contas_financeiras, por regra explícita. Também marca
+    // vendedor_atribuicao_manual=true: a partir daqui, o sync automático do
+    // NetVision (que resolve vendedor_responsavel_usuario_id a partir de
+    // representante_nome via trigger) NUNCA mais sobrescreve este cliente —
+    // transferência feita por aqui é definitiva até a próxima transferência
+    // manual, mesmo que o representante no NetVision continue diferente.
     const { data: clienteAtualizado, error: erroUpdate } = await supabase
       .from('clientes_erp')
-      .update({ vendedor_responsavel_usuario_id: vendedorNovoId })
+      .update({ vendedor_responsavel_usuario_id: vendedorNovoId, vendedor_atribuicao_manual: true })
       .eq('id', req.params.id)
       .select('id, vendedor_responsavel_usuario_id')
       .single()

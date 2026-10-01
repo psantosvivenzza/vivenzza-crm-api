@@ -214,7 +214,7 @@ function montarLeadParaCriar(payload) {
  */
 export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_lead_criado: 0, total_lead_com_erro: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0 }
+  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_lead_criado: 0, total_lead_com_erro: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0, total_representante_atualizado: 0 }
   const criados = []
   const contatosAcrescentados = []
   const conflitosContato = []
@@ -233,7 +233,7 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
     // avaliado (merge aditivo), então não basta saber que existe.
     const existentes = new Map()
     for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await supabase.from('clientes_erp').select('id, legacy_id, razao_social, contatos').range(offset, offset + 999)
+      const { data, error } = await supabase.from('clientes_erp').select('id, legacy_id, razao_social, contatos, representante_nome').range(offset, offset + 999)
       if (error) throw error
       for (const r of data) existentes.set(r.legacy_id, r)
       if (data.length < 1000) break
@@ -277,6 +277,37 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       const jaExiste = existentes.get(codigo)
       if (jaExiste) {
         contadores.total_ja_existente++
+
+        // ACHADO 2026-10-01 (pós-trigger de sincronização de vendedor):
+        // representante_nome, antes, só era gravado na criação — nunca
+        // atualizado depois. O Quais pediu explicitamente que mudanças no
+        // representante do NetVision sejam puxadas e refletidas aqui. A
+        // resolução pra vendedor_responsavel_usuario_id (e daí pra
+        // leads.responsavel_id) acontece via trigger no banco
+        // (fn_resolver_vendedor_por_representante + fn_sync_lead_responsavel_
+        // from_cliente_erp) — aqui só precisamos manter representante_nome
+        // fiel ao NetVision. Uma transferência manual feita pela tela (que
+        // marca vendedor_atribuicao_manual=true) nunca é sobrescrita por
+        // este update, mesmo que o representante no NetVision continue
+        // apontando pro nome antigo.
+        const representanteNovo = trim(row.Representante) || null
+        if (representanteNovo !== (jaExiste.representante_nome || null)) {
+          contadores.total_representante_atualizado++
+          if (!dryRun) {
+            try {
+              const { error: erroRepresentante } = await supabase
+                .from('clientes_erp')
+                .update({ representante_nome: representanteNovo })
+                .eq('id', jaExiste.id)
+              if (erroRepresentante) throw erroRepresentante
+            } catch (err) {
+              contadores.total_com_erro++
+              erros.push({ legacy_id: codigo, mensagem: `erro ao atualizar representante: ${err.message}` })
+              log(`[sync-clientes-legado] erro ao atualizar representante de ${codigo}: ${err.message}`)
+            }
+          }
+        }
+
         const merge = mesclarContatosAditivo(jaExiste.contatos, row, { donoDaChave, legacyId: codigo, ambiguosNaOrigem })
 
         for (const conflito of merge.conflitos) {
