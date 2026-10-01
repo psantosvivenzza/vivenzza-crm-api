@@ -43,7 +43,13 @@ router.get('/clientes', async (req, res) => {
       .range(offset, offset + Number(limit) - 1)
 
     if (q) {
-      const { data: idsBusca, error: erroBusca } = await supabase.rpc('clientes_erp_busca', { termo: q })
+      // A coluna CÓDIGO da própria tela mostra o código como "#001286" — é
+      // natural o usuário copiar/digitar com o "#". `legacy_id` no banco
+      // nunca tem esse caractere, então "#001286" não batia com nada (achado
+      // real, 2026-10-01: Quais buscou e não encontrou). Remove um "#" no
+      // início do termo antes de mandar pra busca.
+      const termoBusca = String(q).trim().replace(/^#/, '')
+      const { data: idsBusca, error: erroBusca } = await supabase.rpc('clientes_erp_busca', { termo: termoBusca })
       if (erroBusca) throw erroBusca
       const ids = (idsBusca || []).map((r) => r.id)
       // Sem resultado nenhum: força um IN vazio pra retornar lista vazia em

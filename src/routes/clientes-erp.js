@@ -8,7 +8,10 @@ const router = Router()
 // autenticado precisa poder buscar cliente pra criar um pedido, não só admin.
 router.get('/busca', async (req, res) => {
   try {
-    const termo = (req.query.search || '').trim()
+    // O código aparece na tela como "#001286" — tira um "#" do início pra não
+    // perder o match quando o usuário busca exatamente como vê (mesmo achado
+    // do admin, 2026-10-01).
+    const termo = (req.query.search || '').trim().replace(/^#/, '')
     if (termo.length < 2) return res.json([])
 
     const like = `%${termo}%`
