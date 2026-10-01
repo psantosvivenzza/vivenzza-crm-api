@@ -2,89 +2,11 @@ import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { query as dbQuery } from '../lib/db.js'
 import { normalizarTelefone, candidatosTelefone } from '../lib/telefone.js'
+import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento, listarTerritorios } from '../lib/territorios.js'
 
 const router = Router()
 
 const useDb = () => !!process.env.DATABASE_URL
-
-// --- Territórios de distribuidor (cidades de atendimento) -----------------
-// Regra de negócio: só pode haver 1 distribuidor ATIVO por cidade/UF (constraint
-// uq_distribuidor_cidade_ativa no banco garante isso em nível de dado também).
-// Quando o lead vira inativo, a cidade é liberada automaticamente para outro
-// distribuidor poder assumir.
-
-async function buscarCidadesAtendimento(leadId) {
-  const { data, error } = await supabase
-    .from('distribuidor_cidades')
-    .select('id, cidade, estado')
-    .eq('lead_id', leadId)
-    .eq('ativo', true)
-    .order('estado')
-    .order('cidade')
-  if (error) throw error
-  return data ?? []
-}
-
-async function liberarCidadesDoDistribuidor(leadId) {
-  const { error } = await supabase
-    .from('distribuidor_cidades')
-    .update({ ativo: false, atualizado_em: new Date().toISOString() })
-    .eq('lead_id', leadId)
-    .eq('ativo', true)
-  if (error) throw error
-}
-
-// Substitui o conjunto de cidades ativas de um distribuidor pelo novo conjunto
-// enviado no form. Lança erro com código 'TERRITORIO_OCUPADO' se alguma cidade
-// já tiver distribuidor ativo diferente deste lead.
-async function definirCidadesAtendimento(leadId, cidadesNovas) {
-  const normalizadas = (cidadesNovas ?? [])
-    .map((c) => ({ cidade: String(c.cidade ?? '').trim(), estado: String(c.estado ?? '').trim().toUpperCase() }))
-    .filter((c) => c.cidade && c.estado)
-
-  // Checa conflito ANTES de mexer em qualquer linha, pra dar erro claro em vez
-  // de deixar a constraint do banco estourar no meio da operação.
-  for (const c of normalizadas) {
-    const { data: ocupante, error } = await supabase
-      .from('distribuidor_cidades')
-      .select('lead_id, leads!distribuidor_cidades_lead_id_fkey(nome, empresa)')
-      .eq('estado', c.estado)
-      .ilike('cidade', c.cidade)
-      .eq('ativo', true)
-      .neq('lead_id', leadId)
-      .maybeSingle()
-    if (error) throw error
-    if (ocupante) {
-      const nomeOcupante = ocupante.leads?.empresa || ocupante.leads?.nome || 'outro distribuidor'
-      const erro = new Error(`A cidade ${c.cidade}/${c.estado} já tem distribuidor ativo: ${nomeOcupante}.`)
-      erro.code = 'TERRITORIO_OCUPADO'
-      throw erro
-    }
-  }
-
-  await liberarCidadesDoDistribuidor(leadId)
-
-  if (normalizadas.length) {
-    // Insert simples (não upsert): a unicidade real é uma expressão parcial
-    // (estado, lower(cidade)) WHERE ativo = true, que o onConflict do client
-    // não sabe mirar. Já liberamos as linhas antigas deste lead acima e já
-    // validamos que nenhum OUTRO lead tem a cidade ativa, então um insert
-    // direto é seguro; se mesmo assim colidir, a constraint do banco barra.
-    const { error } = await supabase
-      .from('distribuidor_cidades')
-      .insert(normalizadas.map((c) => ({ lead_id: leadId, cidade: c.cidade, estado: c.estado, ativo: true })))
-    if (error) {
-      if (error.code === '23505') {
-        const erro = new Error('Uma das cidades selecionadas já tem distribuidor ativo (conflito ao salvar).')
-        erro.code = 'TERRITORIO_OCUPADO'
-        throw erro
-      }
-      throw error
-    }
-  }
-
-  return buscarCidadesAtendimento(leadId)
-}
 
 // GET /api/leads — listar com filtros opcionais
 router.get('/', async (req, res) => {
@@ -142,25 +64,7 @@ router.get('/', async (req, res) => {
 router.get('/territorios', async (req, res) => {
   try {
     const { cidade, estado } = req.query
-
-    let query = supabase
-      .from('distribuidor_cidades')
-      .select('cidade, estado, lead_id, leads!distribuidor_cidades_lead_id_fkey(id, nome, empresa, ativo)')
-      .eq('ativo', true)
-      .order('estado')
-      .order('cidade')
-
-    if (estado) query = query.eq('estado', String(estado).toUpperCase())
-    if (cidade) query = query.ilike('cidade', String(cidade).trim())
-
-    const { data, error } = await query
-    if (error) throw error
-
-    const territorios = (data ?? []).map((t) => ({
-      cidade: t.cidade,
-      estado: t.estado,
-      distribuidor: { id: t.leads?.id, nome: t.leads?.nome, empresa: t.leads?.empresa },
-    }))
+    const territorios = await listarTerritorios({ cidade, estado })
 
     if (cidade && estado) {
       return res.json({ ocupado: territorios.length > 0, distribuidor: territorios[0]?.distribuidor ?? null })
@@ -188,7 +92,7 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ erro: 'Sem permissão para acessar este lead' })
     }
 
-    const cidadesAtendimento = data.tipo === 'distribuidor' ? await buscarCidadesAtendimento(data.id) : []
+    const cidadesAtendimento = data.tipo === 'distribuidor' ? await buscarCidadesAtendimento({ leadId: data.id }) : []
 
     res.json({ ...data, cliente_erp_vinculado: data.clientes_erp ?? null, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
@@ -250,7 +154,7 @@ router.post('/', async (req, res) => {
     let cidadesAtendimento = []
     if (tipo === 'distribuidor' && Array.isArray(cidades_atendimento) && cidades_atendimento.length) {
       try {
-        cidadesAtendimento = await definirCidadesAtendimento(lead.id, cidades_atendimento)
+        cidadesAtendimento = await definirCidadesAtendimento({ leadId: lead.id }, cidades_atendimento)
       } catch (err) {
         if (err.code === 'TERRITORIO_OCUPADO') {
           // O lead já foi criado; devolve 201 com aviso em vez de rollback manual
@@ -317,14 +221,14 @@ router.put('/:id', async (req, res) => {
     // Inativou um distribuidor → libera automaticamente as cidades que ele
     // cobria, pra outro distribuidor poder assumir a praça.
     if (precisaLiberarCidades) {
-      await liberarCidadesDoDistribuidor(data.id)
+      await liberarCidades({ leadId: data.id })
     }
 
     let cidadesAtendimento
     if (data.tipo === 'distribuidor') {
       if (Array.isArray(cidadesAtendimentoNovas) && data.ativo !== false) {
         try {
-          cidadesAtendimento = await definirCidadesAtendimento(data.id, cidadesAtendimentoNovas)
+          cidadesAtendimento = await definirCidadesAtendimento({ leadId: data.id }, cidadesAtendimentoNovas)
         } catch (err) {
           if (err.code === 'TERRITORIO_OCUPADO') {
             return res.status(409).json({ erro: err.message })
@@ -332,7 +236,7 @@ router.put('/:id', async (req, res) => {
           throw err
         }
       } else {
-        cidadesAtendimento = await buscarCidadesAtendimento(data.id)
+        cidadesAtendimento = await buscarCidadesAtendimento({ leadId: data.id })
       }
     } else {
       cidadesAtendimento = []

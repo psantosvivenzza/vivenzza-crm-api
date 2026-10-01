@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento } from '../lib/territorios.js'
 
 const router = Router()
 
@@ -291,7 +292,12 @@ router.get('/clientes/:id', async (req, res) => {
         .limit(30),
     ])
     if (clienteRes.error) throw clienteRes.error
-    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [] })
+
+    const cidadesAtendimento = clienteRes.data?.classificacao_comercial === 'distribuidor'
+      ? await buscarCidadesAtendimento({ clienteErpId: req.params.id })
+      : []
+
+    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [], cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -304,7 +310,7 @@ router.put('/clientes/:id', async (req, res) => {
       razao_social, nome_fantasia, cnpj_cpf, ie,
       telefone, celular, email,
       logradouro, numero, complemento, bairro, cidade, estado, cep, pais,
-      observacoes, ativo,
+      observacoes, ativo, classificacao_comercial, cidades_atendimento,
     } = req.body
 
     if (!razao_social) return res.status(400).json({ erro: 'razao_social é obrigatório' })
@@ -328,9 +334,23 @@ router.put('/clientes/:id', async (req, res) => {
       pais: pais || null,
     }
 
+    // Detecta transição pra inativo de um cliente distribuidor — precisa
+    // liberar o território dele automaticamente (mesma regra de leads.js).
+    let precisaLiberarCidades = false
+    if (ativo === false) {
+      const { data: atual } = await supabase
+        .from('clientes_erp')
+        .select('ativo, classificacao_comercial')
+        .eq('id', req.params.id)
+        .maybeSingle()
+      if (atual?.ativo !== false && (classificacao_comercial ?? atual?.classificacao_comercial) === 'distribuidor') {
+        precisaLiberarCidades = true
+      }
+    }
+
     const { data, error } = await supabase
       .from('clientes_erp')
-      .update({ razao_social, nome_fantasia, cnpj_cpf, ie, contatos, endereco, observacoes, ativo })
+      .update({ razao_social, nome_fantasia, cnpj_cpf, ie, contatos, endereco, observacoes, ativo, classificacao_comercial: classificacao_comercial || null })
       .eq('id', req.params.id)
       .select()
       .single()
@@ -338,7 +358,29 @@ router.put('/clientes/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Cliente não encontrado' })
 
-    res.json(data)
+    if (precisaLiberarCidades) {
+      await liberarCidades({ clienteErpId: data.id })
+    }
+
+    let cidadesAtendimentoSalvas
+    if (data.classificacao_comercial === 'distribuidor') {
+      if (Array.isArray(cidades_atendimento) && data.ativo !== false) {
+        try {
+          cidadesAtendimentoSalvas = await definirCidadesAtendimento({ clienteErpId: data.id }, cidades_atendimento)
+        } catch (err) {
+          if (err.code === 'TERRITORIO_OCUPADO') {
+            return res.status(409).json({ erro: err.message })
+          }
+          throw err
+        }
+      } else {
+        cidadesAtendimentoSalvas = await buscarCidadesAtendimento({ clienteErpId: data.id })
+      }
+    } else {
+      cidadesAtendimentoSalvas = []
+    }
+
+    res.json({ ...data, cidades_atendimento: cidadesAtendimentoSalvas })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
