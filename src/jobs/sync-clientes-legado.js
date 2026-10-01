@@ -181,12 +181,40 @@ export function montarClienteParaCriar(row) {
 }
 
 /**
+ * Unificação de cadastro CRM/ERP (2026-10-01, decisão do Quais: "não podemos
+ * ter dois [cadastros] em locais diferentes"): classificação comercial,
+ * território de distribuidor, WhatsApp e histórico vivem só em `leads` — um
+ * clientes_erp sem lead vinculado não consegue ter nada disso. Todo
+ * clientes_erp PRECISA nascer com um lead (`cliente_erp_id`), nunca só o
+ * backfill único resolver isso uma vez. Ver
+ * scripts/backfill-leads-clientes-erp-unificacao.mjs para o backfill dos
+ * 1.978 que já existiam sem lead antes desta mudança.
+ */
+function montarLeadParaCriar(payload) {
+  const telefoneRaw = payload.contatos.find((c) => ['celular', 'fone'].includes(c.tipo))?.valor
+  const email = payload.contatos.find((c) => c.tipo === 'email')?.valor
+  return {
+    nome: `${payload.legacy_id}- ${payload.nome_fantasia || payload.razao_social}`,
+    empresa: payload.razao_social,
+    tipo: null, // não advinhar classificação — fica pro time preencher
+    etapa: 'fechado', // já é cliente real (vindo do ERP), não prospect de funil
+    origem: 'erp_legado',
+    telefone: telefoneRaw ? telefoneRaw.replace(/\D/g, '') || null : null,
+    email: email || null,
+    cliente_erp_id: payload.legacy_id,
+    ativo: payload.ativo,
+    cidade: payload.endereco?.cidade || null,
+    estado: payload.endereco?.estado || null,
+  }
+}
+
+/**
  * Compara Pessoas(Cliente=1) com clientes_erp e cria os que faltam.
  * `dryRun: true` só reporta o que seria criado, não grava nada.
  */
 export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0 }
+  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_lead_criado: 0, total_lead_com_erro: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0 }
   const criados = []
   const contatosAcrescentados = []
   const conflitosContato = []
@@ -347,6 +375,21 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
         contadores.total_com_erro++
         erros.push({ legacy_id: codigo, mensagem: err.message })
         log(`[sync-clientes-legado] erro ao criar ${codigo}: ${err.message}`)
+        continue
+      }
+
+      // Unificação CRM/ERP: clientes_erp criado com sucesso precisa nascer
+      // já com lead vinculado (ver montarLeadParaCriar acima). Falha aqui
+      // NÃO desfaz o clientes_erp já criado — fica sem lead até o próximo
+      // backfill (scripts/backfill-leads-clientes-erp-unificacao.mjs, que é
+      // idempotente e seguro de rodar de novo) pegar o que faltou.
+      try {
+        const { error } = await supabase.from('leads').insert(montarLeadParaCriar(payload))
+        if (error) throw error
+        contadores.total_lead_criado++
+      } catch (err) {
+        contadores.total_lead_com_erro++
+        log(`[sync-clientes-legado] cliente ${codigo} criado mas lead vinculado falhou: ${err.message}`)
       }
     }
 

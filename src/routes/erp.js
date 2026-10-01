@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento } from '../lib/territorios.js'
+import { buscarCidadesAtendimento } from '../lib/territorios.js'
 
 const router = Router()
 
@@ -277,6 +277,13 @@ router.put('/clientes/:id/vendedor', async (req, res) => {
 })
 
 // GET /api/admin/erp/clientes/:id — detalhe + histórico de vendas
+//
+// Unificação de cadastro CRM/ERP (2026-10-01): classificação comercial e
+// território de distribuidor NÃO são mais lidos/editados aqui — eles vivem
+// só no lead vinculado (`leads.cliente_erp_id`), que desde o backfill de
+// 2026-10-01 existe pra todo clientes_erp. Esta rota devolve `lead_vinculado`
+// (id + tipo) pro frontend linkar "editar classificação/território no CRM"
+// em vez de duplicar o campo aqui.
 router.get('/clientes/:id', async (req, res) => {
   try {
     const [clienteRes, vendasRes] = await Promise.all([
@@ -293,24 +300,34 @@ router.get('/clientes/:id', async (req, res) => {
     ])
     if (clienteRes.error) throw clienteRes.error
 
-    const cidadesAtendimento = clienteRes.data?.classificacao_comercial === 'distribuidor'
-      ? await buscarCidadesAtendimento({ clienteErpId: req.params.id })
+    const { data: lead } = clienteRes.data?.legacy_id
+      ? await supabase.from('leads').select('id, tipo, ativo').eq('cliente_erp_id', clienteRes.data.legacy_id).maybeSingle()
+      : { data: null }
+
+    const cidadesAtendimento = lead?.tipo === 'distribuidor'
+      ? await buscarCidadesAtendimento({ leadId: lead.id })
       : []
 
-    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [], cidades_atendimento: cidadesAtendimento })
+    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [], lead_vinculado: lead || null, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
 })
 
 // PUT /api/admin/erp/clientes/:id — edição de cadastro
+//
+// Unificação de cadastro CRM/ERP (2026-10-01): classificação comercial e
+// cidades de atendimento NÃO são mais aceitas aqui, de propósito — edita-se
+// só no lead vinculado (Pipeline/CRM). `classificacao_comercial` no corpo é
+// ignorado (não quebra clientes antigos do frontend em cache durante o
+// deploy, só deixa de ter efeito).
 router.put('/clientes/:id', async (req, res) => {
   try {
     const {
       razao_social, nome_fantasia, cnpj_cpf, ie,
       telefone, celular, email,
       logradouro, numero, complemento, bairro, cidade, estado, cep, pais,
-      observacoes, ativo, classificacao_comercial, cidades_atendimento,
+      observacoes, ativo,
     } = req.body
 
     if (!razao_social) return res.status(400).json({ erro: 'razao_social é obrigatório' })
@@ -334,23 +351,9 @@ router.put('/clientes/:id', async (req, res) => {
       pais: pais || null,
     }
 
-    // Detecta transição pra inativo de um cliente distribuidor — precisa
-    // liberar o território dele automaticamente (mesma regra de leads.js).
-    let precisaLiberarCidades = false
-    if (ativo === false) {
-      const { data: atual } = await supabase
-        .from('clientes_erp')
-        .select('ativo, classificacao_comercial')
-        .eq('id', req.params.id)
-        .maybeSingle()
-      if (atual?.ativo !== false && (classificacao_comercial ?? atual?.classificacao_comercial) === 'distribuidor') {
-        precisaLiberarCidades = true
-      }
-    }
-
     const { data, error } = await supabase
       .from('clientes_erp')
-      .update({ razao_social, nome_fantasia, cnpj_cpf, ie, contatos, endereco, observacoes, ativo, classificacao_comercial: classificacao_comercial || null })
+      .update({ razao_social, nome_fantasia, cnpj_cpf, ie, contatos, endereco, observacoes, ativo })
       .eq('id', req.params.id)
       .select()
       .single()
@@ -358,29 +361,14 @@ router.put('/clientes/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Cliente não encontrado' })
 
-    if (precisaLiberarCidades) {
-      await liberarCidades({ clienteErpId: data.id })
-    }
+    const { data: lead } = data.legacy_id
+      ? await supabase.from('leads').select('id, tipo').eq('cliente_erp_id', data.legacy_id).maybeSingle()
+      : { data: null }
+    const cidadesAtendimentoSalvas = lead?.tipo === 'distribuidor'
+      ? await buscarCidadesAtendimento({ leadId: lead.id })
+      : []
 
-    let cidadesAtendimentoSalvas
-    if (data.classificacao_comercial === 'distribuidor') {
-      if (Array.isArray(cidades_atendimento) && data.ativo !== false) {
-        try {
-          cidadesAtendimentoSalvas = await definirCidadesAtendimento({ clienteErpId: data.id }, cidades_atendimento)
-        } catch (err) {
-          if (err.code === 'TERRITORIO_OCUPADO') {
-            return res.status(409).json({ erro: err.message })
-          }
-          throw err
-        }
-      } else {
-        cidadesAtendimentoSalvas = await buscarCidadesAtendimento({ clienteErpId: data.id })
-      }
-    } else {
-      cidadesAtendimentoSalvas = []
-    }
-
-    res.json({ ...data, cidades_atendimento: cidadesAtendimentoSalvas })
+    res.json({ ...data, lead_vinculado: lead || null, cidades_atendimento: cidadesAtendimentoSalvas })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
