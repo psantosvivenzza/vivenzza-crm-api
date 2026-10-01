@@ -256,10 +256,19 @@ export async function runMetaReport({ daysAgo = 1 } = {}) {
     fmt(getCost(c.cost_per_action_type, 'onsite_conversion.total_messaging_connection')),
   ])
 
-  const sheetName = await writeToSheets(rows, dateLabel)
-  console.log(`[meta-report] Planilha atualizada: aba "${sheetName}"`)
+  // Planilha é secundária: se a conta de serviço perder acesso ("The caller does not
+  // have permission"), o relatório no WhatsApp ainda precisa sair.
+  let sheetName = null
+  let avisoPlanilha = ''
+  try {
+    sheetName = await writeToSheets(rows, dateLabel)
+    console.log(`[meta-report] Planilha atualizada: aba "${sheetName}"`)
+  } catch (err) {
+    console.error('[meta-report] Planilha falhou (relatório segue):', err.message)
+    avisoPlanilha = '\n\n⚠️ Planilha não atualizada (sem permissão de escrita). Reconectar o compartilhamento.'
+  }
 
-  let msg = buildMessage(insights, statusMap, dateLabel, totalSpend)
+  let msg = buildMessage(insights, statusMap, dateLabel, totalSpend) + avisoPlanilha
 
   try {
     const gadsResultado = await fetchGoogleAdsDaily(dateLabel)
