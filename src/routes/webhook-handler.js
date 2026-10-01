@@ -2,6 +2,7 @@ import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone, mascararTelefone, normalizarTelefone } from '../lib/telefone.js'
 import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
+import { detectarCtwaClid, caminhosIndicioAnuncio } from '../lib/ctwa.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
 import { detectarRespostaReativacao } from './reativacao.js'
 import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
@@ -69,17 +70,7 @@ function detectarCampanhaOrigem(msg, texto) {
 // dela). Meta manda em dois formatos possíveis dependendo de como a instância está
 // conectada: referral.ctwa_clid (Cloud API oficial, snake_case) ou
 // contextInfo.externalAdReply.ctwaClid (Baileys/multi-device, camelCase).
-export function detectarCtwaClid(msg) {
-  const ref = msg.referral
-  if (ref?.ctwa_clid) return ref.ctwa_clid
-
-  const tipos = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'buttonsMessage']
-  for (const tipo of tipos) {
-    const adReply = msg.message?.[tipo]?.contextInfo?.externalAdReply
-    if (adReply?.ctwaClid) return adReply.ctwaClid
-  }
-  return null
-}
+export { detectarCtwaClid }
 
 function detectarMidia(msg, conteudo) {
   const messageType = msg.messageType || Object.keys(conteudo || {}).find(k => k !== 'messageContextInfo') || ''
@@ -326,6 +317,12 @@ export async function processWhatsappEvent(payload) {
       const origem = 'whatsapp'
       const campanha_origem = detectarCampanhaOrigem(msg, texto)
       const ctwa_clid = detectarCtwaClid(msg)
+      if (!ctwa_clid) {
+        // Diagnóstico 01/10/2026 (sem dados pessoais: só nomes de chave): mostra onde o Meta/Evolution
+        // entrega indício de anúncio quando o clid não é achado. Remover após confirmar o formato.
+        const caminhosAd = caminhosIndicioAnuncio(msg)
+        console.log('[webhook][diag-ctwa] sem clid | topo:', Object.keys(msg || {}).join(','), '| message:', Object.keys(msg?.message || {}).join(','), '| indícios:', caminhosAd.join(',') || 'nenhum')
+      }
 
       // Achado real (investigação de leads órfãos/duplicados, 2026-09-24): o
       // SELECT acima e o INSERT antigo eram duas chamadas separadas, sem lock
