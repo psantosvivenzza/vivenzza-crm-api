@@ -69,6 +69,14 @@ export function numeroNaAllowlistExterna(numero) {
   return allowlist.some((permitido) => telefonesEquivalentes(numero, permitido))
 }
 
+// Libera a fila automática para operação geral somente mediante opt-in
+// explícito. Este sinal NÃO altera chamadas manuais/canário, que continuam
+// exigindo VOICE_EXTERNAL_ALLOWLIST. Valor ausente, diferente de "true" ou
+// com erro permanece no modo piloto (fail-closed).
+export function filaVozProducaoGeralHabilitada() {
+  return String(process.env.VOICE_QUEUE_GENERAL_ENABLED || '').trim().toLowerCase() === 'true'
+}
+
 // Limites conservadores/fail-closed por padrão — defaults pequenos de
 // propósito (primeira homologação é 1 número, poucas chamadas). "0" nunca é
 // tratado como "sem limite" em nenhum guard deste módulo (ver

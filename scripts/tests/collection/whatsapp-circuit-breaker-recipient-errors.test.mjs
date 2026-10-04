@@ -54,7 +54,10 @@ test('Circuit breaker: PERMANENT_RECIPIENT nunca derruba a instância', async (t
   // Telefone terminado em "000" simula "não existe no WhatsApp" no fakeEvolution
   // (ver fakeEvolution.js linha 58) — dispara numeroInvalido=true de verdade,
   // pelo mesmo caminho de código que produção usa.
-  function telefoneInvalido(sufixo) { return `555199${sufixo}000` }
+  // runId por execução: quarentena/DNC de número inválido persiste no banco local,
+  // então um número fixo faz a 2ª execução falhar com "telefone em quarentena".
+  const runId = String(Date.now()).slice(-5) // 13+ dígitos ok pro fake
+  function telefoneInvalido(sufixo) { return `555199${runId}${sufixo}000` }
 
   await t.test('1. PERMANENT_RECIPIENT: tentativa real registrada, DNC aplicado, consecutive_failures NÃO incrementa, cooldown NÃO criado, sem 2ª instância tentada', async () => {
     await resetar()

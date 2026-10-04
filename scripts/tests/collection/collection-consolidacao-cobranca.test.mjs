@@ -155,7 +155,10 @@ test('regra de consolidação ligada de verdade no cron: grupo de 2 títulos →
     const { data: cobrancasA } = await supabase.from('cobrancas_whatsapp').select('*').in('contas_financeiras_id', [a1.id, a2.id])
     assert.equal(cobrancasA.length, 1, 'grupo de 2 títulos deveria gerar exatamente 1 registro de cobrança, nunca 2')
     assert.equal(Number(cobrancasA[0].valor), 700, 'valor da mensagem deveria ser a soma dos 2 saldos (400+300)')
-    assert.match(cobrancasA[0].mensagem_enviada, /Esse valor corresponde a 2 títulos com o mesmo vencimento\./)
+    // Correção do incidente real (2026-09-28): mensagem consolidada nunca pode
+    // mencionar quantidade de títulos/soma — precisa parecer uma cobrança normal.
+    assert.equal(cobrancasA[0].mensagem_enviada.includes('títulos'), false, 'mensagem consolidada não deve mencionar "títulos"')
+    assert.match(cobrancasA[0].mensagem_enviada, /_Andrieli — Financeiro Vivenzza_$/)
     const representanteA = cobrancasA[0].contas_financeiras_id
 
     // Grupo B — bloqueado por DNC, nenhum registro de cobrança criado (guard preservado)

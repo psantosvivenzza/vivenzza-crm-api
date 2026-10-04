@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import http from 'http'
 import jwt from 'jsonwebtoken'
 import express from 'express'
+import { adquirirLockDeTeste, liberarLockDeTeste } from './_lock.mjs'
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 
 process.env.NODE_ENV = 'test'
@@ -50,6 +51,7 @@ function criarFakeEvolutionSendMedia() {
 }
 
 before(async () => {
+  await adquirirLockDeTeste()
   fakeEvolutionServer = criarFakeEvolutionSendMedia()
   await new Promise((resolve) => fakeEvolutionServer.listen(0, '127.0.0.1', resolve))
   process.env.EVOLUTION_API_URL = `http://127.0.0.1:${fakeEvolutionServer.address().port}`
@@ -73,6 +75,7 @@ before(async () => {
 })
 
 after(async () => {
+  await liberarLockDeTeste()
   server?.close()
   await new Promise((resolve) => fakeEvolutionServer.close(resolve))
   // Mesmo achado documentado em sdr-registrar-saida-erro.test.mjs: importar

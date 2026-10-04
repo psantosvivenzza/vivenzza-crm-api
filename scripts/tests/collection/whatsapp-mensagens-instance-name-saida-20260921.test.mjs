@@ -26,6 +26,7 @@ import assert from 'node:assert/strict'
 import http from 'http'
 import express from 'express'
 import jwt from 'jsonwebtoken'
+import { adquirirLockDeTeste, liberarLockDeTeste } from './_lock.mjs'
 import { PG_USER, PG_PASSWORD, PG_PORT, PG_DATABASE } from '../../localdb-config.mjs'
 import { criarFakeEvolution } from '../fakes/fakeEvolution.js'
 import { criarFakeAnthropic } from '../fakes/fakeAnthropic.js'
@@ -81,6 +82,7 @@ function criarFakeEvolutionManual() {
 }
 
 before(async () => {
+  await adquirirLockDeTeste()
   fakeEvoLara = await criarFakeEvolution().iniciar()
   fakeClaude = await criarFakeAnthropic().iniciar()
   process.env.ANTHROPIC_BASE_URL = fakeClaude.url
@@ -132,6 +134,7 @@ function comLimiteDeTempo(promessa, ms) {
 }
 
 after(async () => {
+  await liberarLockDeTeste()
   serverSdr?.closeAllConnections?.()
   serverWhatsapp?.closeAllConnections?.()
   await comLimiteDeTempo(new Promise((r) => serverSdr ? serverSdr.close(r) : r()), 1500)

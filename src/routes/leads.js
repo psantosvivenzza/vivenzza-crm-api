@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { query as dbQuery } from '../lib/db.js'
 import { normalizarTelefone, candidatosTelefone } from '../lib/telefone.js'
+import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento, listarTerritorios } from '../lib/territorios.js'
 
 const router = Router()
 
@@ -56,6 +57,25 @@ router.get('/', async (req, res) => {
   }
 })
 
+// GET /api/leads/territorios — mapa de cidades já cobertas por distribuidor ativo.
+// Usado pelas vendedoras pra saber, antes de fechar uma venda direta/salão numa
+// cidade, se ali já tem distribuidor (e portanto se podem ou não vender).
+// Sem filtro: lista tudo. Com ?cidade=&estado=: checa uma cidade específica.
+router.get('/territorios', async (req, res) => {
+  try {
+    const { cidade, estado } = req.query
+    const territorios = await listarTerritorios({ cidade, estado })
+
+    if (cidade && estado) {
+      return res.json({ ocupado: territorios.length > 0, distribuidor: territorios[0]?.distribuidor ?? null })
+    }
+
+    res.json({ data: territorios })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
 // GET /api/leads/:id — detalhe
 router.get('/:id', async (req, res) => {
   try {
@@ -72,7 +92,9 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ erro: 'Sem permissão para acessar este lead' })
     }
 
-    res.json({ ...data, cliente_erp_vinculado: data.clientes_erp ?? null })
+    const cidadesAtendimento = data.tipo === 'distribuidor' ? await buscarCidadesAtendimento({ leadId: data.id }) : []
+
+    res.json({ ...data, cliente_erp_vinculado: data.clientes_erp ?? null, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -81,7 +103,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/leads — criar
 router.post('/', async (req, res) => {
   try {
-    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor, valor_negociacao, observacoes, origem } = req.body
+    const { nome, email, telefone, empresa, etapa = 'novo', tipo, valor, valor_negociacao, observacoes, origem, cidade, estado, ativo, cidades_atendimento } = req.body
 
     if (!nome) return res.status(400).json({ erro: 'Campo "nome" é obrigatório' })
 
@@ -110,7 +132,11 @@ router.post('/', async (req, res) => {
 
     const { data: lead, error: leadError } = await supabase
       .from('leads')
-      .insert({ nome, email: email || null, telefone: telefoneNormalizado, empresa, etapa, tipo, valor, valor_negociacao, observacoes, origem, responsavel_id: req.user.id })
+      .insert({
+        nome, email: email || null, telefone: telefoneNormalizado, empresa, etapa, tipo, valor, valor_negociacao,
+        observacoes, origem, responsavel_id: req.user.id,
+        cidade: cidade || null, estado: estado || null, ativo: ativo ?? true,
+      })
       .select()
       .single()
 
@@ -125,7 +151,21 @@ router.post('/', async (req, res) => {
       if (contatoError) throw contatoError
     }
 
-    res.status(201).json(lead)
+    let cidadesAtendimento = []
+    if (tipo === 'distribuidor' && Array.isArray(cidades_atendimento) && cidades_atendimento.length) {
+      try {
+        cidadesAtendimento = await definirCidadesAtendimento({ leadId: lead.id }, cidades_atendimento)
+      } catch (err) {
+        if (err.code === 'TERRITORIO_OCUPADO') {
+          // O lead já foi criado; devolve 201 com aviso em vez de rollback manual
+          // (não há transação cross-table aqui) — a vendedora ajusta as cidades depois.
+          return res.status(201).json({ ...lead, cidades_atendimento: [], aviso_territorio: err.message })
+        }
+        throw err
+      }
+    }
+
+    res.status(201).json({ ...lead, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
@@ -144,18 +184,27 @@ router.put('/:id', async (req, res) => {
     const campos = req.body
     delete campos.id
     delete campos.created_at
+    const cidadesAtendimentoNovas = campos.cidades_atendimento
+    delete campos.cidades_atendimento
 
     if (campos.telefone !== undefined) {
       campos.telefone = normalizarTelefone(campos.telefone)
     }
 
-    // Detecta transição para/de 'fechado' para registrar fechado_em
-    if (campos.etapa !== undefined) {
-      const { data: atual } = await supabase.from('leads').select('etapa').eq('id', req.params.id).single()
-      if (campos.etapa === 'fechado' && atual?.etapa !== 'fechado') {
-        campos.fechado_em = new Date().toISOString()
-      } else if (campos.etapa !== 'fechado' && atual?.etapa === 'fechado') {
-        campos.fechado_em = null
+    // Detecta transição para/de 'fechado' para registrar fechado_em, e transição
+    // de ativo→inativo pra saber se precisa liberar as cidades do distribuidor.
+    let precisaLiberarCidades = false
+    if (campos.etapa !== undefined || campos.ativo !== undefined) {
+      const { data: atual } = await supabase.from('leads').select('etapa, tipo, ativo').eq('id', req.params.id).single()
+      if (campos.etapa !== undefined) {
+        if (campos.etapa === 'fechado' && atual?.etapa !== 'fechado') {
+          campos.fechado_em = new Date().toISOString()
+        } else if (campos.etapa !== 'fechado' && atual?.etapa === 'fechado') {
+          campos.fechado_em = null
+        }
+      }
+      if (campos.ativo === false && atual?.ativo !== false && (campos.tipo ?? atual?.tipo) === 'distribuidor') {
+        precisaLiberarCidades = true
       }
     }
 
@@ -169,7 +218,31 @@ router.put('/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Lead não encontrado' })
 
-    res.json(data)
+    // Inativou um distribuidor → libera automaticamente as cidades que ele
+    // cobria, pra outro distribuidor poder assumir a praça.
+    if (precisaLiberarCidades) {
+      await liberarCidades({ leadId: data.id })
+    }
+
+    let cidadesAtendimento
+    if (data.tipo === 'distribuidor') {
+      if (Array.isArray(cidadesAtendimentoNovas) && data.ativo !== false) {
+        try {
+          cidadesAtendimento = await definirCidadesAtendimento({ leadId: data.id }, cidadesAtendimentoNovas)
+        } catch (err) {
+          if (err.code === 'TERRITORIO_OCUPADO') {
+            return res.status(409).json({ erro: err.message })
+          }
+          throw err
+        }
+      } else {
+        cidadesAtendimento = await buscarCidadesAtendimento({ leadId: data.id })
+      }
+    } else {
+      cidadesAtendimento = []
+    }
+
+    res.json({ ...data, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

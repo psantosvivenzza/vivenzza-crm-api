@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
+import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento } from '../lib/territorios.js'
 
 const router = Router()
 
@@ -42,7 +43,13 @@ router.get('/clientes', async (req, res) => {
       .range(offset, offset + Number(limit) - 1)
 
     if (q) {
-      const { data: idsBusca, error: erroBusca } = await supabase.rpc('clientes_erp_busca', { termo: q })
+      // A coluna CÓDIGO da própria tela mostra o código como "#001286" — é
+      // natural o usuário copiar/digitar com o "#". `legacy_id` no banco
+      // nunca tem esse caractere, então "#001286" não batia com nada (achado
+      // real, 2026-10-01: Quais buscou e não encontrou). Remove um "#" no
+      // início do termo antes de mandar pra busca.
+      const termoBusca = String(q).trim().replace(/^#/, '')
+      const { data: idsBusca, error: erroBusca } = await supabase.rpc('clientes_erp_busca', { termo: termoBusca })
       if (erroBusca) throw erroBusca
       const ids = (idsBusca || []).map((r) => r.id)
       // Sem resultado nenhum: força um IN vazio pra retornar lista vazia em
@@ -242,16 +249,26 @@ router.put('/clientes/:id/vendedor', async (req, res) => {
     const vendedorAnteriorId = clienteAtual.vendedor_responsavel_usuario_id || null
     const vendedorNovoId = vendedor_novo_id || null
 
-    // Sem mudança real: não grava histórico nem faz update à toa.
+    // Sem mudança de vendedor: não grava histórico nem faz update de
+    // vendedor_responsavel_usuario_id à toa — mas ainda assim trava a
+    // atribuição como manual (vendedor_atribuicao_manual=true), senão um
+    // "confirmar responsável atual" pela tela não protegeria o cliente do
+    // próximo sync do NetVision.
     if (vendedorAnteriorId === vendedorNovoId) {
+      await supabase.from('clientes_erp').update({ vendedor_atribuicao_manual: true }).eq('id', req.params.id)
       return res.json({ alterado: false, mensagem: 'Vendedor responsável já é este — nenhuma alteração feita.' })
     }
 
-    // Atualiza SOMENTE clientes_erp.vendedor_responsavel_usuario_id — nunca
-    // toca pedidos/comissoes/contas_financeiras, por regra explícita.
+    // Atualiza clientes_erp.vendedor_responsavel_usuario_id — nunca toca
+    // pedidos/comissoes/contas_financeiras, por regra explícita. Também marca
+    // vendedor_atribuicao_manual=true: a partir daqui, o sync automático do
+    // NetVision (que resolve vendedor_responsavel_usuario_id a partir de
+    // representante_nome via trigger) NUNCA mais sobrescreve este cliente —
+    // transferência feita por aqui é definitiva até a próxima transferência
+    // manual, mesmo que o representante no NetVision continue diferente.
     const { data: clienteAtualizado, error: erroUpdate } = await supabase
       .from('clientes_erp')
-      .update({ vendedor_responsavel_usuario_id: vendedorNovoId })
+      .update({ vendedor_responsavel_usuario_id: vendedorNovoId, vendedor_atribuicao_manual: true })
       .eq('id', req.params.id)
       .select('id, vendedor_responsavel_usuario_id')
       .single()
@@ -276,6 +293,13 @@ router.put('/clientes/:id/vendedor', async (req, res) => {
 })
 
 // GET /api/admin/erp/clientes/:id — detalhe + histórico de vendas
+//
+// Unificação de cadastro CRM/ERP (2026-10-01): classificação comercial e
+// território de distribuidor vivem só no lead vinculado
+// (`leads.cliente_erp_id`), que desde o backfill de 2026-10-01 existe pra
+// todo clientes_erp — nunca um campo duplicado em clientes_erp. Esta rota
+// devolve `lead_vinculado` (id + tipo) pro frontend exibir/editar esse dado
+// aqui mesmo (ver PUT /clientes/:id/classificacao) sem duplicar a coluna.
 router.get('/clientes/:id', async (req, res) => {
   try {
     const [clienteRes, vendasRes] = await Promise.all([
@@ -291,13 +315,27 @@ router.get('/clientes/:id', async (req, res) => {
         .limit(30),
     ])
     if (clienteRes.error) throw clienteRes.error
-    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [] })
+
+    const { data: lead } = clienteRes.data?.legacy_id
+      ? await supabase.from('leads').select('id, tipo, ativo').eq('cliente_erp_id', clienteRes.data.legacy_id).maybeSingle()
+      : { data: null }
+
+    const cidadesAtendimento = lead?.tipo === 'distribuidor'
+      ? await buscarCidadesAtendimento({ leadId: lead.id })
+      : []
+
+    res.json({ cliente: clienteRes.data, vendas: vendasRes.data || [], lead_vinculado: lead || null, cidades_atendimento: cidadesAtendimento })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }
 })
 
-// PUT /api/admin/erp/clientes/:id — edição de cadastro
+// PUT /api/admin/erp/clientes/:id — edição de cadastro (dados fiscais/
+// contato/endereço). Classificação comercial e cidades de atendimento
+// continuam fora daqui, de propósito — ver PUT /clientes/:id/classificacao,
+// que escreve no MESMO lead vinculado (nunca um campo duplicado em
+// clientes_erp). `classificacao_comercial` no corpo é ignorado (não quebra
+// clientes antigos do frontend em cache durante o deploy).
 router.put('/clientes/:id', async (req, res) => {
   try {
     const {
@@ -338,7 +376,86 @@ router.put('/clientes/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ erro: 'Cliente não encontrado' })
 
-    res.json(data)
+    const { data: lead } = data.legacy_id
+      ? await supabase.from('leads').select('id, tipo').eq('cliente_erp_id', data.legacy_id).maybeSingle()
+      : { data: null }
+    const cidadesAtendimentoSalvas = lead?.tipo === 'distribuidor'
+      ? await buscarCidadesAtendimento({ leadId: lead.id })
+      : []
+
+    res.json({ ...data, lead_vinculado: lead || null, cidades_atendimento: cidadesAtendimentoSalvas })
+  } catch (err) {
+    res.status(500).json({ erro: err.message })
+  }
+})
+
+// PUT /api/admin/erp/clientes/:id/classificacao — edita classificação (tipo)
+// e território (cidades de atendimento) direto da tela do ERP.
+//
+// Segunda ponta de entrada pro MESMO dado do PUT /api/leads/:id (mirror
+// proposital da lógica lá) — acha o lead vinculado via
+// clientes_erp.legacy_id = leads.cliente_erp_id e escreve nele. Não cria um
+// campo novo em clientes_erp: é o pedido do Quais de 2026-10-01 ("não
+// podemos ter dois cadastros em locais diferentes" é sobre o DADO, não
+// sobre a TELA — editar daqui ou do Pipeline grava o mesmo registro).
+router.put('/clientes/:id/classificacao', async (req, res) => {
+  try {
+    const { tipo, cidades_atendimento } = req.body
+
+    const { data: cliente, error: erroCliente } = await supabase
+      .from('clientes_erp')
+      .select('id, legacy_id')
+      .eq('id', req.params.id)
+      .maybeSingle()
+    if (erroCliente) throw erroCliente
+    if (!cliente) return res.status(404).json({ erro: 'Cliente não encontrado' })
+    if (!cliente.legacy_id) return res.status(400).json({ erro: 'Cliente sem código legado — não é possível localizar o lead vinculado' })
+
+    const { data: lead, error: erroLead } = await supabase
+      .from('leads')
+      .select('id, tipo, ativo')
+      .eq('cliente_erp_id', cliente.legacy_id)
+      .maybeSingle()
+    if (erroLead) throw erroLead
+    if (!lead) return res.status(404).json({ erro: 'Lead vinculado não encontrado — contate o suporte' })
+
+    const tipoAnterior = lead.tipo
+    const tipoNovo = tipo !== undefined ? (tipo || null) : tipoAnterior
+
+    if (tipo !== undefined && tipoNovo !== tipoAnterior) {
+      const { error: erroUpdateLead } = await supabase
+        .from('leads')
+        .update({ tipo: tipoNovo, updated_at: new Date().toISOString() })
+        .eq('id', lead.id)
+      if (erroUpdateLead) throw erroUpdateLead
+    }
+
+    // Deixou de ser distribuidor agora: libera o território automaticamente
+    // (mesma regra do PUT /api/leads/:id).
+    if (tipoAnterior === 'distribuidor' && tipoNovo !== 'distribuidor') {
+      await liberarCidades({ leadId: lead.id })
+    }
+
+    let cidadesAtendimentoFinal
+    if (tipoNovo === 'distribuidor') {
+      if (Array.isArray(cidades_atendimento)) {
+        try {
+          cidadesAtendimentoFinal = await definirCidadesAtendimento({ leadId: lead.id }, cidades_atendimento)
+        } catch (err) {
+          if (err.code === 'TERRITORIO_OCUPADO') return res.status(409).json({ erro: err.message })
+          throw err
+        }
+      } else {
+        cidadesAtendimentoFinal = await buscarCidadesAtendimento({ leadId: lead.id })
+      }
+    } else {
+      cidadesAtendimentoFinal = []
+    }
+
+    res.json({
+      lead_vinculado: { id: lead.id, tipo: tipoNovo, ativo: lead.ativo },
+      cidades_atendimento: cidadesAtendimentoFinal,
+    })
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

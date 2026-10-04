@@ -57,7 +57,11 @@ import {
   avaliarGuardsTituloParaLigacao,
   avaliarGuardGlobalParaLigacao,
 } from '../../src/lib/voice/collectionGuardsForVoice.js'
-import { lerLimitesVoz, numeroNaAllowlistExterna } from '../../src/lib/voice/externalConfig.js'
+import {
+  filaVozProducaoGeralHabilitada,
+  lerLimitesVoz,
+  numeroNaAllowlistExterna,
+} from '../../src/lib/voice/externalConfig.js'
 import { idempotencyKeyLigacaoExterna } from '../../src/lib/collection/idempotency.js'
 import { hojeBrtISO } from '../../src/lib/collection/collectionContactPolicy.js'
 import { mascararTelefone } from '../../src/lib/telefone.js'
@@ -85,14 +89,21 @@ const POLITICA_HORARIO = {
 
 function log(msg) { console.log(`[fila-cobranca] ${msg}`) }
 
-// Único ponto de decisão de allowlist do dispatcher automático — exportado
-// pra ser testável sem depender de Supabase/ARI (main() nunca é chamado ao
-// importar este módulo, ver isMain no fim do arquivo). NUNCA usa `numero`
-// como fonte da allowlist — só a externa/configurada. `verificarNaAllowlist`
-// é injetável só para teste (erro de leitura/comparação); em produção é
-// sempre numeroNaAllowlistExterna (env VOICE_EXTERNAL_ALLOWLIST).
-export function resolverAllowlistParaAutorizacao(numero, verificarNaAllowlist = numeroNaAllowlistExterna) {
+// Único ponto de decisão do gate de destinatário do dispatcher automático —
+// exportado pra ser testável sem depender de Supabase/ARI. No modo piloto,
+// usa somente a allowlist externa. No modo geral, exige o opt-in explícito
+// VOICE_QUEUE_GENERAL_ENABLED=true e vale apenas para candidatos desta fila;
+// chamadas manuais continuam dependendo da allowlist.
+export function resolverAllowlistParaAutorizacao(
+  numero,
+  verificarNaAllowlist = numeroNaAllowlistExterna,
+  verificarModoGeral = filaVozProducaoGeralHabilitada,
+) {
   try {
+    // O opt-in vale exclusivamente neste dispatcher. O número ainda precisa
+    // ter vindo da view de elegibilidade e passar por todos os guards abaixo.
+    // Chamadas manuais continuam usando a allowlist real.
+    if (verificarModoGeral()) return { allowlist: [numero], erro: null, modo: 'producao_geral' }
     return { allowlist: verificarNaAllowlist(numero) ? [numero] : [], erro: null }
   } catch (err) {
     return { allowlist: [], erro: `erro_leitura_allowlist: ${err.message}` }
@@ -244,10 +255,10 @@ async function main() {
       diaBrt: hojeBrtISO(),
     })
 
-    // A fila é a fonte de ELEGIBILIDADE; a allowlist é sempre a
-    // externa/configurada — nunca o próprio número (ver cabeçalho, achado
-    // f8cb81c9). Erro/ausência/vazio/malformado bloqueia ANTES de qualquer
-    // tentativa de originar.
+    // A fila é a fonte de ELEGIBILIDADE. Em piloto, exige a allowlist externa;
+    // em produção geral, exige o opt-in explícito e ainda passa por todos os
+    // guards financeiros, legais e de telefonia. Erro bloqueia antes de
+    // qualquer tentativa de originar.
     const { allowlist, erro: erroAllowlist } = resolverAllowlistParaAutorizacao(numero)
     if (erroAllowlist) {
       log(`BLOQUEADO ${rotulo}: ${erroAllowlist}`)
