@@ -73,7 +73,7 @@ export function montarSaudacao(clienteNome, agora = new Date()) {
 
 export const FRASE_NAO_ENTENDI = 'Desculpa, não consegui te ouvir bem. Pode repetir, por favor?'
 export function fraseDespedida(agora = new Date()) {
-  return `Tudo bem. Vou encerrar por aqui, e a Vivenzza retorna depois. Obrigada, e ${saudacaoDoDia(agora)}!`
+  return `Tudo bem. Obrigada pela atenção. Tenha ${saudacaoDoDia(agora) === 'bom dia' ? 'um bom dia' : saudacaoDoDia(agora) === 'boa tarde' ? 'uma boa tarde' : 'uma boa noite'}!`
 }
 
 // Encerramento de conversa que foi BEM, depois de os turnos se esgotarem.
@@ -85,4 +85,4 @@ export function fraseEncerramentoNormal(agora = new Date()) {
 // Quando a pessoa pede para falar com um humano. Desligar em cima desse
 // pedido é a pior coisa que um robô de cobrança pode fazer.
 export const FRASE_TRANSFERIR_HUMANO =
-  'Claro. Vou registrar aqui e uma pessoa da Vivenzza entra em contato com você. Obrigada pela atenção!'
+  'Claro. Para tratar dos detalhes, fale com nossa equipe financeira pelo canal oficial da Vivenzza. Obrigada pela atenção!'
