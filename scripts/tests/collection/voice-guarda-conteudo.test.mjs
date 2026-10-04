@@ -7,6 +7,14 @@ import { filtrarFalaDoRobo, avaliarConfirmacaoResponsavel, mencionaAssuntoFinanc
 import { montarSaudacao, primeiroNome, saudacaoDoDia } from '../../../src/lib/voice/saudacao.js'
 import { validarTelefoneBrasileiro } from '../../../src/lib/voice/outboundExternalTest.js'
 
+test('pergunta sobre identidade do chamador nao confirma responsavel nem libera valores', () => {
+  for (const texto of ['Quem fala?', 'Quem fala, por favor?', 'Quero saber quem fala']) {
+    const confirmado = avaliarConfirmacaoResponsavel(texto)
+    assert.equal(confirmado, false)
+    assert.equal(filtrarFalaDoRobo('Ha um boleto de R$ 230,00', { responsavelConfirmado: confirmado }).bloqueado, true)
+  }
+})
+
 test('NUNCA fala de dívida antes de a pessoa confirmar que é a responsável (Art. 42 CDC)', () => {
   const tentativas = [
     'Estou ligando sobre uma cobrança em aberto',
