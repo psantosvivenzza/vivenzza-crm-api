@@ -8,7 +8,10 @@ const router = Router()
 // autenticado precisa poder buscar cliente pra criar um pedido, não só admin.
 router.get('/busca', async (req, res) => {
   try {
-    const termo = (req.query.search || '').trim()
+    // O código aparece na tela como "#001286" — tira um "#" do início pra não
+    // perder o match quando o usuário busca exatamente como vê (mesmo achado
+    // do admin, 2026-10-01).
+    const termo = (req.query.search || '').trim().replace(/^#/, '')
     if (termo.length < 2) return res.json([])
 
     const like = `%${termo}%`
@@ -16,7 +19,7 @@ router.get('/busca', async (req, res) => {
       .from('clientes_erp')
       .select('id, legacy_id, tipo, razao_social, nome_fantasia, cnpj_cpf, ie, endereco, contatos, data_ultima_compra')
       .eq('ativo', true)
-      .or(`razao_social.ilike.${like},nome_fantasia.ilike.${like},cnpj_cpf.ilike.${like}`)
+      .or(`razao_social.ilike.${like},nome_fantasia.ilike.${like},cnpj_cpf.ilike.${like},legacy_id.ilike.${like}`)
       .order('razao_social')
       .limit(15)
 

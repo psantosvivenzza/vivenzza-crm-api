@@ -181,12 +181,40 @@ export function montarClienteParaCriar(row) {
 }
 
 /**
+ * Unificação de cadastro CRM/ERP (2026-10-01, decisão do Quais: "não podemos
+ * ter dois [cadastros] em locais diferentes"): classificação comercial,
+ * território de distribuidor, WhatsApp e histórico vivem só em `leads` — um
+ * clientes_erp sem lead vinculado não consegue ter nada disso. Todo
+ * clientes_erp PRECISA nascer com um lead (`cliente_erp_id`), nunca só o
+ * backfill único resolver isso uma vez. Ver
+ * scripts/backfill-leads-clientes-erp-unificacao.mjs para o backfill dos
+ * 1.978 que já existiam sem lead antes desta mudança.
+ */
+function montarLeadParaCriar(payload) {
+  const telefoneRaw = payload.contatos.find((c) => ['celular', 'fone'].includes(c.tipo))?.valor
+  const email = payload.contatos.find((c) => c.tipo === 'email')?.valor
+  return {
+    nome: `${payload.legacy_id}- ${payload.nome_fantasia || payload.razao_social}`,
+    empresa: payload.razao_social,
+    tipo: null, // não advinhar classificação — fica pro time preencher
+    etapa: 'fechado', // já é cliente real (vindo do ERP), não prospect de funil
+    origem: 'erp_legado',
+    telefone: telefoneRaw ? telefoneRaw.replace(/\D/g, '') || null : null,
+    email: email || null,
+    cliente_erp_id: payload.legacy_id,
+    ativo: payload.ativo,
+    cidade: payload.endereco?.cidade || null,
+    estado: payload.endereco?.estado || null,
+  }
+}
+
+/**
  * Compara Pessoas(Cliente=1) com clientes_erp e cria os que faltam.
  * `dryRun: true` só reporta o que seria criado, não grava nada.
  */
 export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = null, log = console.log } = {}) {
   const pool = poolE01 ?? await conectarE01()
-  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0 }
+  const contadores = { total_netvision: 0, total_ja_existente: 0, total_criado: 0, total_lead_criado: 0, total_lead_com_erro: 0, total_marcado_revisao: 0, total_contato_acrescentado: 0, total_conflito_contato: 0, total_com_erro: 0, total_representante_atualizado: 0 }
   const criados = []
   const contatosAcrescentados = []
   const conflitosContato = []
@@ -205,7 +233,7 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
     // avaliado (merge aditivo), então não basta saber que existe.
     const existentes = new Map()
     for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await supabase.from('clientes_erp').select('id, legacy_id, razao_social, contatos').range(offset, offset + 999)
+      const { data, error } = await supabase.from('clientes_erp').select('id, legacy_id, razao_social, contatos, representante_nome').range(offset, offset + 999)
       if (error) throw error
       for (const r of data) existentes.set(r.legacy_id, r)
       if (data.length < 1000) break
@@ -249,6 +277,37 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
       const jaExiste = existentes.get(codigo)
       if (jaExiste) {
         contadores.total_ja_existente++
+
+        // ACHADO 2026-10-01 (pós-trigger de sincronização de vendedor):
+        // representante_nome, antes, só era gravado na criação — nunca
+        // atualizado depois. O Quais pediu explicitamente que mudanças no
+        // representante do NetVision sejam puxadas e refletidas aqui. A
+        // resolução pra vendedor_responsavel_usuario_id (e daí pra
+        // leads.responsavel_id) acontece via trigger no banco
+        // (fn_resolver_vendedor_por_representante + fn_sync_lead_responsavel_
+        // from_cliente_erp) — aqui só precisamos manter representante_nome
+        // fiel ao NetVision. Uma transferência manual feita pela tela (que
+        // marca vendedor_atribuicao_manual=true) nunca é sobrescrita por
+        // este update, mesmo que o representante no NetVision continue
+        // apontando pro nome antigo.
+        const representanteNovo = trim(row.Representante) || null
+        if (representanteNovo !== (jaExiste.representante_nome || null)) {
+          contadores.total_representante_atualizado++
+          if (!dryRun) {
+            try {
+              const { error: erroRepresentante } = await supabase
+                .from('clientes_erp')
+                .update({ representante_nome: representanteNovo })
+                .eq('id', jaExiste.id)
+              if (erroRepresentante) throw erroRepresentante
+            } catch (err) {
+              contadores.total_com_erro++
+              erros.push({ legacy_id: codigo, mensagem: `erro ao atualizar representante: ${err.message}` })
+              log(`[sync-clientes-legado] erro ao atualizar representante de ${codigo}: ${err.message}`)
+            }
+          }
+        }
+
         const merge = mesclarContatosAditivo(jaExiste.contatos, row, { donoDaChave, legacyId: codigo, ambiguosNaOrigem })
 
         for (const conflito of merge.conflitos) {
@@ -347,6 +406,21 @@ export async function executarSincronizacaoClientes({ dryRun = true, poolE01 = n
         contadores.total_com_erro++
         erros.push({ legacy_id: codigo, mensagem: err.message })
         log(`[sync-clientes-legado] erro ao criar ${codigo}: ${err.message}`)
+        continue
+      }
+
+      // Unificação CRM/ERP: clientes_erp criado com sucesso precisa nascer
+      // já com lead vinculado (ver montarLeadParaCriar acima). Falha aqui
+      // NÃO desfaz o clientes_erp já criado — fica sem lead até o próximo
+      // backfill (scripts/backfill-leads-clientes-erp-unificacao.mjs, que é
+      // idempotente e seguro de rodar de novo) pegar o que faltou.
+      try {
+        const { error } = await supabase.from('leads').insert(montarLeadParaCriar(payload))
+        if (error) throw error
+        contadores.total_lead_criado++
+      } catch (err) {
+        contadores.total_lead_com_erro++
+        log(`[sync-clientes-legado] cliente ${codigo} criado mas lead vinculado falhou: ${err.message}`)
       }
     }
 
