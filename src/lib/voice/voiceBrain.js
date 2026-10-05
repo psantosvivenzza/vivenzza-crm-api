@@ -83,6 +83,15 @@ async function gerarRespostaVoz(textoTranscrito, intent) {
 }
 
 export async function responderTurno(textoTranscrito) {
+  // Perguntar quem ligou nao confirma identidade. Resposta deterministica
+  // evita a LLM agradecer uma confirmacao que nunca ocorreu.
+  if (/\bquem (fala|esta falando|está falando|[ée])\b/i.test(String(textoTranscrito || ''))) {
+    return {
+      intent: 'DUVIDA_GERAL', confidence: 1, requiresHuman: false,
+      respostaTexto: 'Sou a assistente virtual da Vivenzza Professional. Posso falar com o responsável pelo cadastro?',
+      aiProvider: 'deterministic',
+    }
+  }
   const classificacao = await classificarIntencao(textoTranscrito)
   // Mesma regra do WhatsApp: alguns intents SEMPRE exigem humano,
   // independente de confidence — classificarIntencao() sozinho não aplica

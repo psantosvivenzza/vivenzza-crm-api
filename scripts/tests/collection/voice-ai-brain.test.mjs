@@ -17,6 +17,16 @@ const SCRIPTS = path.join(__dirname, '..', '..', '..', 'scripts')
 process.env.AI_PROVIDER = 'mock'
 process.env.LOCAL_PG_URL = process.env.LOCAL_PG_URL || 'postgres://postgres:localdev_only_2026@127.0.0.1:5433/vivenzza_dev'
 
+test('quem fala recebe apresentacao sem falsa confirmacao', async () => {
+  const { responderTurno } = await import('../../../src/lib/voice/voiceBrain.js')
+  for (const texto of ['Quem fala?', 'Quem está falando?']) {
+    const r = await responderTurno(texto)
+    assert.equal(r.aiProvider, 'deterministic')
+    assert.match(r.respostaTexto, /assistente virtual/)
+    assert.doesNotMatch(r.respostaTexto, /confirm|pagamento|boleto|saldo/i)
+  }
+})
+
 test('Voice AI: voiceBrain.js reaproveita o mesmo cérebro do WhatsApp', async (t) => {
   const { responderTurno } = await import('../../../src/lib/voice/voiceBrain.js')
 
