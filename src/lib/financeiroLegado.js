@@ -384,3 +384,84 @@ export function dataISO(v) {
   if (br) return `${br[3]}-${br[2]}-${br[1]}`
   return null
 }
+
+// ---------------------------------------------------------------------------
+// Títulos "órfãos": abertos no CRM, inexistentes no NetVision
+// ---------------------------------------------------------------------------
+//
+// ACHADO 2026-10-05 (cliente Renan Rodrigues Freitas pagou e a régua seguia
+// cobrando): quando o financeiro refaz um parcelamento no NetVision, as linhas
+// antigas de CR_Duplicatas são APAGADAS (não canceladas) e entram títulos novos
+// com outro número. O CRM só atualizava títulos que o ERP ainda devolvia — as
+// parcelas antigas nunca mais eram tocadas e ficavam `aberta` pra sempre,
+// cobradas pela régua. A conferência já enxergava (`so_no_crm`), mas só avisava.
+//
+// Regra: depois de uma VARREDURA COMPLETA, título de cliente com legacy_id de
+// origem ERP (cr-N-S / 001-N-S) que não existe mais no NetVision sai da cobrança:
+//   - sem nada pago  → `cancelada`
+//   - com pagamento parcial → vai pra revisão financeira (alguém decide; dinheiro
+//     recebido nunca é apagado nem reclassificado em silêncio)
+//
+// Travas (todas precisam passar, senão NADA é aplicado e o motivo é devolvido):
+//   - só varredura completa e só com leitura do ERP plausível (um e01 que
+//     devolveu poucas linhas não pode "apagar" o CRM inteiro);
+//   - só título com codigo_cliente (cobrança de cliente; lançamento sem cliente
+//     não é alvo da régua);
+//   - teto por ciclo — acima disso é anomalia, não limpeza;
+//   - vencimento obrigatório e título nunca criado a menos de 2 dias.
+
+export const ORFAO_STATUS_COBRAVEIS = ['aberta', 'vencida', 'pago_parcial']
+export const ORFAO_LIMITE_POR_CICLO = 60
+export const ORFAO_MIN_LINHAS_ERP = 1000
+export const ORFAO_MIN_FRACAO_ERP = 0.8
+
+const RE_ORIGEM_ERP = /^(?:cr|001)-(\d+)-(\d+)$/
+
+/**
+ * @param {object}   p
+ * @param {Iterable<object>} p.contasCrm      títulos do CRM (id, legacy_id, status, valor_pago, codigo_cliente, ...)
+ * @param {Set<string>} p.chavesNoErp         todas as chaves ("cr-N-S" e "001-N-S") vistas na varredura completa
+ * @param {number}   p.linhasLidasErp         linhas lidas do CR_Duplicatas nesta varredura
+ * @param {boolean}  p.varreduraCompleta
+ * @returns {{ aplicavel: boolean, motivo?: string, cancelar: object[], revisar: object[] }}
+ */
+export function identificarTitulosOrfaos({ contasCrm, chavesNoErp, linhasLidasErp, varreduraCompleta }) {
+  const vazio = { cancelar: [], revisar: [] }
+  if (!varreduraCompleta) return { aplicavel: false, motivo: 'incremental', ...vazio }
+
+  const deOrigemErp = []
+  for (const c of contasCrm) {
+    if (c.legacy_id && RE_ORIGEM_ERP.test(c.legacy_id)) deOrigemErp.push(c)
+  }
+  if (linhasLidasErp < ORFAO_MIN_LINHAS_ERP || linhasLidasErp < deOrigemErp.length * ORFAO_MIN_FRACAO_ERP) {
+    return {
+      aplicavel: false,
+      motivo: `leitura do ERP implausível (${linhasLidasErp} linhas para ${deOrigemErp.length} títulos de origem ERP no CRM)`,
+      ...vazio,
+    }
+  }
+
+  const cancelar = []
+  const revisar = []
+  for (const c of deOrigemErp) {
+    if (!ORFAO_STATUS_COBRAVEIS.includes(c.status)) continue
+    if (!c.codigo_cliente || !String(c.codigo_cliente).trim()) continue
+    if (!c.vencimento) continue
+    const m = c.legacy_id.match(RE_ORIGEM_ERP)
+    const num = m[1]
+    const seq = Number(m[2])
+    if (chavesNoErp.has(`cr-${num}-${seq}`) || chavesNoErp.has(`001-${num}-${seq}`)) continue
+    if (c.created_at && Date.now() - new Date(c.created_at).getTime() < 2 * 86400000) continue
+    if (Number(c.valor_pago || 0) > 0.005) revisar.push(c)
+    else cancelar.push(c)
+  }
+
+  if (cancelar.length + revisar.length > ORFAO_LIMITE_POR_CICLO) {
+    return {
+      aplicavel: false,
+      motivo: `${cancelar.length + revisar.length} órfãos acima do teto de ${ORFAO_LIMITE_POR_CICLO} por ciclo — tratar como anomalia, nada foi alterado`,
+      cancelar, revisar,
+    }
+  }
+  return { aplicavel: true, cancelar, revisar }
+}
