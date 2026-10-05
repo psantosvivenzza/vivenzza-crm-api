@@ -11,6 +11,8 @@ import { copyFile, mkdir, rm } from 'node:fs/promises'
 import { transcrever, iniciarSttWorker, aguardarSttPronto } from './sttBridge.js'
 import { sintetizar, iniciarTtsWorker, aguardarTtsPronto } from './ttsBridge.js'
 import { responderTurno, aquecerCerebro } from './voiceBrain.js'
+import { carregarContextoFinanceiroVoz } from './financialVoiceContext.js'
+import { responderCobrancaVoz } from './financialVoiceDialogue.js'
 import { inspecionarWav } from './wavInspector.js'
 import { ENDPOINT_PERMITIDO, APP_ARGS_MARCADOR, classificarCausaSemAtendimento } from './outboundInternalTest.js'
 import { ENDPOINT_EXTERNO_NVOIP } from './destinoResolver.js'
@@ -298,9 +300,17 @@ export async function iniciarServicoVoz() {
       let turno = 1
       let reprompts = 0
       const estadoConversa = { responsavelConfirmado: false }
+      if (ehOutbound) {
+        const numero = await new Promise(resolve => {
+          channel.getChannelVar({ variable: 'VIVENZZA_COBRANCA_NUMERO' }, (err, res) => resolve(err ? null : res?.value))
+        })
+        if (numero) estadoConversa.numeroCobranca = numero
+      }
       let encerramentoFalado = false
-      for (; turno <= MAX_TURNOS; turno++) {
-        console.log(`[voice-ai] === turno ${turno}/${MAX_TURNOS} channel=${channel.id} ===`)
+      // Identity + availability + financial question + answer need more than two turns.
+      const maxTurnosDaChamada = estadoConversa.numeroCobranca ? Math.max(MAX_TURNOS, 6) : MAX_TURNOS
+      for (; turno <= maxTurnosDaChamada; turno++) {
+        console.log(`[voice-ai] === turno ${turno}/${maxTurnosDaChamada} channel=${channel.id} ===`)
         const continuar = await executarTurno(client, channel, turno, estadoConversa)
         if (!continuar.ok) {
           // ACHADO REAL (17/09/2026): quando o STT nao entendia, o loop
@@ -687,7 +697,9 @@ async function executarTurno(client, channel, numeroTurno, estado = { responsave
 
     let resultado
     let llmMs = 0
-    if (negouIdentidade) {
+    if (estado.numeroCobranca) {
+      resultado = await responderCobrancaVoz(transcript, estado, () => carregarContextoFinanceiroVoz({ callId: channel.id, numero: estado.numeroCobranca }))
+    } else if (negouIdentidade) {
       resultado = { intent: 'NAO_E_O_RESPONSAVEL', requiresHuman: false, respostaTexto: RESPOSTA_ASSUNTO_A_TERCEIRO }
       console.log(`[voice-ai] ATALHO_SEM_LLM turno=${numeroTurno} channel=${channel.id} motivo=negacao_de_identidade`)
     } else {
@@ -699,7 +711,7 @@ async function executarTurno(client, channel, numeroTurno, estado = { responsave
 
     // A confirmação de identidade é avaliada por REGRA, não pelo modelo: é
     // ela que destranca falar de título/valor/vencimento (Art. 42 do CDC).
-    if (!estado.responsavelConfirmado && avaliarConfirmacaoResponsavel(transcript)) {
+    if (!estado.numeroCobranca && !estado.responsavelConfirmado && avaliarConfirmacaoResponsavel(transcript)) {
       estado.responsavelConfirmado = true
       console.log(`[voice-ai] RESPONSAVEL_CONFIRMADO turno=${numeroTurno} channel=${channel.id}`)
     }

@@ -324,6 +324,8 @@ async function main() {
 
     try {
       const payload = construirPayloadOriginateExterno({ numero, ariApp: ARI_APP, clienteNome: c.cliente })
+      // Only identifies the audited call; no balance is accepted from channel variables.
+      payload.variables = { ...payload.variables, VIVENZZA_COBRANCA_NUMERO: numero }
       const { data } = await cliente.post('/channels', payload)
       await registrarTentativa({ ...contexto, callId: data.id, status: 'CREATED' })
       ultimoCanalId = data.id
