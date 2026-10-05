@@ -137,7 +137,7 @@ test('Voice AI: prompt de voz trava o texto exato das duas regras de compliance 
   )
 
   assert.ok(
-    brain.includes('Se a pessoa disser que já pagou, NUNCA discuta nem insista: agradeça, diga que vai verificar no sistema e encerre.'),
+    brain.includes('Se a pessoa disser que já pagou, NUNCA discuta nem insista: diga "Obrigada por informar. O pagamento precisa ser conferido antes de qualquer novo contato." Não confirme baixa nem prometa verificação automática.'),
     'prompt de voz perdeu (ou teve alterada) a regra de "já pagou"'
   )
 
