@@ -17,6 +17,16 @@ const SCRIPTS = path.join(__dirname, '..', '..', '..', 'scripts')
 process.env.AI_PROVIDER = 'mock'
 process.env.LOCAL_PG_URL = process.env.LOCAL_PG_URL || 'postgres://postgres:localdev_only_2026@127.0.0.1:5433/vivenzza_dev'
 
+test('quem fala recebe apresentacao sem falsa confirmacao', async () => {
+  const { responderTurno } = await import('../../../src/lib/voice/voiceBrain.js')
+  for (const texto of ['Quem fala?', 'Quem está falando?']) {
+    const r = await responderTurno(texto)
+    assert.equal(r.aiProvider, 'deterministic')
+    assert.match(r.respostaTexto, /assistente virtual/)
+    assert.doesNotMatch(r.respostaTexto, /confirm|pagamento|boleto|saldo/i)
+  }
+})
+
 test('Voice AI: voiceBrain.js reaproveita o mesmo cérebro do WhatsApp', async (t) => {
   const { responderTurno } = await import('../../../src/lib/voice/voiceBrain.js')
 
@@ -127,7 +137,7 @@ test('Voice AI: prompt de voz trava o texto exato das duas regras de compliance 
   )
 
   assert.ok(
-    brain.includes('Se a pessoa disser que já pagou, NUNCA discuta nem insista: agradeça, diga que vai verificar no sistema e encerre.'),
+    brain.includes('Se a pessoa disser que já pagou, NUNCA discuta nem insista: diga "Obrigada por informar. O pagamento precisa ser conferido antes de qualquer novo contato." Não confirme baixa nem prometa verificação automática.'),
     'prompt de voz perdeu (ou teve alterada) a regra de "já pagou"'
   )
 

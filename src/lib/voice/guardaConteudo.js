@@ -74,7 +74,6 @@ const CONFIRMACOES = [
   /\bpode falar\b/i, /\bisso mesmo\b/i,
   /\b(sim|isso|exato|exatamente|correto)\b.*\b(sou|falando|aqui)\b/i,
   /^\s*(sim|isso)\s*[.,!]?\s*$/i,
-  /\bquem fala\b/i,
   /\b(sou|aqui [ée]) o respons[áa]vel\b/i,
   /\beu que cuido\b/i, /\b(sou|[ée]) do financeiro\b/i,
 ]
