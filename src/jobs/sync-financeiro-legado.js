@@ -33,6 +33,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { configE01 } from '../lib/e01Host.js'
 import {
   detectarColunas, normalizarLinhaLegado, decidirAtualizacao, chavesLegado, dataISO,
+  identificarTitulosOrfaos,
 } from '../lib/financeiroLegado.js'
 
 const TABELA_LEGADO = 'CR_Duplicatas'
@@ -95,7 +96,7 @@ async function lerContasDoCrm() {
   for (let offset = 0; ; offset += PAGE_SUPABASE) {
     const { data, error } = await supabase
       .from('contas_financeiras')
-      .select('id, legacy_id, valor, valor_pago, valor_pago_legado, status, vencimento, pessoa_nome, codigo_cliente, telefone_cobranca')
+      .select('id, legacy_id, valor, valor_pago, valor_pago_legado, status, vencimento, pessoa_nome, codigo_cliente, telefone_cobranca, created_at')
       .eq('tipo', 'receber')
       .not('legacy_id', 'is', null)
       .range(offset, offset + PAGE_SUPABASE - 1)
@@ -293,6 +294,10 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
 
     const aAplicar = []
     const aCriar = []
+    // Todas as chaves de título que o NetVision devolveu nesta leitura — base da
+    // detecção de títulos órfãos (ver identificarTitulosOrfaos). Só vale numa
+    // varredura completa.
+    const chavesNoErp = new Set()
     // Map<contaId, novoTelefone> — telefone só entra aqui quando a fonte
     // (clientes_erp.contatos, mesma prioridade celular>fone/telefone>contato
     // de telefoneDoCliente()) tem um valor NÃO VAZIO e DIFERENTE do atual.
@@ -310,6 +315,14 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
       }
 
       const chaves = chavesLegado(legado.numeroTitulo, legado.sequencia)
+      for (const k of chaves) chavesNoErp.add(k)
+      // Sequência sem zeros à esquerda ("01" e "1" são o mesmo título).
+      if (legado.numeroTitulo != null && legado.sequencia != null && /^\d+$/.test(String(legado.sequencia).trim())) {
+        const t = String(legado.numeroTitulo).trim()
+        const s = Number(String(legado.sequencia).trim())
+        chavesNoErp.add(`cr-${t}-${s}`)
+        chavesNoErp.add(`001-${t}-${s}`)
+      }
 
       // TODAS as contas que representam este título, não só a primeira. A carga
       // de 23/07 reimportou títulos que já tinham entrado em 08/07 usando outro
@@ -358,33 +371,7 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
         if (decisao.acao === 'nenhuma') { contadores.total_sem_alteracao++; continue }
         if (decisao.acao === 'conflito') {
           contadores.total_conflito++
-          const mensagemConflito = `CONFLITO: ${decisao.motivo}`
-          erros.push({ legacy_id: conta.legacy_id, mensagem: mensagemConflito })
-
-          // Fail-closed: uma divergência entre o valor pago já reconhecido no
-          // CRM e o valor retornado pelo NetVision não pode permanecer na
-          // régua automática. Antes, o conflito era apenas contado/logado e o
-          // título continuava com em_revisao_financeira=false, permitindo
-          // cobrança por WhatsApp e voz. A revisão só será retirada pela RPC
-          // quando uma sincronização posterior resolver a divergência.
-          if (!dryRun && !conta.em_revisao_financeira) {
-            const { error: erroRevisao } = await supabase
-              .from('contas_financeiras')
-              .update({
-                em_revisao_financeira: true,
-                motivo_revisao: mensagemConflito,
-                em_revisao_desde: new Date().toISOString(),
-              })
-              .eq('id', conta.id)
-
-            if (erroRevisao) {
-              contadores.total_com_erro++
-              erros.push({
-                legacy_id: conta.legacy_id,
-                mensagem: `FALHA AO BLOQUEAR CONFLITO: ${erroRevisao.message}`,
-              })
-            }
-          }
+          erros.push({ legacy_id: conta.legacy_id, mensagem: `CONFLITO: ${decisao.motivo}` })
           continue
         }
 
@@ -494,6 +481,52 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
       contadores.total_cancelado = aAplicar.filter((a) => a.decisao.acao === 'cancelar').length
     }
 
+    // ── Títulos órfãos: abertos no CRM, apagados do NetVision ─────────────
+    // Achado 2026-10-05 (cliente Renan pagou e seguia sendo cobrado): o ERP
+    // APAGA parcelas ao refazer um parcelamento, e o CRM nunca mais tocava nelas.
+    // Ver identificarTitulosOrfaos (regra e travas) em lib/financeiroLegado.js.
+    const orfaos = identificarTitulosOrfaos({
+      contasCrm: contasPorChave.values(),
+      chavesNoErp,
+      linhasLidasErp: linhasLegado.length,
+      varreduraCompleta: !desde,
+    })
+    const resumoOrfaos = {
+      aplicavel: orfaos.aplicavel, motivo: orfaos.motivo ?? null,
+      cancelados: 0, em_revisao: 0,
+      candidatos_cancelar: orfaos.cancelar.length, candidatos_revisar: orfaos.revisar.length,
+    }
+    if (orfaos.motivo && orfaos.motivo !== 'incremental') {
+      log(`[sync-financeiro] ÓRFÃOS não tratados: ${orfaos.motivo}`)
+      // Anomalia precisa aparecer no histórico (não só no log): um teto estourado
+      // significa que algo estranho aconteceu no ERP ou na leitura.
+      erros.push({ legacy_id: '(orfaos)', mensagem: `ORFAOS_NAO_TRATADOS: ${orfaos.motivo}` })
+    }
+    if (orfaos.cancelar.length || orfaos.revisar.length) {
+      log(`[sync-financeiro] títulos órfãos (abertos no CRM, inexistentes no NetVision): ${orfaos.cancelar.length} a cancelar, ${orfaos.revisar.length} a revisar${orfaos.aplicavel ? '' : ' (NÃO aplicado)'}${dryRun ? ' (DRY-RUN)' : ''}`)
+      for (const c of [...orfaos.cancelar, ...orfaos.revisar].slice(0, 25)) {
+        log(`[sync-financeiro]   órfão ${c.legacy_id} ${c.pessoa_nome} R$ ${c.valor} venc ${c.vencimento} (${c.status}, pago R$ ${Number(c.valor_pago || 0).toFixed(2)})`)
+      }
+    }
+    if (orfaos.aplicavel && !dryRun) {
+      const nota = `Título não existe mais no NetVision (apagado/substituído ao refazer o parcelamento). ${new Date().toISOString().slice(0, 10)}`
+      for (const c of orfaos.cancelar) {
+        const { error } = await supabase.from('contas_financeiras')
+          .update({ status: 'cancelada', observacao_pagamento: `Cancelado automaticamente: ${nota}`, updated_at: new Date().toISOString() })
+          .eq('id', c.id).in('status', ['aberta', 'vencida', 'pago_parcial'])
+        if (error) { erros.push({ legacy_id: c.legacy_id, mensagem: `falha ao cancelar órfão: ${error.message}` }); contadores.total_com_erro++ }
+        else { resumoOrfaos.cancelados++; contadores.total_cancelado++ }
+      }
+      for (const c of orfaos.revisar) {
+        const { error } = await supabase.from('contas_financeiras')
+          .update({ em_revisao_financeira: true, motivo_revisao: `Título com pagamento parcial não existe mais no NetVision — conferir com o financeiro. ${nota}`, em_revisao_desde: new Date().toISOString() })
+          .eq('id', c.id).in('status', ['aberta', 'vencida', 'pago_parcial'])
+        if (error) { erros.push({ legacy_id: c.legacy_id, mensagem: `falha ao pôr órfão em revisão: ${error.message}` }); contadores.total_com_erro++ }
+        else resumoOrfaos.em_revisao++
+      }
+      log(`[sync-financeiro] órfãos: ${resumoOrfaos.cancelados} cancelados, ${resumoOrfaos.em_revisao} em revisão`)
+    }
+
     // ── Reatualização de telefone_cobranca em títulos já existentes ───────
     // UPDATE escopado por id (um título por vez, nunca por pessoa_nome como o
     // PATCH manual de aging.js) e restrito à própria coluna — nunca toca
@@ -558,7 +591,7 @@ export async function executarSincronizacaoFinanceira({ dryRun = false, completo
     log(`[sync-financeiro] concluído: ${JSON.stringify(contadores)}`)
     return {
       ...contadores, status, dry_run: dryRun, sincronizacao_id: syncId,
-      incremental: Boolean(desde), mapeamento_colunas: mapa,
+      incremental: Boolean(desde), mapeamento_colunas: mapa, orfaos: resumoOrfaos,
       amostra: amostraMudancas, erros: erros.slice(0, 50),
     }
   } catch (err) {
