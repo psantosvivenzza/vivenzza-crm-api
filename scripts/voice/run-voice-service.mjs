@@ -7,7 +7,10 @@
 // terminal a cada sessao; NVOIP_SIP_*/VOICE_EXTERNAL_ALLOWLIST etc agora
 // vem do .env real (nunca commitado) sem passo extra.
 import 'dotenv/config'
+import { manterWslDuranteServico } from './wsl-lifetime.mjs'
 import { iniciarServicoVoz } from '../../src/lib/voice/ariCallService.js'
+
+manterWslDuranteServico()
 
 iniciarServicoVoz().catch((err) => {
   console.error(`[voice-ai] falha ao iniciar: ${err.message}`)
