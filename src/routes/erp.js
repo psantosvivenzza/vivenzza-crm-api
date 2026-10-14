@@ -212,83 +212,29 @@ router.get('/clientes/:id/historico-vendedor', async (req, res) => {
 // independente do que este endpoint muda aqui. Exige motivo. Rota já protegida
 // por adminOnly no mount (index.js: app.use('/api/admin/erp', auth, adminOnly, ...)).
 router.put('/clientes/:id/vendedor', async (req, res) => {
+  // Atomic assignment + history; authentication and fresh authorization also enforced in SQL.
   try {
-    const { vendedor_novo_id, motivo, origem = 'individual' } = req.body
-
-    if (!motivo || !String(motivo).trim()) {
-      return res.status(400).json({ erro: 'motivo é obrigatório' })
-    }
-    const origensValidas = ['individual', 'lote', 'importacao', 'integracao', 'processo_administrativo']
-    if (!origensValidas.includes(origem)) {
-      return res.status(400).json({ erro: `origem inválida — use um de: ${origensValidas.join(', ')}` })
-    }
-
-    // vendedor_novo_id é opcional (permite "Sem representante"), mas se vier,
-    // precisa ser um usuário real disponível como vendedor — nunca aceita
-    // qualquer usuário (ex.: um admin sem essa flag) sem checar antes.
-    if (vendedor_novo_id) {
-      const { data: usuarioNovo, error: erroUsuarioNovo } = await supabase
-        .from('usuarios')
-        .select('id, nome, ativo, disponivel_como_vendedor')
-        .eq('id', vendedor_novo_id)
-        .maybeSingle()
-      if (erroUsuarioNovo) throw erroUsuarioNovo
-      if (!usuarioNovo || !usuarioNovo.disponivel_como_vendedor) {
-        return res.status(400).json({ erro: 'vendedor_novo_id não corresponde a um vendedor válido' })
-      }
-    }
-
-    const { data: clienteAtual, error: erroCliente } = await supabase
-      .from('clientes_erp')
-      .select('id, vendedor_responsavel_usuario_id')
-      .eq('id', req.params.id)
-      .maybeSingle()
-    if (erroCliente) throw erroCliente
-    if (!clienteAtual) return res.status(404).json({ erro: 'Cliente não encontrado' })
-
-    const vendedorAnteriorId = clienteAtual.vendedor_responsavel_usuario_id || null
-    const vendedorNovoId = vendedor_novo_id || null
-
-    // Sem mudança de vendedor: não grava histórico nem faz update de
-    // vendedor_responsavel_usuario_id à toa — mas ainda assim trava a
-    // atribuição como manual (vendedor_atribuicao_manual=true), senão um
-    // "confirmar responsável atual" pela tela não protegeria o cliente do
-    // próximo sync do NetVision.
-    if (vendedorAnteriorId === vendedorNovoId) {
-      await supabase.from('clientes_erp').update({ vendedor_atribuicao_manual: true }).eq('id', req.params.id)
-      return res.json({ alterado: false, mensagem: 'Vendedor responsável já é este — nenhuma alteração feita.' })
-    }
-
-    // Atualiza clientes_erp.vendedor_responsavel_usuario_id — nunca toca
-    // pedidos/comissoes/contas_financeiras, por regra explícita. Também marca
-    // vendedor_atribuicao_manual=true: a partir daqui, o sync automático do
-    // NetVision (que resolve vendedor_responsavel_usuario_id a partir de
-    // representante_nome via trigger) NUNCA mais sobrescreve este cliente —
-    // transferência feita por aqui é definitiva até a próxima transferência
-    // manual, mesmo que o representante no NetVision continue diferente.
-    const { data: clienteAtualizado, error: erroUpdate } = await supabase
-      .from('clientes_erp')
-      .update({ vendedor_responsavel_usuario_id: vendedorNovoId, vendedor_atribuicao_manual: true })
-      .eq('id', req.params.id)
-      .select('id, vendedor_responsavel_usuario_id')
-      .single()
-    if (erroUpdate) throw erroUpdate
-
-    const { error: erroHistorico } = await supabase
-      .from('clientes_vendedor_historico')
-      .insert({
-        cliente_erp_id: req.params.id,
-        vendedor_anterior_id: vendedorAnteriorId,
-        vendedor_novo_id: vendedorNovoId,
-        usuario_alterou_id: req.user?.id !== 'api-user' ? req.user?.id : null,
-        motivo: String(motivo).trim(),
-        origem,
-      })
-    if (erroHistorico) throw erroHistorico
-
-    res.json({ alterado: true, cliente: clienteAtualizado })
+  const { vendedor_novo_id, motivo, origem = 'individual', transferir_tarefas = false } = req.body
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (req.user.role !== 'admin') return res.status(403).json({ erro: 'Somente administrador pode transferir.' })
+  if (typeof motivo !== 'string' || motivo.trim().length < 3 || motivo.length > 1000
+    || typeof transferir_tarefas !== 'boolean' || !uuid.test(req.params.id)
+    || (vendedor_novo_id != null && !uuid.test(vendedor_novo_id))) return res.status(400).json({ erro: 'Informe cliente, vendedor, motivo e opção de tarefas válidos.' })
+  const integration = req.user.id === 'api-user'
+  const { data, error } = await supabase.rpc('transferir_cliente_crm', {
+    p_cliente_id: req.params.id, p_usuario_id: integration ? null : req.user.id, p_integracao: integration,
+    p_vendedor_id: vendedor_novo_id || null, p_motivo: motivo.trim(), p_origem: origem,
+    p_transferir_tarefas: transferir_tarefas,
+  })
+  if (error) {
+    console.error('[transferencia-cliente] RPC falhou', { code: error.code || 'RPC_ERROR' })
+    return res.status(error.code === '42501' ? 403 : ['22023','22P02','23503'].includes(error.code) ? 400 : error.code === 'P0002' ? 404 : 503)
+      .json({ erro: 'Transferência não aplicada. Verifique o cliente e a responsável ativa.' })
+  }
+  return res.json(data)
   } catch (err) {
-    res.status(500).json({ erro: err.message })
+    console.error('[transferencia-cliente] falha', { code: err?.code || 'TRANSPORT_ERROR' })
+    return res.status(503).json({ erro: 'Não foi possível confirmar a transferência. Consulte o histórico antes de tentar novamente.' })
   }
 })
 

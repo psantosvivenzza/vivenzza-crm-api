@@ -3,6 +3,7 @@ import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { marcarVendedorAssumiu } from './sdr.js'
 import { paraJidWhatsapp } from '../lib/telefone.js'
+import { inboxListPolicy } from '../lib/whatsappInboxPolicy.js'
 
 const router = Router()
 
@@ -161,6 +162,51 @@ router.get('/nao-lidas', async (req, res) => {
 // GET /api/whatsapp/status-espera — direção + horário da última mensagem por lead,
 // pra derivar "aguardando_vendedor" (última foi entrada) vs "aguardando_cliente"
 // (última foi saída) na lista de conversas. DEVE vir antes de /:lead_id.
+router.get('/retornos', async (req, res) => {
+  try {
+    if (!['admin', 'vendedor'].includes(req.user.role)) return res.status(403).json({ erro: 'Acesso negado' })
+    const policy = inboxListPolicy(req.user, req.query)
+    if (policy.error) return res.status(policy.status).json({ erro: policy.error })
+    let query = supabase.from('tarefas')
+      .select('id,lead_id,descricao,prazo,responsavel_id,status,retorno_acao,retorno_cancelado_em,criado_em,leads!inner(id,nome,telefone,origem,responsavel_id,ultima_mensagem_em,criado_em,etapa,usuarios:responsavel_id(id,nome))', { count: 'exact' })
+      .not('retorno_request_id', 'is', null).eq('status', 'pendente')
+      .is('retorno_cancelado_em', null).order('prazo', { ascending: true }).order('id', { ascending: true })
+      .range(policy.offset, policy.offset + policy.limit - 1)
+    if (policy.responsible === 'sem_responsavel') query = query.is('leads.responsavel_id', null)
+    else if (policy.responsible) query = query.eq('leads.responsavel_id', policy.responsible)
+    const { data, error, count } = await query
+    if (error) throw error
+    res.json({ data, total: count, page: policy.page })
+  } catch (err) {
+    console.error('[retornos] leitura falhou', { code: err?.code || 'TRANSPORT_ERROR' })
+    res.status(503).json({ erro: 'Retornos indisponíveis; tente novamente.' })
+  }
+})
+
+router.post('/retornos', async (req, res) => {
+  try {
+    if (!['admin', 'vendedor'].includes(req.user.role)) return res.status(403).json({ erro: 'Acesso negado' })
+    const { request_id, lead_id, responsavel_id, prazo, motivo, acao = 'whatsapp' } = req.body
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!uuid.test(req.user.id)) return res.status(403).json({ erro: 'Agendamento exige sessão de um usuário identificado.' })
+    if (![request_id, lead_id, responsavel_id].every(v => typeof v === 'string' && uuid.test(v))
+      || typeof motivo !== 'string' || motivo.trim().length < 3 || motivo.length > 1000
+      || !Number.isFinite(Date.parse(prazo)) || !['whatsapp', 'ligacao'].includes(acao)) {
+      return res.status(400).json({ erro: 'Informe prazo, motivo e responsável válidos.' })
+    }
+    const { data, error } = await supabase.rpc('agendar_retorno_whatsapp', {
+      p_request_id: request_id, p_lead_id: lead_id, p_usuario_id: req.user.id,
+      p_responsavel_id: responsavel_id, p_prazo: prazo, p_motivo: motivo.trim(), p_acao: acao,
+    })
+    if (error) {
+      console.error('[retornos] agendamento falhou', { code: error.code || 'RPC_ERROR' })
+      return res.status(error.code === '42501' ? 403 : error.code === '23505' ? 409 : ['22023','22P02','23503'].includes(error.code) ? 400 : 503)
+        .json({ erro: error.code === '23505' ? 'Já existe retorno pendente ou esta chave foi reutilizada.' : 'Não foi possível agendar o retorno com os dados informados.' })
+    }
+    res.status(201).json(data)
+  } catch (err) { console.error('[retornos] falha', { code: err?.code || 'TRANSPORT_ERROR' }); res.status(503).json({ erro: 'Agendamento indisponível.' }) }
+})
+
 router.get('/status-espera', async (req, res) => {
   try {
     let leadIds = null
