@@ -29,15 +29,24 @@ const testTimeouts=[]
 try {
   globalThis.setTimeout=(...args)=>{const timer=originalSetTimeout(...args);testTimeouts.push(timer);return timer}
   globalThis.setInterval=(...args)=>{const timer=originalSetInterval(...args);importTimers.push(timer);return timer}
-  const [{default:whatsapp},{default:erp}]=await Promise.all([import('../../../src/routes/whatsapp.js'),import('../../../src/routes/erp.js')])
+  const [{default:whatsapp},{default:erp},{default:leads}]=await Promise.all([import('../../../src/routes/whatsapp.js'),import('../../../src/routes/erp.js'),import('../../../src/routes/leads.js')])
   globalThis.setInterval=originalSetInterval
   const app=express(); app.use(express.json())
   app.use((req,res,next)=>{req.user={id:req.headers['x-test-role']==='vendedor'?seller:actor,role:req.headers['x-test-role']||'admin'};next()})
   app.use('/whatsapp',whatsapp);app.use('/erp',erp)
+  app.use('/leads',leads)
   server=app.listen(0,'127.0.0.1'); await new Promise(resolve=>server.once('listening',resolve))
   const base=`http://127.0.0.1:${server.address().port}`
   const request=async(...args)=>{const response=await fetch(...args);await response.arrayBuffer();return response}
   const get=(path,role='admin')=>request(base+path,{headers:{'x-test-role':role}})
+  assert.equal((await get('/leads?caixa=true&ordenacao=ultima_mensagem&page=1&limit=200&q=Antigo','vendedor')).status,200)
+  assert.equal(requests.at(-1).url.pathname,'/rest/v1/rpc/listar_caixa_whatsapp')
+  assert.equal(requests.at(-1).body.p_usuario_id,seller)
+  assert.equal(requests.at(-1).body.p_responsavel_id,seller)
+  assert.equal(requests.at(-1).body.p_busca,'Antigo')
+  assert.equal(requests.at(-1).body.p_limite,200)
+  assert.equal((await get('/leads?caixa=true&ordenacao=ultima_mensagem&page=2')).status,400)
+  console.log('PASS HTTP: caixa usa snapshot SQL com busca global e carteira da sessão')
   assert.equal((await get('/whatsapp/retornos?limit=200&page=2')).status,200)
   assert.equal(requests.at(-1).url.searchParams.get('offset'),'200')
   assert.equal(requests.at(-1).url.searchParams.get('limit'),'200')
