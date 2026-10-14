@@ -1,4 +1,5 @@
 -- Internal follow-ups only. No outbound message, financial change or campaign activation.
+-- Version aligned with the confirmed production migration journal.
 ALTER TABLE public.tarefas
   ADD COLUMN IF NOT EXISTS retorno_request_id uuid,
   ADD COLUMN IF NOT EXISTS retorno_criado_por uuid REFERENCES public.usuarios(id),

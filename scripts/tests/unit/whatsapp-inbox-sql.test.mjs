@@ -23,7 +23,7 @@ try {
     CREATE TABLE tarefas(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),lead_id uuid,titulo text,descricao text,prazo timestamptz,tipo text,status text,responsavel_id uuid,origem text,criado_em timestamptz DEFAULT now());
     CREATE TABLE whatsapp_mensagens(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),lead_id uuid,direcao text,created_at timestamptz);
     CREATE TABLE clientes_vendedor_historico(cliente_erp_id uuid,vendedor_anterior_id uuid,vendedor_novo_id uuid,usuario_alterou_id uuid,motivo text,origem text);`)
-  await db.query(await readFile(new URL('../../../supabase/migrations/20261013172830_whatsapp_retornos_e_transferencia.sql',import.meta.url),'utf8'))
+  await db.query(await readFile(new URL('../../../supabase/migrations/20261014131843_whatsapp_retornos_e_transferencia.sql',import.meta.url),'utf8'))
   for(const [uid,role] of [[admin,'admin'],[seller,'vendedor'],[other,'vendedor']]) await db.query('INSERT INTO usuarios VALUES($1,$2,true,true)',[uid,role])
   await db.query('INSERT INTO clientes_erp VALUES($1,$2,$3,false)',[client,'SYNTHETIC-INBOX',seller])
   await db.query('INSERT INTO leads VALUES($1,$2,$3,now())',[lead,seller,'SYNTHETIC-INBOX'])
