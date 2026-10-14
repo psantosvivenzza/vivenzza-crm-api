@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { query as dbQuery } from '../lib/db.js'
 import { normalizarTelefone, candidatosTelefone } from '../lib/telefone.js'
 import { buscarCidadesAtendimento, liberarCidades, definirCidadesAtendimento, listarTerritorios } from '../lib/territorios.js'
+import { inboxListPolicy } from '../lib/whatsappInboxPolicy.js'
 
 const router = Router()
 
@@ -12,14 +13,37 @@ const useDb = () => !!process.env.DATABASE_URL
 router.get('/', async (req, res) => {
   try {
     const { etapa, tipo, desde, origem, page = 1, limit, pageSize } = req.query
-    const pageLimit = Number(pageSize ?? limit ?? 50)
-    const offset = (Number(page) - 1) * pageLimit
+    const policy = inboxListPolicy(req.user, req.query)
+    if (policy.error) return res.status(policy.status).json({ erro: policy.error })
+    const pageLimit = policy.limit
+    const offset = policy.offset
+
+    if (policy.activityOrder && req.query.caixa === 'true') {
+      if (etapa || tipo || desde || policy.page !== 1) return res.status(400).json({ erro: 'Use o contrato de caixa sem filtros de pipeline ou páginas deslocadas.' })
+      const search = req.query.q ?? ''
+      const condition = req.query.condicao || null
+      if (typeof search !== 'string' || search.length > 120 || (condition && !['aguardando','cliente','criticas'].includes(condition))) return res.status(400).json({ erro: 'Filtros inválidos' })
+      const integration = req.user.id === 'api-user' && req.user.role === 'admin'
+      const { data, error } = await supabase.rpc('listar_caixa_whatsapp', {
+        p_usuario_id: integration ? null : req.user.id, p_integracao: integration,
+        p_responsavel_id: policy.responsible === 'sem_responsavel' ? null : policy.responsible,
+        p_sem_responsavel: policy.responsible === 'sem_responsavel',
+        p_busca: search.trim(), p_origem: origem || null, p_condicao: condition, p_limite: pageLimit,
+      })
+      if (error) {
+        console.error('[caixa] RPC falhou', { code: error.code || 'RPC_ERROR' })
+        return res.status(error.code === '42501' ? 403 : error.code === '22023' ? 400 : 503).json({ erro: 'Não foi possível carregar a caixa de atendimento.' })
+      }
+      return res.json({ ...data, page: 1, pageSize: pageLimit })
+    }
 
     let query = supabase
       .from('leads')
       .select('*, usuarios!leads_responsavel_id_fkey(id, nome), clientes_erp!leads_cliente_erp_id_fkey(id, legacy_id, razao_social, cnpj_cpf, data_ultima_compra)', { count: 'exact' })
-      .order('criado_em', { ascending: false })
-      .range(offset, offset + pageLimit - 1)
+    query = policy.activityOrder
+      ? query.order('ultima_mensagem_em', { ascending: false, nullsFirst: false }).order('id', { ascending: true })
+      : query.order('criado_em', { ascending: false })
+    query = query.range(offset, offset + pageLimit - 1)
 
     if (etapa) query = query.eq('etapa', etapa)
     if (tipo) query = query.eq('tipo', tipo)
@@ -27,9 +51,8 @@ router.get('/', async (req, res) => {
     if (origem) query = query.eq('origem', origem)
 
     // Vendedor só vê os leads atribuídos a ele
-    if (req.user.role === 'vendedor') {
-      query = query.eq('responsavel_id', req.user.id)
-    }
+    if (policy.responsible === 'sem_responsavel') query = query.is('responsavel_id', null)
+    else if (policy.responsible) query = query.eq('responsavel_id', policy.responsible)
 
     const { data, error, count } = await query
 
