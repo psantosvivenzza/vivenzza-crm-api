@@ -14,9 +14,28 @@ import {
   avaliarLimiteGlobalPorDia,
   avaliarLimiteGlobalPorHora,
 } from '../../../src/lib/voice/externalPilotGuardrails.js'
+import { lerLimitesVoz } from '../../../src/lib/voice/externalConfig.js'
 
 const ALVO = '+5551994112439'
 const OUTRO = '+5551991567661'
+
+test('defaults operacionais refletem 50 chamadas/dia e 3 tentativas por telefone', () => {
+  const nomes = ['VOICE_MAX_CALLS_HOUR', 'VOICE_MAX_CALLS_DAY', 'VOICE_MAX_CALLS_PER_PHONE_DAY']
+  const anteriores = Object.fromEntries(nomes.map((nome) => [nome, process.env[nome]]))
+  try {
+    nomes.forEach((nome) => delete process.env[nome])
+    assert.deepEqual(lerLimitesVoz(), {
+      maxChamadasHora: 8,
+      maxChamadasDia: 50,
+      maxChamadasPorTelefoneDia: 3,
+    })
+  } finally {
+    for (const nome of nomes) {
+      if (anteriores[nome] === undefined) delete process.env[nome]
+      else process.env[nome] = anteriores[nome]
+    }
+  }
+})
 
 test('ligação para OUTRO cliente não consome o limite diário deste telefone', () => {
   // Como o repositório monta a lista DEPOIS da correção: só a ligação que
@@ -42,6 +61,15 @@ test('segunda ligação para o MESMO telefone no dia é bloqueada', () => {
   assert.equal(avaliarLimiteDiarioPorTelefone(OUTRO, chamadasHoje, 1), true)
 })
 
+test('com limite aprovado de 3/dia, a quarta ligação para o mesmo telefone é bloqueada', () => {
+  const chamadasHoje = Array.from({ length: 3 }, (_, indice) => ({
+    numero: ALVO,
+    criadoEm: `2026-09-17T1${indice}:00:00Z`,
+  }))
+  assert.equal(avaliarLimiteDiarioPorTelefone(ALVO, chamadasHoje.slice(0, 2), 3), true)
+  assert.equal(avaliarLimiteDiarioPorTelefone(ALVO, chamadasHoje, 3), false)
+})
+
 test('o bug antigo, reproduzido: etiquetar tudo com o mesmo número trava a fila', () => {
   const comoEraAntes = [
     { numero: ALVO, criadoEm: '2026-09-17T18:26:58Z' }, // na verdade foi para outro cliente
@@ -59,7 +87,7 @@ test('os tetos GLOBAIS continuam contando todas as ligações, independente do t
     { numero: null, criadoEm: '2026-09-17T18:10:00Z' },
     { numero: null, criadoEm: '2026-09-17T17:55:00Z' },
   ]
-  assert.equal(avaliarLimiteGlobalPorDia(todasDoDia, 40), true, '3 de 40 no dia')
+  assert.equal(avaliarLimiteGlobalPorDia(todasDoDia, 50), true, '3 de 50 no dia')
   assert.equal(avaliarLimiteGlobalPorDia(todasDoDia, 3), false, 'teto de 3 atingido')
   assert.equal(avaliarLimiteGlobalPorHora(todasDoDia, 8), true, '3 de 8 na hora')
   assert.equal(avaliarLimiteGlobalPorHora(todasDoDia, 3), false, 'teto de 3/hora atingido')

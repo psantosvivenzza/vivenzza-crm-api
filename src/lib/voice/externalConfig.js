@@ -77,15 +77,14 @@ export function filaVozProducaoGeralHabilitada() {
   return String(process.env.VOICE_QUEUE_GENERAL_ENABLED || '').trim().toLowerCase() === 'true'
 }
 
-// Limites conservadores/fail-closed por padrão — defaults pequenos de
-// propósito (primeira homologação é 1 número, poucas chamadas). "0" nunca é
+// Limites operacionais aprovados para a cobrança por voz. "0" nunca é
 // tratado como "sem limite" em nenhum guard deste módulo (ver
 // externalPilotGuardrails.js/avaliarLimiteDiarioPorTelefone: limite<=0 já
 // bloqueia sempre).
 export function lerLimitesVoz() {
   return {
-    maxChamadasHora: Number(process.env.VOICE_MAX_CALLS_HOUR ?? 1),
-    maxChamadasDia: Number(process.env.VOICE_MAX_CALLS_DAY ?? 3),
-    maxChamadasPorTelefoneDia: Number(process.env.VOICE_MAX_CALLS_PER_PHONE_DAY ?? 1),
+    maxChamadasHora: Number(process.env.VOICE_MAX_CALLS_HOUR ?? 8),
+    maxChamadasDia: Number(process.env.VOICE_MAX_CALLS_DAY ?? 50),
+    maxChamadasPorTelefoneDia: Number(process.env.VOICE_MAX_CALLS_PER_PHONE_DAY ?? 3),
   }
 }
