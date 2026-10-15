@@ -1,0 +1,9 @@
+{
+  "_comentario": "Fixture de homologação local. Contas/campanhas sintéticas; não é política real aprovada nem autoriza alteração de anúncios.",
+  "maxEvidenceAgeMs": 900000,
+  "maxApprovalAgeMs": 600000,
+  "scopes": [
+    { "platform": "meta", "accountId": "conta-homologacao-meta", "campaignIds": ["campanha-homologacao-meta"], "actions": ["daily_budget", "status"], "currency": "BRL", "maxDailyBudgetMinor": 5000, "maxBudgetDeltaMinor": 1000 },
+    { "platform": "google", "accountId": "conta-homologacao-google", "campaignIds": ["campanha-homologacao-google"], "actions": ["daily_budget", "status"], "currency": "BRL", "maxDailyBudgetMinor": 5000, "maxBudgetDeltaMinor": 1000 }
+  ]
+}

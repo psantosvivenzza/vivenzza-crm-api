@@ -27,9 +27,20 @@ function canonical(value) {
 export function campaignProposalHash(payload) {
   return createHash('sha256').update(canonical(payload)).digest('hex')
 }
+const V1_KEYS = ['schemaVersion', 'platform', 'accountId', 'campaignId', 'action', 'before', 'after', 'objective', 'reason', 'evidence', 'expiresAt']
+// Origem faz parte do payload v2: entra no hash e o trigger a torna imutável.
+// Nenhum leitor de provedor existe ainda, então origem verificada é recusada.
+export const PROPOSAL_ORIGINS = ['manual', 'synthetic']
+function validateOrigin(origin) {
+  keys(origin, ['kind', 'verified'])
+  if (!PROPOSAL_ORIGINS.includes(origin.kind)) fail('ORIGEM_INVALIDA')
+  if (origin.verified !== false) fail(origin.verified === true ? 'ORIGEM_VERIFICADA_NAO_SUPORTADA' : 'ORIGEM_INVALIDA')
+}
 function validatePayload(p) {
-  keys(p, ['schemaVersion', 'platform', 'accountId', 'campaignId', 'action', 'before', 'after', 'objective', 'reason', 'evidence', 'expiresAt'])
-  if (p.schemaVersion !== 1 || !['meta', 'google'].includes(p.platform) || !['status', 'daily_budget'].includes(p.action)) fail('ACAO_NAO_PERMITIDA')
+  if (!plain(p) || ![1, 2].includes(p.schemaVersion)) fail('ACAO_NAO_PERMITIDA')
+  keys(p, p.schemaVersion === 2 ? [...V1_KEYS, 'origin'] : V1_KEYS)
+  if (p.schemaVersion === 2) validateOrigin(p.origin)
+  if (!['meta', 'google'].includes(p.platform) || !['status', 'daily_budget'].includes(p.action)) fail('ACAO_NAO_PERMITIDA')
   str(p.accountId, 100); str(p.campaignId, 100); str(p.objective); str(p.reason, 2000)
   for (const snapshot of [p.before, p.after]) {
     keys(snapshot, ['status', 'dailyBudgetMinor', 'currency'])
@@ -65,11 +76,10 @@ const event = (state, actor, at, code = null) => ({ state, actorId: actor.id, at
 /** Trusted ports: actor comes from server authentication, policy is server-owned.
  * store.get/insert/compareAndSwap return detached records; CAS atomically compares
  * revision and stores the entire record including history. No durable store here.
+ * Núcleo de decisão (propor/aprovar/rejeitar/consultar), sem nenhuma capacidade de execução.
  */
-export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock = () => Date.now(), id = randomUUID }) {
+function createDecisionCore({ store, policy, clock, id }) {
   if (!store || typeof store.compareAndSwap !== 'function') fail('STORE_OBRIGATORIO')
-  // Deliberately no production transport support in this increment.
-  if (adapter && adapter.mode !== 'synthetic') fail('EXECUTOR_REAL_NAO_IMPLEMENTADO')
   const nowMs = () => {
     const now = clock()
     if (!Number.isSafeInteger(now) || now < 0 || now > 253_402_300_799_999) fail('RELOGIO_INVALIDO')
@@ -93,7 +103,7 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
     allowed(record.payload, rules, now)
     if (!record.approval || record.approval.hash !== record.hash || timestamp(record.approval.expiresAt) <= now) fail('APROVACAO_INVALIDA')
   }
-  return {
+  const decisions = {
     async propose(payload, actor) {
       admin(actor)
       const copy = clone(payload); validatePayload(copy)
@@ -120,6 +130,32 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
       const at = new Date(nowMs()).toISOString()
       return commit(old, { ...old, state: 'rejeitada', rejection: { reason, actorId: actor.id, at }, history: [...old.history, event('rejeitada', actor, at)] })
     },
+    async get(proposalId, actor) { admin(actor); return clone(await load(proposalId)) },
+    async list(actor) {
+      admin(actor)
+      const records = await store.list()
+      return Promise.all(records.map((r) => load(r.id)))
+    },
+  }
+  return { decisions, load, commit, nowMs, currentPolicy, checkApproval }
+}
+
+/** Composição somente revisão: registra decisões humanas e NUNCA executa.
+ * Não há método execute; um adapter passado é recusado em vez de ignorado.
+ */
+export function createCampaignReviewWorkflow({ store, policy, clock = () => Date.now(), id = randomUUID, ...rest }) {
+  if ('adapter' in rest) fail('EXECUTOR_NAO_PERMITIDO_EM_REVISAO')
+  const { decisions } = createDecisionCore({ store, policy, clock, id })
+  return Object.freeze({ capabilities: Object.freeze({ decide: true, execute: false }), ...decisions })
+}
+
+export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock = () => Date.now(), id = randomUUID }) {
+  // Deliberately no production transport support in this increment.
+  if (adapter && adapter.mode !== 'synthetic') fail('EXECUTOR_REAL_NAO_IMPLEMENTADO')
+  const { decisions, load, commit, nowMs, currentPolicy, checkApproval } = createDecisionCore({ store, policy, clock, id })
+  return {
+    capabilities: { decide: true, execute: !!adapter },
+    ...decisions,
     async execute(proposalId, expectedHash, actor) {
       admin(actor)
       if (!adapter || typeof adapter.read !== 'function' || typeof adapter.write !== 'function') fail('EXECUTOR_NAO_CONFIGURADO')
@@ -150,12 +186,6 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
       // A persistence failure leaves em execução; never repeat the provider write.
       active = await commit(active, { ...active, state: finalState, history: [...active.history, event(finalState, actor, new Date(nowMs()).toISOString(), code)] })
       return active
-    },
-    async get(proposalId, actor) { admin(actor); return clone(await load(proposalId)) },
-    async list(actor) {
-      admin(actor)
-      const records = await store.list()
-      return Promise.all(records.map((r) => load(r.id)))
     },
   }
 }
