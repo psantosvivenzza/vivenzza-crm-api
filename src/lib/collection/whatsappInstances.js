@@ -10,6 +10,7 @@
 // expirar, ela volta a ser candidata (não auto-recupera para 'connected' sozinha —
 // isso só acontece quando o healthcheck confirmar conexão de verdade).
 import { supabase } from '../supabase-admin.server.js'
+import { contarTentativasFrete } from '../fretes/attemptCounter.js'
 
 const DEGRADED_AFTER_FAILURES = 3
 const COOLDOWN_AFTER_FAILURES = 6
@@ -52,7 +53,10 @@ function inicioDoDiaBrtISO() {
 // cancelled), via criado_em (sempre populado no INSERT, diferente de
 // enviado_em/falhou_em que ficam NULL até o desfecho final).
 export async function contarEnviosReaisHojePorInstancia() {
-  const inicioDia = inicioDoDiaBrtISO()
+  return contarEnviosReaisDesdePorInstancia(inicioDoDiaBrtISO())
+}
+
+export async function contarEnviosReaisDesdePorInstancia(inicioDia) {
 
   const { data: dispatches, error: erroDispatches } = await supabase
     .from('collection_dispatches')
@@ -61,7 +65,14 @@ export async function contarEnviosReaisHojePorInstancia() {
     .gte('criado_em', inicioDia)
   if (erroDispatches) throw erroDispatches
   const idsReais = new Set((dispatches ?? []).map((d) => d.id))
-  if (!idsReais.size) return new Map()
+  const fretes = await contarTentativasFrete(inicioDia)
+  const contagem = new Map()
+  if (fretes) {
+    const { data: financeira, error } = await supabase.from('whatsapp_instances').select('id').eq('instance_name', 'vivenzza-financeiro').maybeSingle()
+    if (error) throw error
+    if (financeira) contagem.set(financeira.id, fretes)
+  }
+  if (!idsReais.size) return contagem
 
   const { data: tentativas, error: erroTentativas } = await supabase
     .from('collection_dispatch_attempts')
@@ -69,7 +80,6 @@ export async function contarEnviosReaisHojePorInstancia() {
     .gte('criado_em', inicioDia)
   if (erroTentativas) throw erroTentativas
 
-  const contagem = new Map()
   for (const t of tentativas ?? []) {
     if (!t.whatsapp_instance_id || !idsReais.has(t.dispatch_id)) continue // exclui internal_test e qualquer coisa fora de hoje
     contagem.set(t.whatsapp_instance_id, (contagem.get(t.whatsapp_instance_id) ?? 0) + 1)

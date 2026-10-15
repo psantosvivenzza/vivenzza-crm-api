@@ -42,16 +42,18 @@
 // cobranca-whatsapp.js; ausente, conta TODAS as origens (teto global).
 import { supabase } from '../supabase-admin.server.js'
 import { obterConfigCobranca } from './featureFlags.js'
+import { contarTentativasFrete } from '../fretes/attemptCounter.js'
 
 export async function contarTentativasReaisDesde({ desde, origem = null }) {
   const config = await obterConfigCobranca()
+  const fretes = origem ? 0 : await contarTentativasFrete(desde)
 
   if (config.multi_whatsapp !== true) {
     let query = supabase.from('cobrancas_whatsapp').select('id', { count: 'exact', head: true }).gte('data_envio', desde)
     if (origem) query = query.eq('origem', origem)
     const { count, error } = await query
     if (error) throw error
-    return count ?? 0
+    return (count ?? 0) + fretes
   }
 
   // purpose='collection' exclui internal_test (homologação, nunca é
@@ -62,7 +64,7 @@ export async function contarTentativasReaisDesde({ desde, origem = null }) {
   const { data: dispatches, error: erroDispatches } = await queryDispatches
   if (erroDispatches) throw erroDispatches
   const idsRelevantes = new Set((dispatches ?? []).map((d) => d.id))
-  if (!idsRelevantes.size) return 0
+  if (!idsRelevantes.size) return fretes
 
   // criado_em (não enviado_em/falhou_em, que ficam NULL até o desfecho
   // final) — sempre populado no INSERT, no exato instante da tentativa.
@@ -76,5 +78,5 @@ export async function contarTentativasReaisDesde({ desde, origem = null }) {
   for (const t of tentativas ?? []) {
     if (idsRelevantes.has(t.dispatch_id)) total++
   }
-  return total
+  return total + fretes
 }

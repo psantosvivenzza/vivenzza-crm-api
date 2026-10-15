@@ -1,3 +1,4 @@
+import {sincronizarLogisticaProdutos} from './sync-logistica-produtos.js'
 /**
  * Sincronização de pedidos do legado (NetVision, banco e01, tabela ES_Pedidos).
  *
@@ -17,6 +18,7 @@
  * status, é uma árvore de prioridade (ver mapearStatus).
  */
 import pg from 'pg'
+import { lerLogisticaNetvision } from '../lib/fretes/netvision.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { configE01 } from '../lib/e01Host.js'
 
@@ -119,7 +121,7 @@ export async function buscarMapaVendedores(e01Client) {
   return mapa
 }
 
-export async function processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores }) {
+export async function processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores, logisticaAtiva=false }) {
   const codigoCliente = (row.CodigoEmitente || '').trim()
   const clienteErpId = codigoCliente ? mapaClientes.get(codigoCliente) : undefined
   const codigoRepresentante = (row.Representante || '').trim()
@@ -158,6 +160,12 @@ export async function processarPedido({ row, legacyId, mapaClientes, mapaProduto
     atualizado_no_origem_em: row.DataAtualizacao,
     sincronizado_em: new Date().toISOString(),
     erro_sincronizacao: null,
+  }
+
+  if(logisticaAtiva && !(Array.isArray(existente?.campos_com_override_local)&&existente.campos_com_override_local.includes('itens'))) {
+    // Falha suplementar não impede atualização comercial nem apaga snapshot anterior.
+    try { dadosPedido.frete_logistica = await lerLogisticaNetvision(row.CodigoFilial,row.NumeroPedido,{client:e01Client}) }
+    catch { console.warn('[sync pedidos] logística indisponível; dados comerciais preservados') }
   }
 
   // Conflito: se o pedido tem campos com edição local registrada, não sobrescreve
@@ -218,6 +226,8 @@ export async function processarPedido({ row, legacyId, mapaClientes, mapaProduto
 }
 
 export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
+  let logisticaAtiva=process.env.FRETE_LOGISTICA_SYNC_ATIVA==='true'
+  if(logisticaAtiva){const probe=await supabase.from('pedidos').select('frete_logistica').limit(1);if(probe.error){logisticaAtiva=false;console.warn('[sync pedidos] snapshot logístico desabilitado: schema/leitura indisponível')}}
   const { data: ultima } = await supabase
     .from('sincronizacoes_pedidos')
     .select('cursor_final')
@@ -244,6 +254,7 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
 
   try {
     e01Client = await conectarE01()
+
     const [mapaClientes, mapaProdutos, mapaVendedores] = await Promise.all([
       buscarMapaClientes(), buscarMapaProdutos(), buscarMapaVendedores(e01Client),
     ])
@@ -276,7 +287,7 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
           contadores.total_lido++
           const legacyId = `${(row.CodigoFilial || '').trim()}-${row.NumeroPedido}`
           try {
-            await processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores })
+            await processarPedido({ row, legacyId, mapaClientes, mapaProdutos, mapaVendedores, e01Client, contadores, logisticaAtiva })
             const dataAtualizacao = new Date(row.DataAtualizacao)
             if (dataAtualizacao > cursorFinal) cursorFinal = dataAtualizacao
           } catch (errPedido) {
@@ -305,6 +316,9 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
       ...contadores,
     }).eq('id', sync.id)
 
+    if(logisticaAtiva){
+      try{const resultado=await sincronizarLogisticaProdutos({e01Client,peso:process.env.NETVISION_LOGISTICA_UNIDADE_PESO||null,cubagem:process.env.NETVISION_LOGISTICA_UNIDADE_CUBAGEM||null});if(resultado.status!=='concluido')console.warn('[sync pedidos] catálogo físico pendente; fluxo comercial preservado')}catch{console.warn('[sync pedidos] catálogo físico indisponível; fluxo comercial preservado')}
+    }
     return { ...contadores, status: statusFinal, sincronizacao_id: sync.id, cursor_final: cursorFinal.toISOString() }
   } catch (err) {
     // Não avança o cursor em falha geral — a próxima execução recomeça do

@@ -23,6 +23,8 @@ import financeiroRouter from './routes/financeiro.js'
 import nfeRouter from './routes/nfe.js'
 import nfeEntradasRouter from './routes/nfe-entradas.js'
 import fornecedoresRouter from './routes/fornecedores.js'
+import fretesRouter from './routes/fretes.js'
+import { runFreteQueue } from './lib/fretes/worker.js'
 import comissoesRouter from './routes/comissoes.js'
 import cfopsRouter from './routes/cfops.js'
 import relatoriosRouter from './routes/relatorios.js'
@@ -198,6 +200,7 @@ app.use('/api/financeiro', auth, financeiroRouter)
 app.use('/api/nfe', auth, nfeRouter)
 app.use('/api/nfe-entradas', auth, nfeEntradasRouter)
 app.use('/api/fornecedores', auth, fornecedoresRouter)
+app.use('/api/fretes', auth, adminOuFinanceiro, fretesRouter)
 app.use('/api/comissoes', auth, comissoesRouter)
 app.use('/api/cfops', auth, cfopsRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
@@ -453,6 +456,12 @@ cron.schedule('*/5 * * * *', async () => {
     console.error('[cron nfe-distribuicao-sync] Erro:', err.message)
   }
 })
+
+// Uma solicitação por tick, mutex/cadência no banco, Evolution financeira fixa.
+// Nenhum envio até FRETE_ENVIO_ATIVO=true em liberação explícita.
+cron.schedule('* * * * *', async () => {
+  try { await runFreteQueue() } catch (err) { console.error('[cron fretes]', err.code ?? 'falha') }
+}, { noOverlap: true })
 
 // NÃO há cron.schedule aqui para a sincronização de pedidos com o legado (e01).
 // Diferente dos outros jobs desta lista, o e01 (NetVision/ES_Pedidos) só é

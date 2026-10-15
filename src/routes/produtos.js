@@ -96,6 +96,9 @@ router.put('/:id', async (req, res) => {
     const campos = { ...req.body }
     delete campos.id
     delete campos.criado_em
+    // Campo físico espelhado só é atualizado pelo sync dedicado.
+    delete campos.logistica_fisica
+    if(!Object.keys(campos).length)return res.status(400).json({erro:'Nenhum campo permitido para atualização.'})
 
     if (campos.preco_b2c != null) campos.preco_b2c = Number(campos.preco_b2c)
     if (campos.preco_b2b != null) campos.preco_b2b = Number(campos.preco_b2b)

@@ -1,3 +1,4 @@
+import {calcularLogisticaPedido,carregarCadastroFisicoDoPedido} from '../lib/fretes/logistica.js'
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { calcularComissaoEstimada } from '../lib/comissoes.js'
@@ -155,7 +156,10 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ erro: 'Sem permissão para acessar este pedido' })
     }
 
-    res.json(data)
+    let cadastroFisico=null,logisticaIndisponivel=false,logisticaCalculada=null
+    try{cadastroFisico=await carregarCadastroFisicoDoPedido(supabase,data)}catch{logisticaIndisponivel=true;console.warn('[pedidos] catálogo físico indisponível; detalhe comercial preservado')}
+    try{logisticaCalculada=calcularLogisticaPedido({...data,...(cadastroFisico?{pedido_itens:cadastroFisico}:{})})}catch{logisticaIndisponivel=true}
+    res.json({...data,logistica_calculada:logisticaCalculada,logistica_indisponivel:logisticaIndisponivel})
   } catch (err) {
     res.status(500).json({ erro: err.message })
   }

@@ -11,6 +11,7 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 // desta PR, que é só infraestrutura/homologação, não IA.
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
+import { handleFreteInbound } from '../lib/fretes/inbound.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -284,6 +285,16 @@ export async function processWhatsappEvent(payload) {
     // conteúdo em produção). Instância desconhecida/ausente sempre segue o
     // caminho comercial de sempre (ver ehInstanciaFinanceira — fail-safe).
     const instanceName = payload.instance ?? payload.instanceName ?? null
+    // Transportadora é domínio de frete: não marca cobrança respondida nem cria lead.
+    // Se a classificação falhar, preservar cobrança normal, exceto transportadora já identificada.
+    let freteInbound = false
+    try {
+      freteInbound = await handleFreteInbound({ instanceName, telefone, texto, evolutionId: msg.key?.id ?? null, fromMe, mediaTipo })
+    } catch (err) {
+      console.error('[webhook fretes] classificação indisponível', err.code ?? 'falha')
+      freteInbound = err.freteTransportadora ? { semCotacao: true } : false
+    }
+    if (freteInbound && !freteInbound.semCotacao) return
     const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
 
     const semPrefixo = telefone.replace(/^55/, '')
@@ -417,7 +428,7 @@ export async function processWhatsappEvent(payload) {
     // (ehFinanceiro && !fromMe) casa por telefone com a cobrança pendente
     // mais recente em status 'enviada' e marca respondida — só grava um
     // timestamp, não decide nada sobre o conteúdo, não envia nada.
-    if (ehFinanceiro && !fromMe) {
+    if (ehFinanceiro && !fromMe && !freteInbound) {
       try {
         // cliente_telefone em cobrancas_whatsapp é salvo formatado ("(41)
         // 9910-2787"), não em dígitos puros como `telefone` (vindo do JID do
