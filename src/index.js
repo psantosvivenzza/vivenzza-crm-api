@@ -31,6 +31,7 @@ import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter from './routes/sdr.js'
 import campanhasRouter from './routes/campanhas.js'
+import { createCampaignReviewRouter } from './routes/campaign-reviews.js'
 import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
 import automacoesRouter from './routes/automacoes.js'
@@ -206,6 +207,8 @@ app.use('/api/cfops', auth, cfopsRouter)
 app.use('/api/relatorios', auth, relatoriosRouter)
 app.use('/api/admin', auth, adminRouter)
 app.use('/api/admin/campanhas', auth, adminOnly, campanhasRouter)
+// No store, policy or executor bound in production: explicit fail-closed 503.
+app.use('/api/admin/campaign-reviews', createCampaignReviewRouter())
 app.use('/api/admin/google-ads', auth, adminOnly, googleAdsRouter)
 app.use('/api/admin/evolution-health', auth, adminOnly, evolutionHealthRouter)
 app.use('/api/ligacoes', auth, ligacoesRouter)

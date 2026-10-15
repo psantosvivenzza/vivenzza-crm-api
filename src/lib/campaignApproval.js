@@ -72,13 +72,14 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
   if (adapter && adapter.mode !== 'synthetic') fail('EXECUTOR_REAL_NAO_IMPLEMENTADO')
   const nowMs = () => {
     const now = clock()
-    if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) fail('RELOGIO_INVALIDO')
+    if (!Number.isSafeInteger(now) || now < 0 || now > 253_402_300_799_999) fail('RELOGIO_INVALIDO')
     return now
   }
   const currentPolicy = () => clone(typeof policy === 'function' ? policy() : policy)
   const load = async (proposalId) => {
     const record = await store.get(proposalId)
     if (!record) fail('PROPOSTA_NAO_ENCONTRADA')
+    if (record.id !== proposalId || !Number.isSafeInteger(record.revision) || record.revision < 1 || !Array.isArray(record.history) || record.history.length !== record.revision) fail('REGISTRO_INVALIDO')
     intact(record)
     return record
   }
@@ -110,6 +111,14 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
       const now = nowMs(); const rules = currentPolicy(); allowed(old.payload, rules, now)
       const at = new Date(now).toISOString()
       return commit(old, { ...old, state: 'aprovada', approval: { hash: old.hash, actorId: actor.id, at, expiresAt: new Date(Math.min(timestamp(old.payload.expiresAt), now + rules.maxApprovalAgeMs)).toISOString() }, history: [...old.history, event('aprovada', actor, at)] })
+    },
+    async reject(proposalId, expectedHash, reason, actor) {
+      admin(actor); str(reason, 1000)
+      const old = await load(proposalId)
+      if (!['proposta', 'aprovada'].includes(old.state)) fail('ESTADO_NAO_PERMITE_REJEITAR')
+      if (old.hash !== expectedHash) fail('CONTEUDO_ALTERADO')
+      const at = new Date(nowMs()).toISOString()
+      return commit(old, { ...old, state: 'rejeitada', rejection: { reason, actorId: actor.id, at }, history: [...old.history, event('rejeitada', actor, at)] })
     },
     async execute(proposalId, expectedHash, actor) {
       admin(actor)
@@ -143,5 +152,10 @@ export function createSyntheticCampaignWorkflow({ store, policy, adapter, clock 
       return active
     },
     async get(proposalId, actor) { admin(actor); return clone(await load(proposalId)) },
+    async list(actor) {
+      admin(actor)
+      const records = await store.list()
+      return Promise.all(records.map((r) => load(r.id)))
+    },
   }
 }

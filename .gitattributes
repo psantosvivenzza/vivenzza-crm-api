@@ -2,3 +2,4 @@
 # do core.autocrlf de quem commita/clona no Windows - CRLF num shebang
 # quebra a execucao ("bad interpreter").
 scripts/voice-server/*.sh text eol=lf
+supabase/migrations/20261015190408_campaign_review_proposals.sql text eol=lf
