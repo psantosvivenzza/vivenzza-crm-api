@@ -111,6 +111,7 @@ export function compararPropostas(propostas, { max_prazo_dias = null } = {}, now
     menor_valor: preco[0] ?? null, menor_prazo: prazo[0] ?? null, melhor_custo_beneficio: elegiveis[0] ?? null,
     media_valor: validas.length ? Math.round(validas.reduce((s, p) => s + Math.round(p.valor_total * 100), 0) / validas.length) / 100 : null,
     quantidade_completas: validas.length,
+    quantidade_vencidas: propostas.filter(p=>p.completa&&p.validade&&Date.parse(p.validade)<=+now).length,
     motivo: !validas.length ? 'Ainda não há propostas completas e válidas.' : max_prazo_dias == null ? 'Sem prazo desejado: recomendação pelo menor preço total confirmado.' : !elegiveis.length ? 'Nenhuma proposta atende ao prazo desejado. O menor preço permanece visível.' : `Menor preço total que atende ao prazo desejado de ${max_prazo_dias} dia(s) úteis.`,
   }
 }

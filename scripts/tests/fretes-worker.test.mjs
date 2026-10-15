@@ -154,3 +154,20 @@ test('falha de histórico não apaga envio confirmado nem seu identificador', as
  assert.equal(f.tables.frete_envios[0].status,'enviado');assert.equal(f.tables.frete_envios[0].provider_id,'confirmed-id')
  assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
 })
+
+test('confirmacao tardia nao reabre envio reconciliado para revisao',async()=>{
+ const f=fixture()
+ const r=await runFreteQueue({...f.opts,send:async()=>{f.tables.frete_envios[0].status='revisao';f.tables.frete_consultas[0].ia_pausada=true;return {ok:true,providerMessageId:'tardio'}}})
+ assert.equal(r.status,'revisao');assert.equal(f.tables.frete_envios[0].status,'revisao');assert.equal(f.tables.frete_envios[0].provider_id,'tardio');assert.equal(f.tables.frete_consultas[0].ia_pausada,true)
+})
+test('reentrega refaz pausa se houve falha depois de salvar mensagem',async()=>{
+ const f=fixture();f.tables.frete_mensagens.push({id:'m-falha',evolution_id:'eco-humano'})
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'quero atendente',evolutionId:'eco-humano',fromMe:false},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,true)
+})
+
+test('eco fromMe duplicado confirmado nao pausa assistente',async()=>{
+ const f=fixture();f.tables.frete_mensagens.push({id:'saida-confirmada',evolution_id:'eco-confirmado',direcao:'saida'});f.tables.frete_envios[0].provider_id='eco-confirmado'
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Solicitacao',evolutionId:'eco-confirmado',fromMe:true},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+})

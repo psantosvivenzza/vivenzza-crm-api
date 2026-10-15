@@ -15,7 +15,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   matches = (consultas ?? []).filter(c => telefonesEquivalentes(c.telefone, telefone))
   // Opt-out explícito é respeitado mesmo depois de encerrar a cotação.
   if (!fromMe && decidirRespostaFrete(texto).tipo === 'opt_out') {
-    for (const supplier of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false }).eq('id', supplier.id))
+    for (const supplier of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', supplier.id))
     for (const c of matches) await checked(db.from('frete_consultas').update({ ia_pausada: true }).eq('id', c.id))
     if (!matches.length) return supplierMatches.length ? { semCotacao: true } : false
   }
@@ -29,8 +29,20 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     }
     return { semCotacao: true }
   }
+  const pause = async () => {
+    for (const c of matches) {
+      await checked(db.from('frete_consultas').update({ ia_pausada: true }).eq('id', c.id).neq('status', 'encerrada'))
+      await checked(db.from('frete_consultas').update({ status: 'revisao' }).eq('id', c.id).eq('completa', false).neq('status', 'encerrada'))
+    }
+  }
   const old = await checked(db.from('frete_mensagens').select('id').eq('evolution_id', evolutionId).limit(1))
-  if (old?.length) return true
+  if (old?.length) {
+    const respostas=await checked(db.from('frete_envios').select('id').eq('mensagem_id',old[0].id).limit(1))
+    let eco=false
+    if(fromMe){const enviados=await checked(db.from('frete_envios').select('provider_id,texto').in('consulta_id',matches.map(c=>c.id)).limit(100));const normalizar=v=>String(v||'').replace(/\s+/gu,' ').trim();eco=enviados?.some(e=>e.provider_id===evolutionId||normalizar(e.texto)===normalizar(texto))}
+    if(!respostas?.length&&!eco)await pause()
+    return true
+  }
   if (matches.length > 1) {
     const referenced = matches.filter(c => String(texto || '').toLowerCase().includes(c.cotacao_id.toLowerCase()))
     if (referenced.length === 1) matches = referenced
@@ -43,12 +55,6 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     if (!insert.error) { inserted = true; mensagemId = insert.data.id }
   }
   if (!inserted) return true
-  const pause = async () => {
-    for (const c of matches) {
-      await checked(db.from('frete_consultas').update({ ia_pausada: true }).eq('id', c.id).neq('status', 'encerrada'))
-      await checked(db.from('frete_consultas').update({ status: 'revisao' }).eq('id', c.id).eq('completa', false).neq('status', 'encerrada'))
-    }
-  }
   if (fromMe) {
     if (single) {
       const known = await checked(db.from('frete_envios').select('id,texto,provider_id').eq('consulta_id', single.id).limit(20))
@@ -59,7 +65,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   }
   const decision = decidirRespostaFrete(texto)
   if (decision.tipo === 'opt_out') {
-    for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false }).eq('id', s.id))
+    for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
     await pause(); return true
   }
   if (!single || mediaTipo || /humano|atendente|financeiro/i.test(String(texto || ''))) { await pause(); return true }
@@ -68,7 +74,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   if (cotacao.status !== 'aberta') return true
   const resposta = await interpret(texto, cotacao.dados)
   if (resposta.tipo === 'opt_out') {
-    for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false }).eq('id', s.id))
+    for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
   }
   if (resposta.tipo !== 'resposta') { await pause(); return true }
   await checked(db.rpc('frete_enfileirar_resposta', { p_consulta_id: single.id, p_mensagem_id: mensagemId, p_texto: resposta.texto }))

@@ -3,6 +3,7 @@
 // colaterais (marcarVendedorAssumiu, flip de atendimento_humano) que fazem
 // sentido pra conversa de venda mas não pra mensagem de cobrança.
 import axios from 'axios'
+import {supabase} from './supabase-admin.server.js'
 import { paraJidWhatsapp } from './telefone.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
@@ -36,6 +37,10 @@ async function existeNoWhatsapp(jid) {
 // mas só depois de tentar, e a mensagem de erro genérica não dizia o motivo
 // real). Se o formato de 8 dígitos falhar, tenta a variante com 9º dígito.
 export async function enviarTextoFinanceiro(numero, texto) {
+  if(process.env.FRETE_MODULO_INSTALADO==='true'){
+    const {error}=await supabase.rpc('frete_reservar_legado',{p_instancia:INSTANCE})
+    if(error)throw error
+  }
   const jidBase = paraJidWhatsapp(numero)
   let jidValido = await existeNoWhatsapp(jidBase)
   if (!jidValido) {

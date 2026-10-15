@@ -57,6 +57,14 @@ export async function contarEnviosReaisHojePorInstancia() {
 }
 
 export async function contarEnviosReaisDesdePorInstancia(inicioDia) {
+  if(process.env.FRETE_MODULO_INSTALADO==='true'){
+    const {data:instancias,error}=await supabase.from('whatsapp_instances').select('id,instance_name')
+    if(error)throw error
+    const mapa=new Map()
+    for(const i of instancias??[]){const {data,error:e}=await supabase.rpc('frete_contar_orcamento',{p_desde:inicioDia,p_instancia:i.instance_name});if(e)throw e;mapa.set(i.id,Number(data))}
+    return mapa
+  }
+
 
   const { data: dispatches, error: erroDispatches } = await supabase
     .from('collection_dispatches')

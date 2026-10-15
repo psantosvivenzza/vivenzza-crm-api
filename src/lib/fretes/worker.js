@@ -26,7 +26,7 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
   if (!rows?.length) return { status: 'vazio' }
   let envio = rows[0]
   let reservadoParaEnvio = false
-  let confirmado = false
+  let confirmado = false,estadoAlterado=false
   let instanciaId
   const finish = async (status, error_code) => {
     await checked(db.from('frete_envios').update({ status, error_code }).eq('id', envio.id))
@@ -60,14 +60,18 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
     reservadoParaEnvio = true
     const result = await send(instancia, envio.telefone, envio.texto)
     if (!result?.ok || !result.providerMessageId) return finish('revisao', 'RESULTADO_AMBIGUO')
-    await checked(db.from('frete_envios').update({ status: 'enviado', provider_id: result.providerMessageId, error_code: null }).eq('id', envio.id))
+    const atualizados=await checked(db.from('frete_envios').update({ status: 'enviado', provider_id: result.providerMessageId, error_code: null }).eq('id', envio.id).eq('status','enviando').select('id'))
+    if(!atualizados?.length){
+      await checked(db.from('frete_envios').update({provider_id:result.providerMessageId}).eq('id',envio.id))
+      estadoAlterado=true
+    }
     confirmado = true
     // Métricas não podem transformar sucesso confirmado em reenvio.
     try { await recordSuccess(instancia.id) } catch {}
     const saved = await db.from('frete_mensagens').insert({ cotacao_id: consulta.cotacao_id, consulta_id: consulta.id, direcao: 'saida', texto: envio.texto, evolution_id: result.providerMessageId })
     if (saved.error && saved.error.code !== '23505') throw saved.error
-    await checked(db.from('frete_consultas').update({ status: 'aguardando', updated_at: new Date(now).toISOString() }).eq('id', consulta.id).in('status', ['fila', 'enviando']).eq('ia_pausada', false))
-    return { status: 'enviado' }
+    if(!estadoAlterado)await checked(db.from('frete_consultas').update({ status: 'aguardando', updated_at: new Date(now).toISOString() }).eq('id', consulta.id).in('status', ['fila', 'enviando']).eq('ia_pausada', false))
+    return estadoAlterado?{status:'revisao',error_code:'ESTADO_ALTERADO_APOS_ENVIO'}:{ status: 'enviado' }
   } catch (error) {
     if (confirmado) {
       try { await checked(db.from('frete_envios').update({ error_code: 'HISTORICO_PENDENTE' }).eq('id', envio.id)) } catch {}

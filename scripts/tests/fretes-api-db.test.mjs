@@ -30,6 +30,7 @@ async function request(path, method = 'GET', body, role = 'financeiro') {
 const payload = () => ({ descricao: 'Embalagens sintéticas', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 2, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Fábrica A teste', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua sintética A' }, entrega: { nome: 'Fábrica B teste', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua sintética B' }, pagador: { nome: 'Empresa teste', cnpj: '33333333000133' }, transportadora_ids: [supplier], max_prazo_dias: 3 })
 test.before(async () => {
  await sql.connect()
+ try{
  await sql.query(`do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon nologin; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role nologin bypassrls; end if; end $$`)
  await sql.query(`create table if not exists public.fornecedores(id uuid primary key default gen_random_uuid(),cnpj text not null unique,razao_social text not null,nome_fantasia text,ie text,endereco jsonb,contatos jsonb,ativo boolean not null default true,origem text not null default 'manual',criado_por uuid,criado_em timestamptz not null default now(),atualizado_em timestamptz not null default now())`)
  if (!(await sql.query("select to_regclass('public.frete_cotacoes') present")).rows[0].present) await sql.query(await readFile(new URL('../../supabase/migrations/20261014140810_cotacoes_frete_fornecedores.sql', import.meta.url), 'utf8'))
@@ -40,11 +41,19 @@ test.before(async () => {
  await sql.query('alter table pedido_itens add column if not exists produto_id uuid,add column if not exists quantidade numeric')
  await sql.query('create table if not exists produtos(id uuid primary key default gen_random_uuid(),legacy_id text,unidade text,logistica_fisica jsonb)')
  await sql.query('alter table produtos add column if not exists legacy_id text,add column if not exists unidade text,add column if not exists logistica_fisica jsonb')
+ await sql.query(`create table if not exists automacoes_config(id integer primary key,multi_whatsapp boolean,global_daily_limit integer,global_hourly_limit integer);insert into automacoes_config values(1,true,1000,1000)on conflict(id)do update set global_daily_limit=1000,global_hourly_limit=1000;create table if not exists collection_dispatches(id uuid primary key,purpose text,origem text,criado_em timestamptz);create table if not exists collection_dispatch_attempts(id uuid primary key,dispatch_id uuid,whatsapp_instance_id uuid,criado_em timestamptz);create table if not exists whatsapp_instances(id uuid primary key default gen_random_uuid(),instance_name text unique);alter table whatsapp_instances add column if not exists enabled boolean default true,add column if not exists daily_limit integer,add column if not exists hourly_limit integer;create table if not exists cobrancas_whatsapp(id uuid primary key,data_envio timestamptz);`)
+ if(!(await sql.query("select to_regclass('public.frete_orcamento_controle') as t")).rows[0].t)await sql.query(await readFile(new URL('../../supabase/migrations/20261015194843_frete_concorrencia_orcamento.sql',import.meta.url),'utf8'))
+ // Atualiza somente funcoes deste schema sintetico para repetir o ensaio apos ajustes.
+ const novaMigration=await readFile(new URL('../../supabase/migrations/20261015194843_frete_concorrencia_orcamento.sql',import.meta.url),'utf8')
+ for(const fn of novaMigration.match(/create (?:or replace )?function[\s\S]*?\$\$;/g)??[])await sql.query(fn.replace(/^create (?:or replace )?function/,'create or replace function'))
+ for(const nome of ['frete_consulta_versao','frete_orcamento_insercao'])if(!(await sql.query('select 1 from pg_trigger where tgname=$1',[nome])).rows.length)await sql.query(novaMigration.match(new RegExp('create trigger '+nome+'[^;]+;'))[0])
+ await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
  const app = express(); app.use(express.json()); app.use('/api/fretes', auth, createFretesRouter(db,{loadLogistica:async()=>{if(falharDireta)throw Error('teste indisponível');return logisticaDireta}}))
  app.use('/api/produtos',auth,produtosRouter)
  server = app.listen(0, '127.0.0.1'); await new Promise(r => server.once('listening', r)); base = `http://127.0.0.1:${server.address().port}/api/fretes`
+ }catch(e){await sql.query('rollback');console.error('SETUP LOCAL',e.message);throw e}
 })
 test.after(async () => {
  if (supplier) {
@@ -53,6 +62,7 @@ test.after(async () => {
   const ids = (await sql.query('delete from frete_consultas where fornecedor_id=$1 returning cotacao_id', [supplier])).rows.map(r => r.cotacao_id)
   await sql.query('delete from frete_cotacoes where id=any($1::uuid[])', [ids]); await sql.query('delete from fornecedores where id=$1', [supplier])
  }
+ await sql.query('update frete_orcamento_controle set ativo=false where id=1')
  if (server) await new Promise(r => server.close(r)); await db._pool.end(); await sql.end()
 })
 test('API restringe vendedores e exige autenticação antes de ler fornecedor', async () => {
@@ -92,14 +102,16 @@ test('tentativas de frete consomem teto global e por instância mesmo com envios
   assert.equal((await verificarLimiteGlobalEnvio()).permitido, false)
   const instance = (await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0]
   assert.equal((await contarEnviosReaisHojePorInstancia()).get(instance.id), 1)
- } finally { process.env.FRETE_MODULO_INSTALADO = 'false' }
+ } finally { process.env.FRETE_MODULO_INSTALADO = 'false';await sql.query('update automacoes_config set global_daily_limit=1000,global_hourly_limit=1000 where id=1') }
 })
 test('proposta conferida entra no ranking, pausa assistente e consulta alheia é recusada', async () => {
  const q = (await sql.query('select id from frete_consultas where cotacao_id=$1', [cotacao.id])).rows[0]
  const body = { valor_total: 120, prazo_dias: 10, validade: '2030-01-01T00:00:00Z', completa: true }
  const pause = await request(`/${cotacao.id}/consultas/${q.id}`, 'PATCH', { ia_pausada: true }); assert.equal(pause.status, 200); assert.equal(pause.data.valor_total, null); assert.equal(pause.data.ia_pausada, true)
+ body.versao=pause.data.updated_at
  assert.equal((await request(`/${cotacao.id}/consultas/00000000-0000-4000-8000-000000000001`, 'PATCH', body)).status, 409)
  const save = await request(`/${cotacao.id}/consultas/${q.id}`, 'PATCH', body); assert.equal(save.status, 200); assert.equal(save.data.ia_pausada, true)
+ assert.equal((await request(`/${cotacao.id}/consultas/${q.id}`, 'PATCH', body)).status,409)
  const detail = await request(`/${cotacao.id}`); assert.equal(detail.data.comparativo.menor_valor.valor_total, 120); assert.equal(detail.data.comparativo.melhor_custo_beneficio, null)
  assert.equal((await request(`/${cotacao.id}/encerrar`, 'POST', {})).status, 200)
  assert.equal((await request(`/${cotacao.id}/consultas/${q.id}`, 'PATCH', body)).status, 409)
@@ -140,8 +152,8 @@ test('respostas simultâneas têm limite transacional de seis e pausam para revi
  await db.rpc('frete_encerrar_cotacao', { p_cotacao_id: c.id, p_actor: 'test' })
 })
 test('tabelas e RPCs não ficam disponíveis para anon/authenticated', async () => {
- const privileges = (await sql.query(`select has_table_privilege('anon','public.frete_cotacoes','SELECT') a,has_table_privilege('authenticated','public.frete_envios','INSERT') b,has_function_privilege('anon','public.frete_claim_envio(uuid)','EXECUTE') c`)).rows[0]
- assert.deepEqual(privileges, { a: false, b: false, c: false })
+ const privileges = (await sql.query(`select has_table_privilege('anon','public.frete_cotacoes','SELECT') a,has_table_privilege('authenticated','public.frete_envios','INSERT') b,has_function_privilege('anon','public.frete_claim_envio(uuid)','EXECUTE') c,has_table_privilege('anon','public.frete_reservas_legado','SELECT') d,has_function_privilege('authenticated','public.frete_ativar_orcamento(text)','EXECUTE') e`)).rows[0]
+ assert.deepEqual(privileges, { a: false, b: false, c: false,d:false,e:false })
  assert.equal((await sql.query("select count(*)::int n from pg_class where relname in('frete_cotacoes','frete_consultas','frete_mensagens','frete_envios') and relrowsecurity")).rows[0].n, 4)
 })
 
@@ -188,5 +200,59 @@ test('pedido por número preenche cliente/emitente/logística sem escrever pedid
  }finally {
   if(criada){await sql.query('delete from frete_consultas where cotacao_id=$1',[criada]);await sql.query('delete from frete_cotacoes where id=$1',[criada])}
   await sql.query('delete from pedidos where id=any($1::uuid[])',[[pedido,...(duplicado?[duplicado]:[])]]);await sql.query('delete from clientes_erp where id=$1',[cliente])
+ }
+})
+
+test('opt-out com tela antiga nao pode restaurar consentimento',async()=>{
+ const antigo=(await sql.query('select * from fornecedores where id=$1',[supplier])).rows[0]
+ await sql.query("update fornecedores set cotacao_frete_consentimento=false,cotacao_frete_atualizada_por='opt_out_inbound' where id=$1",[supplier])
+ const body={participa_cotacao_frete:true,telefone_cotacao_frete:antigo.telefone_cotacao_frete,cotacao_frete_consentimento:true,versao:antigo.cotacao_frete_atualizada_em}
+ assert.equal((await request(`/transportadoras/${supplier}`,'PATCH',body)).status,409)
+ assert.equal((await sql.query('select cotacao_frete_consentimento from fornecedores where id=$1',[supplier])).rows[0].cotacao_frete_consentimento,false)
+})
+
+test('reserva atomica disputa a ultima vaga entre frete, v2 e legado',async()=>{
+ const q=(await sql.query('select id from frete_consultas where fornecedor_id=$1 limit 1',[supplier])).rows[0].id
+ const instancia=(await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0].id
+ for(const porInstancia of [false,true]){
+  const d=(await sql.query("insert into collection_dispatches(id,purpose,origem,criado_em)values(gen_random_uuid(),'collection','manual',now())returning id")).rows[0].id
+  const e=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key)values($1,'5551999990001','teste concorrente',gen_random_uuid()::text)returning id",[q])).rows[0].id
+  let ids=[]
+  try{
+   const n=Number((await sql.query("select frete_contar_orcamento(date_trunc('hour',now()),$1) as n",[porInstancia?'vivenzza-financeiro':null])).rows[0].n)
+   await sql.query('update automacoes_config set global_daily_limit=1000,global_hourly_limit=$1 where id=1',[porInstancia?1000:n+1])
+   await sql.query('update whatsapp_instances set hourly_limit=$1 where id=$2',[porInstancia?n+1:null,instancia])
+   const tentativas=await Promise.allSettled([
+    db._pool.query('update frete_envios set attempted_at=clock_timestamp() where id=$1 returning id',[e]),
+    db._pool.query('insert into collection_dispatch_attempts(id,dispatch_id,whatsapp_instance_id,criado_em)values(gen_random_uuid(),$1,$2,clock_timestamp())returning id',[d,instancia]),
+    db._pool.query("select frete_reservar_legado('vivenzza-financeiro') as id")
+   ])
+   assert.equal(tentativas.filter(r=>r.status==='fulfilled').length,1)
+   for(const r of tentativas.filter(r=>r.status==='rejected'))assert.match(r.reason.message,/limite_.*reserva/)
+   if(tentativas[2].status==='fulfilled')ids.push(tentativas[2].value.rows[0].id)
+  }finally{
+   await sql.query('update automacoes_config set global_daily_limit=1000,global_hourly_limit=1000 where id=1')
+   await sql.query('update whatsapp_instances set hourly_limit=null where id=$1',[instancia])
+   await sql.query('delete from frete_reservas_legado where id=any($1::uuid[])',[ids]);await sql.query('delete from frete_envios where id=$1',[e]);await sql.query('delete from collection_dispatch_attempts where dispatch_id=$1',[d]);await sql.query('delete from collection_dispatches where id=$1',[d])
+  }
+ }
+})
+
+test('controle inativo preserva legado antes da ativacao e contagem nao reinicia ao trocar motor',async()=>{
+ const controle=(await sql.query('select to_jsonb(c) as c from frete_orcamento_controle c')).rows[0].c
+ const fixture=(await sql.query('insert into cobrancas_whatsapp(id,data_envio)values(gen_random_uuid(),now())returning id')).rows[0].id
+ let reserva
+ try{
+  await sql.query('update frete_orcamento_controle set ativo=false,ativado_em=null,contar_historico_legado=false where id=1;update automacoes_config set multi_whatsapp=false where id=1')
+  const n=Number((await sql.query("select frete_contar_orcamento(date_trunc('hour',now())) as n")).rows[0].n)
+  assert.ok(n>=1);assert.equal((await sql.query("select frete_reservar_legado('vivenzza-financeiro') as r")).rows[0].r,null)
+  await sql.query('select frete_ativar_orcamento()')
+  const inicio=Number((await sql.query("select frete_contar_orcamento(date_trunc('hour',now())) as n")).rows[0].n)
+  reserva=(await sql.query("select frete_reservar_legado('vivenzza-financeiro') as r")).rows[0].r
+  await sql.query('update automacoes_config set multi_whatsapp=true where id=1')
+  assert.equal(Number((await sql.query("select frete_contar_orcamento(date_trunc('hour',now())) as n")).rows[0].n),inicio+1)
+ }finally{
+  await sql.query('delete from frete_reservas_legado where id=$1',[reserva]);await sql.query('delete from cobrancas_whatsapp where id=$1',[fixture]);await sql.query('update automacoes_config set multi_whatsapp=true where id=1')
+  await sql.query('update frete_orcamento_controle set ativo=$1,ativado_em=$2,contar_historico_legado=$3 where id=1',[controle.ativo,controle.ativado_em,controle.contar_historico_legado])
  }
 })

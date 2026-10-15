@@ -45,6 +45,11 @@ import { obterConfigCobranca } from './featureFlags.js'
 import { contarTentativasFrete } from '../fretes/attemptCounter.js'
 
 export async function contarTentativasReaisDesde({ desde, origem = null }) {
+  if(!origem&&process.env.FRETE_MODULO_INSTALADO==='true'){
+    const {data,error}=await supabase.rpc('frete_contar_orcamento',{p_desde:desde,p_instancia:null})
+    if(error)throw error
+    return Number(data)
+  }
   const config = await obterConfigCobranca()
   const fretes = origem ? 0 : await contarTentativasFrete(desde)
 

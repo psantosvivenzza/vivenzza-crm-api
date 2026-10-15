@@ -63,7 +63,7 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
   router.get('/transportadoras', handler(async (req, res) => {
     const busca = String(req.query.busca ?? '').trim().replace(/[^\p{L}\p{N}\s-]/gu, '').slice(0, 100)
     const page = Math.max(1, Math.min(10000, Number.parseInt(req.query.page, 10) || 1))
-    let q = db.from('fornecedores').select('id,cnpj,razao_social,nome_fantasia,ativo,contatos,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento', { count: 'exact' }).order('razao_social').range((page - 1) * 100, page * 100 - 1)
+    let q = db.from('fornecedores').select('id,cnpj,razao_social,nome_fantasia,ativo,contatos,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento,cotacao_frete_atualizada_em', { count: 'exact' }).order('razao_social').range((page - 1) * 100, page * 100 - 1)
     if (busca) {
       const digits=busca.replace(/\D/g,'')
       const mascara=digits.length===14?digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,'$1.$2.$3/$4-$5'):null
@@ -76,8 +76,8 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
   }))
   router.patch('/transportadoras/:id', handler(async (req, res) => {
     const campos = validarConfigTransportadora(req.body)
-    const fornecedor = check(await db.from('fornecedores').update({ ...campos, cotacao_frete_atualizada_em: new Date().toISOString(), cotacao_frete_atualizada_por: req.user.id, atualizado_em: new Date().toISOString() }).eq('id', id(req.params.id)).select().maybeSingle())
-    if (!fornecedor) throw new FreteError('Fornecedor não encontrado.', 404)
+    if(!Object.hasOwn(req.body,'versao')||(req.body.versao!==null&&(typeof req.body.versao!=='string'||!Number.isFinite(Date.parse(req.body.versao)))))throw new FreteError('Atualize o cadastro antes de salvar.',409)
+    const fornecedor=check(await db.rpc('frete_configurar_transportadora',{p_id:id(req.params.id),p_versao:req.body.versao,p_campos:campos,p_actor:req.user.id}))
     res.json(fornecedor)
   }))
   router.get('/', handler(async (req, res) => {
@@ -121,6 +121,8 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
       return res.json(row)
     }
     const campos = validarProposta(req.body)
+    if(typeof req.body.versao!=='string'||!Number.isFinite(Date.parse(req.body.versao)))throw new FreteError('Atualize a proposta antes de salvar.',409)
+    campos.versao=req.body.versao
     await cotacao(req.params.id)
     const row = check(await db.rpc('frete_salvar_proposta', { p_cotacao_id: id(req.params.id), p_consulta_id: id(req.params.consultaId), p_campos: campos, p_actor: req.user.id }))
     res.json(row)
