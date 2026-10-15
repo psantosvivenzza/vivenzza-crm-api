@@ -37,7 +37,7 @@ export async function startCluster(run, port = 15581) {
   await bootstrap.end()
   config.database = 'campaign_review_synthetic'
   const admin = new pg.Client(config); await admin.connect()
-  try { await admin.query(fs.readFileSync(path.join(repo, 'supabase/migrations/20261015190408_campaign_review_proposals.sql'), 'utf8')) }
+  try { await admin.query(fs.readFileSync(path.join(repo, 'scripts/sql/campaign_review_proposals_candidate.sql'), 'utf8')) }
   catch (e) { await admin.end(); stop(); throw e }
   return { admin, config, dir, port, stop, start, runtime }
 }

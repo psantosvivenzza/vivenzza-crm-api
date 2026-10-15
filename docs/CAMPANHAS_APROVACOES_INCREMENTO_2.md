@@ -10,7 +10,7 @@ O contrato agora permite `rejeitada`, listagem das 100 propostas mais recentes e
 
 ## Persistência
 
-Migration candidata local `supabase/migrations/20261015190408_campaign_review_proposals.sql`, nome manual com timestamp UTC observado, conforme autorização para escrita local e CLI ausente. Não aplicada ao Supabase real. Documentação oficial consultada: [migrations](https://supabase.com/docs/guides/deployment/database-migrations) e [RLS](https://supabase.com/docs/guides/database/postgres/row-level-security); changelog markdown não pôde ser obtido pela ferramenta web.
+SQL candidato local `scripts/sql/campaign_review_proposals_candidate.sql`, mantido fora do journal produtivo. Não aplicado ao Supabase real; o caminho anterior foi retirado de supabase/migrations na composição de release para impedir aplicação acidental. Documentação oficial consultada: [migrations](https://supabase.com/docs/guides/deployment/database-migrations) e [RLS](https://supabase.com/docs/guides/database/postgres/row-level-security); changelog markdown não pôde ser obtido pela ferramenta web.
 
 Schema privado `campaign_review`, RLS, sem acesso anon/authenticated e sem DELETE/TRUNCATE para service_role. Nos testes service_role é NOBYPASSRLS; isso não afirma a configuração de Supabase hospedado. GRANTs e trigger protegem as operações mesmo que o papel hospedado tenha bypass. Trigger invoker/search_path vazio valida transições, imutabilidade de payload/hash, aprovação e histórico append-only, sempre na mesma atualização CAS. Índice único impede duas propostas em execução para o mesmo alvo. Hash canônico, limites e tempo são verificados pela aplicação; o banco não recalcula o hash.
 

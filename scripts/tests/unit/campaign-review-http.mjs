@@ -139,7 +139,7 @@ try {
     Object.assign(sim.store, restored.store); Object.assign(sim.adapter, restored.adapter)
     assert.equal((await request('GET', `${root}/${p.id}`)).body.state, 'aprovada')
   })
-  report.migrationSha256 = createHash('sha256').update(fs.readFileSync(path.join(repo, 'supabase/migrations/20261015190408_campaign_review_proposals.sql'))).digest('hex')
+  report.migrationSha256 = createHash('sha256').update(fs.readFileSync(path.join(repo, 'scripts/sql/campaign_review_proposals_candidate.sql'))).digest('hex')
 } catch (e) { report.failure = { code: e.code ?? null, message: e.message }; process.exitCode = 1; console.error(e.stack) }
 finally {
   if (server) await new Promise((r) => server.close(r))

@@ -1,11 +1,11 @@
 # Campanhas — revisão persistente somente decisão (incremento 3)
 
-Local, sem push/merge/deploy, sem migration nova e sem alteração de env, flags, credenciais ou cron. `src/index.js` continua montando `createCampaignReviewRouter()` sem composição: produção responde 503 (fail-closed).
+Incremento original local, sem deploy nem alteração de env, flags, credenciais ou cron. Nesta branch de release, o SQL de Campanhas continua candidato em scripts/sql, fora de supabase/migrations; a migration de CNPJ do frete já aplicada foi preservada. `src/index.js` continua montando `createCampaignReviewRouter()` sem composição: produção responde 503 (fail-closed).
 
 ## O que está pronto para configuração
 
 - `createCampaignReviewWorkflow` (`src/lib/campaignApproval.js`): propor, aprovar, rejeitar, consultar e listar. **Não possui execução** (`capabilities.execute = false`, sem método `execute`) e recusa qualquer `adapter`. Reusa o mesmo núcleo, hash canônico, validade, CAS, política do servidor e ator do JWT do workflow sintético.
-- `createCampaignReviewComposition({ db, policy })` (`src/lib/campaignReviewComposition.js`): monta store PostgreSQL (`campaign_review.proposals`, migration `20261015190408`) + workflow de revisão + intake manual. Recebe pg já configurado e política do chamador; não lê env nem credenciais; recusa adapter.
+- `createCampaignReviewComposition({ db, policy })` (`src/lib/campaignReviewComposition.js`): monta store PostgreSQL (`campaign_review.proposals`, SQL candidato em `scripts/sql/campaign_review_proposals_candidate.sql`) + workflow de revisão + intake manual. Recebe pg já configurado e política do chamador; não lê env nem credenciais; recusa adapter.
 - Router (`src/routes/campaign-reviews.js`): modo `review` informa `capabilities { execute: false, intake: true }` e `consultadoEm`. `POST /:id/executar` em modo revisão responde 409 `EXECUCAO_DESABILITADA_MODO_REVISAO` antes de tocar workflow/store — testado com POST direto: linha, revisão e histórico idênticos.
 - Contrato v2: `origin { kind: manual|synthetic, verified: false }` dentro do payload (hash + imutável pelo trigger). Origem verificada é recusada até existir leitor real.
 - Intake `POST /propostas`: o navegador envia só alvo, ação, antes/depois, objetivo, motivo e o que observou. Servidor define origem manual não verificada, fonte, horário de registro e validade (`maxEvidenceAgeMs`). Campos extras → 400. Escopo e limites da política continuam obrigatórios.
@@ -23,7 +23,7 @@ Acessos e contratos reais que faltam para ajustar anúncios após aprovação:
 1. Leitor verificado de configuração: Meta `daily_budget`/`status`/moeda da campanha (ou ad set, conforme o orçamento) e Google `campaign_budget.amount_micros`/`campaign.status`/moeda da conta, com conversão de unidades (centavos × micros) testada.
 2. Escritor por provedor com idempotência e erro tipado. Permissões reais das credenciais existentes não foram consultadas nem validadas: o código já contém funções de escrita (guard Meta, `gadsMutate`), mas presença de configuração não prova escopo efetivo. Falta confirmar autorização e escopo para uso neste novo executor, além dos contratos/adaptadores.
 3. Política real aprovada pelo responsável: contas, campanhas, ações, tetos e variação máxima.
-4. Migration `20261015190408` aplicada com autorização explícita (hoje só local).
+4. Aplicação produtiva do SQL candidato depende de autorização explícita de schema e de migração versionada própria; hoje ele existe somente nos clusters locais de homologação, fora do journal produtivo.
 5. Reconciliação de `em execução`/`inconclusiva` somente leitura.
 6. Composição de produção que injete store/política reais — decisão deliberada, fora deste incremento.
 
@@ -37,4 +37,4 @@ Nenhum teste deste incremento prova Ads ou IA reais.
 
 ## Release
 
-O HEAD desta branch descende de 750691b (VVZ-R01, relatório Meta → Sheets). R01 não está autorizado para publicação: a futura composição de release desta entrega deve excluir esse commit (3 arquivos `meta-report*`).
+O candidato original descendia de 750691b (VVZ-R01, relatório Meta → Sheets). Esta branch codex/campanhas-frete-release-20261015 foi recomposta sobre o frete publicado sem esse ancestral e sem delta nos três arquivos meta-report. O SQL de revisão permanece apenas candidato local; ativação produtiva exige autorização específica de schema, wiring e release. Contrato frontend/backend deve ser publicado coordenadamente; não habilitar execução Ads.

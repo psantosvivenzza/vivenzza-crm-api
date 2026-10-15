@@ -1,4 +1,4 @@
--- Local-only candidate; manual UTC filename authorized because CLI unavailable.
+-- Candidato SOMENTE para homologacao local. Nao aplicar em producao sem release/schema autorizado.
 CREATE SCHEMA campaign_review;
 REVOKE ALL ON SCHEMA campaign_review FROM PUBLIC, anon, authenticated;
 GRANT USAGE ON SCHEMA campaign_review TO service_role;
