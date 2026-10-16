@@ -41,6 +41,12 @@ const CONFIG_DIR = process.env.PONTO_LOCAL_SERVICO_CONFIG_DIR || path.join(os.tm
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json')
 const ORIGENS_PERMITIDAS = (process.env.PONTO_LOCAL_SERVICO_ORIGENS_PERMITIDAS || 'http://localhost:5173,http://127.0.0.1:5173')
   .split(',').map((s) => s.trim()).filter(Boolean)
+// Allowlist exata das origens de API do CRM às quais este serviço aceita se
+// cadastrar. Sem ela, qualquer página com Origin permitido (ou quem obtivesse
+// o token de pareamento) poderia apontar o serviço para um backend arbitrário
+// e receber dele um "segredo de desafio" forjado.
+const APIS_PERMITIDAS = (process.env.PONTO_LOCAL_SERVICO_API_PERMITIDAS || 'http://localhost:3001,http://127.0.0.1:3001')
+  .split(',').map((s) => s.trim()).filter(Boolean)
 const AUTO_CONFIRMAR = process.env.PONTO_LOCAL_SERVICO_AUTO_CONFIRMAR === 'true' // SÓ testes automatizados — nunca em uso real.
 
 const PAIRING_TOKEN = crypto.randomBytes(24).toString('base64url')
@@ -136,6 +142,26 @@ function validarOrigemEHost(req, res) {
   return true
 }
 
+// Preflight CORS. Um fetch do navegador com content-type JSON + header
+// x-ponto-pairing-token SEMPRE dispara OPTIONS antes; sem esta rota o
+// pareamento pelo CRM nunca funcionaria de dentro do navegador. Origin/Host
+// continuam validados; o token NÃO é exigido aqui (preflight não leva headers
+// customizados) — a rota real que ele antecede o exige.
+// Allow-Private-Network: exigido pelo Chrome (Private Network Access) quando
+// uma página pública fala com 127.0.0.1.
+function tratarPreflight(req, res) {
+  if (!validarOrigemEHost(req, res)) return
+  res.writeHead(204, {
+    'access-control-allow-origin': req.headers.origin,
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
+    'access-control-allow-headers': 'content-type, x-ponto-pairing-token',
+    'access-control-allow-private-network': 'true',
+    'access-control-max-age': '600',
+    vary: 'Origin',
+  })
+  res.end()
+}
+
 function validarPareamento(req, res) {
   const token = req.headers['x-ponto-pairing-token']
   if (token !== PAIRING_TOKEN) {
@@ -150,6 +176,11 @@ async function tratarCadastrar(req, res) {
   const { codigoVinculo, crmApiBaseUrl } = corpo
   if (!codigoVinculo || !crmApiBaseUrl) {
     return enviarJson(res, 400, { erro: 'codigoVinculo e crmApiBaseUrl são obrigatórios.' })
+  }
+  let apiOrigem
+  try { apiOrigem = new URL(crmApiBaseUrl).origin } catch { apiOrigem = null }
+  if (!apiOrigem || !APIS_PERMITIDAS.includes(apiOrigem)) {
+    return enviarJson(res, 400, { erro: 'crmApiBaseUrl não está na lista de APIs permitidas deste serviço.' })
   }
 
   const nomeChave = `MeuPonto_${crypto.randomUUID()}`
@@ -242,10 +273,13 @@ async function tratarAssinarMarcacao(req, res) {
 
 const servidor = http.createServer(async (req, res) => {
   try {
+    if (req.method === 'OPTIONS' && ['/status', '/cadastrar', '/assinar-marcacao'].includes(req.url)) {
+      return tratarPreflight(req, res)
+    }
     if (req.method === 'GET' && req.url === '/status') {
       if (!validarOrigemEHost(req, res)) return
       const config = await lerConfig()
-      return enviarJson(res, 200, { ok: true, pareado: Boolean(config) })
+      return enviarJson(res, 200, { ok: true, pareado: Boolean(config), equipamentoId: config?.equipamentoId ?? null })
     }
     if (req.method === 'POST' && req.url === '/cadastrar') {
       if (!validarOrigemEHost(req, res)) return
