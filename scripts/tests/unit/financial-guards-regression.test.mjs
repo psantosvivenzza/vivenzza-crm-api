@@ -121,7 +121,7 @@ function mockHttp(t, respond) {
       const table = new URL(url).pathname.split('/').at(-1)
       const method = options?.method ?? 'GET'
       requests.push({ table, method })
-      const response = respond(table, method)
+      const response = respond(table, method, new URL(url))
       return new Response(JSON.stringify(response.body), { status: response.status ?? 200, headers: { 'Content-Type': 'application/json' } })
     },
   })
@@ -197,3 +197,42 @@ test('real local SQL adapter preserves missing optional table SQLSTATE without a
   fixture.responses = { collection_calls: result }
   assert.deepEqual(await varrerTitulosPendentesEcancelarQuitados(), { verificados: 0, quitados: 0 })
 })
+
+for (const broken of ['first', 'last', 'all', 'none']) {
+  test(`one title failure does not starve remaining reconciliation: ${broken}`, async (t) => {
+    const titles = ['synthetic-first', 'synthetic-last']
+    const seen = []
+    const isBroken = (id) => broken === 'all' || (broken === 'first' && id === titles[0]) || (broken === 'last' && id === titles[1])
+    const requests = mockHttp(t, (table, method, url) => {
+      if (table === 'contas_financeiras') {
+        const id = url.searchParams.get('id').slice(3)
+        seen.push(id)
+        return isBroken(id) ? { status: 400, body: { code: 'SYNTHETIC_FAILURE', message: 'sensitive synthetic title detail' } } : { body: { status: 'cancelada' } }
+      }
+      if (table === 'collection_dispatches') {
+        if (url.searchParams.get('select') === 'contas_financeiras_id') return { body: titles.map(contas_financeiras_id => ({ contas_financeiras_id })) }
+        return { body: [{ id: 'synthetic-dispatch' }] }
+      }
+      if (table === 'collection_calls') return missingTable('PGRST205')
+      return { body: [] }
+    })
+    let failure
+    let result
+    try { result = await varrerTitulosPendentesEcancelarQuitados() } catch (error) { failure = error }
+    if (broken === 'none') {
+      assert.equal(failure, undefined)
+      assert.deepEqual(result, { verificados: 2, quitados: 2 })
+      assert.deepEqual(seen, titles)
+      assert.equal(requests.filter(r => r.method === 'PATCH').length, 2)
+      return
+    }
+    assert.ok(failure instanceof AggregateError)
+    assert.equal(failure.code, 'PAYMENT_RECONCILIATION_PARTIAL_FAILURE')
+    assert.deepEqual(seen, titles)
+    assert.deepEqual(failure.resultado, { verificados: 2, quitados: broken === 'all' ? 0 : 1, falhas: broken === 'all' ? 2 : 1 })
+    assert.equal(failure.errors.length, broken === 'all' ? 2 : 1)
+    assert.ok(failure.errors.every(error => error.code === 'SYNTHETIC_FAILURE'))
+    assert.doesNotMatch(failure.message, /synthetic|sensitive|title detail/)
+    assert.equal(requests.filter(r => r.method === 'PATCH').length, broken === 'all' ? 0 : 1)
+  })
+}
