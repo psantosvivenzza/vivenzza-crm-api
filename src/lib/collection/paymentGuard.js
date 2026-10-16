@@ -174,9 +174,22 @@ export async function varrerTitulosPendentesEcancelarQuitados() {
   for (const l of ligacoesAbertas ?? []) idsComPendencia.add(l.contas_financeiras_id)
 
   let quitados = 0
+  const falhas = []
   for (const id of idsComPendencia) {
-    const resultado = await cancelarAutomacaoPorPagamento(id)
-    if (resultado.dispatches || resultado.ligacoes || resultado.promessaCumprida) quitados++
+    try {
+      const resultado = await cancelarAutomacaoPorPagamento(id)
+      if (resultado.dispatches || resultado.ligacoes || resultado.promessaCumprida) quitados++
+    } catch (error) {
+      // Um título problemático não pode impedir a reconciliação dos seguintes.
+      // Preserva as causas para o chamador, sem dados de títulos na mensagem do cron.
+      falhas.push(error)
+    }
+  }
+  if (falhas.length) {
+    const error = new AggregateError(falhas, `Reconciliação incompleta: ${falhas.length} falha(s) em ${idsComPendencia.size} título(s).`)
+    error.code = 'PAYMENT_RECONCILIATION_PARTIAL_FAILURE'
+    error.resultado = { verificados: idsComPendencia.size, quitados, falhas: falhas.length }
+    throw error
   }
   return { verificados: idsComPendencia.size, quitados }
 }
