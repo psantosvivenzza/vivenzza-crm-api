@@ -3,6 +3,16 @@
 Execute `node --test scripts/tests/unit/*.test.mjs` na raiz do worktree.
 Esses testes não precisam de Postgres nem carregam credenciais de ambiente.
 
+`financial-guards-regression.test.mjs` cobre status e timestamps do sync e
+falhas de descoberta do sweep de pagamentos, importando os módulos reais com
+mocks nas fronteiras. Requer Node com `node:module.registerHooks` (validado em
+Node 24.16.0). Execute isoladamente com
+`node --test scripts/tests/unit/financial-guards-regression.test.mjs`.
+Inclui o cliente PostgREST instalado com fetch simulado e o adaptador SQL com
+driver simulado. Em worktree sem dependências, `VIVENZZA_TEST_PACKAGE_JSON` pode
+apontar para o package.json de um checkout autorizado com dependências já
+instaladas. Isso só muda a resolução dos testes; não instala nem copia pacotes.
+
 ## Validação da preparação de fixtures financeiras
 
 `fixture-result.test.mjs` verifica propagação explícita de falhas (incluindo
