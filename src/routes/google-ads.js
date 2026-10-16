@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { gaqlQuery, googleAdsConfigurado } from '../lib/googleAdsClient.js'
+import { normalizeGoogleCampaign, readMetadata } from '../lib/campaignMetrics.js'
 
 const router = Router()
 
@@ -13,6 +14,7 @@ const fromMicros = (v) => Number(v || 0) / 1_000_000
 function requireConfig(res) {
   if (!googleAdsConfigurado()) {
     res.status(503).json({
+      codigo: 'CAMPANHAS_NAO_CONFIGURADO',
       erro: 'Google Ads ainda não configurado.',
       pendente: [
         'GOOGLE_ADS_CLIENT_ID',
@@ -51,24 +53,9 @@ router.get('/resumo', async (req, res) => {
         AND campaign.status != 'REMOVED'
     `)
 
-    const campanhas = rows.map((r) => ({
-      fonte:          'google',
-      id:             String(r.campaign.id),
-      nome:           r.campaign.name,
-      status:         r.campaign.status,                              // já é string: "ENABLED" | "PAUSED"
-      gasto:          fromMicros(r.metrics.costMicros),
-      impressoes:     Number(r.metrics.impressions  || 0),
-      alcance:        0,                                              // não disponível em campanhas padrão
-      cliques:        Number(r.metrics.clicks       || 0),
-      ctr:            Number(r.metrics.ctr          || 0) * 100,     // API retorna 0–1, converte para %
-      cpm:            fromMicros(r.metrics.averageCpm),
-      conversas:      Number(r.metrics.conversions  || 0),
-      custoConversa:  r.metrics.costPerConversion
-        ? fromMicros(r.metrics.costPerConversion)
-        : null,
-    }))
+    const campanhas = rows.map(normalizeGoogleCampaign)
 
-    res.json({ campanhas, periodo: { fonte: 'google', dias: 30 } })
+    res.json({ campanhas, periodo: { fonte: 'google', dias: 30 }, dados: readMetadata() })
   } catch (err) {
     console.error('[google-ads/resumo]', err.message)
     res.status(500).json({ erro: err.message })
@@ -95,13 +82,13 @@ router.get('/historico', async (req, res) => {
     const byDay = {}
     for (const r of rows) {
       const dia = r.segments.date
-      if (!byDay[dia]) byDay[dia] = { dia, gasto: 0, conversas: 0 }
+      if (!byDay[dia]) byDay[dia] = { dia, gasto: 0, conversas: null, conversoes: 0 }
       byDay[dia].gasto      = parseFloat((byDay[dia].gasto + fromMicros(r.metrics.costMicros)).toFixed(2))
-      byDay[dia].conversas += Number(r.metrics.conversions || 0)
+      byDay[dia].conversoes += Number(r.metrics.conversions || 0)
     }
 
     const serie = Object.values(byDay).sort((a, b) => a.dia.localeCompare(b.dia))
-    res.json({ serie, periodo: { fonte: 'google', dias: 30 } })
+    res.json({ serie, periodo: { fonte: 'google', dias: 30 }, dados: readMetadata() })
   } catch (err) {
     console.error('[google-ads/historico]', err.message)
     res.status(500).json({ erro: err.message })
