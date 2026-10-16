@@ -33,6 +33,27 @@ test('not installed touches no database and makes no send', async () => {
   assert.equal((await runFreteQueue({ db, installed: false })).status, 'nao_instalado')
   assert.equal(await handleFreteInbound({ instanceName: 'vivenzza-financeiro' }, { db, installed: false }), false)
 })
+
+test('Evolution open from the healthcheck is connected; unavailable states never contact provider', async () => {
+  for (const state of ['open', 'connected', 'connecting', 'close', 'disconnected', 'unknown', null]) {
+    const f = fixture(); f.tables.whatsapp_instances[0].connection_status = state
+    let sends = 0
+    const result = await runFreteQueue({ ...f.opts, send: async () => { sends++; return { ok: true, providerMessageId: 'synthetic-connection-check' } } })
+    const ready = state === 'open' || state === 'connected'
+    assert.equal(result.status, ready ? 'enviado' : 'aguardando_instancia', String(state))
+    assert.equal(sends, ready ? 1 : 0, String(state))
+    assert.equal(f.claims(), ready ? 1 : 0, String(state))
+  }
+})
+
+test('Evolution open does not bypass a disabled instance, disconnected health or active cooldown', async () => {
+  for (const override of [{ enabled: false }, { health_status: 'disabled' }, { health_status: 'disconnected' }, { cooldown_until: '2099-01-01T00:00:00Z' }]) {
+    const f = fixture(); Object.assign(f.tables.whatsapp_instances[0], { connection_status: 'open' }, override)
+    const result = await runFreteQueue({ ...f.opts, send: () => { throw Error('unexpected provider contact') } })
+    assert.equal(result.status, 'aguardando_instancia')
+    assert.equal(f.claims(), 0)
+  }
+})
 test('DNC and revoked consent block before claiming or contacting provider', async () => {
   for (const revoked of [false, true]) {
     const f = fixture(); if (revoked) f.tables.fornecedores[0].cotacao_frete_consentimento = false

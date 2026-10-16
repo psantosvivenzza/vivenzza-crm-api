@@ -41,7 +41,9 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
     if (envio.instance_name !== FRETE_INSTANCE || consulta.instance_name !== FRETE_INSTANCE || cotacao.status !== 'aberta' || consulta.status === 'encerrada' || consulta.ia_pausada || fornecedor.ativo !== true || fornecedor.participa_cotacao_frete !== true || fornecedor.cotacao_frete_consentimento !== true || !telefonesEquivalentes(envio.telefone, fornecedor.telefone_cotacao_frete) || !telefonesEquivalentes(envio.telefone, consulta.telefone)) return finish('bloqueado', 'CADASTRO_OU_COTACAO_BLOQUEADA')
     const instancia = await checked(db.from('whatsapp_instances').select('*').eq('instance_name', FRETE_INSTANCE).single())
     instanciaId = instancia.id
-    if (!instancia.enabled || instancia.connection_status !== 'connected' || ['disabled', 'disconnected'].includes(instancia.health_status) || (instancia.cooldown_until && new Date(instancia.cooldown_until) > new Date(now))) return { status: 'aguardando_instancia' }
+    // O healthcheck persiste o estado bruto da Evolution (open). Aceitar também
+    // connected preserva compatibilidade com cadastros já normalizados.
+    if (!instancia.enabled || !['open', 'connected'].includes(instancia.connection_status) || ['disabled', 'disconnected'].includes(instancia.health_status) || (instancia.cooldown_until && new Date(instancia.cooldown_until) > new Date(now))) return { status: 'aguardando_instancia' }
     for (const candidato of candidatosTelefone(envio.telefone)) {
       if ((await dnc(candidato)).blocked) return finish('bloqueado', 'DNC')
     }
