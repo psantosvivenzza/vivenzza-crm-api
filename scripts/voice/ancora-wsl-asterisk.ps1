@@ -13,7 +13,7 @@
 # O QUE ESTE SCRIPT NUNCA FAZ:
 #   - Nao roda a fila de cobranca nem disca para ninguem.
 #   - Nao amplia allowlist nem mexe em automacoes_config.
-#   - Nao inicia/reinicia o servico de voz do Windows (run-voice-service) —
+#   - Nao inicia/reinicia o servico de voz do Windows (run-voice-service) -
 #     isso fica a cargo do fluxo manual existente (INICIAR-SERVICO-VOZ.ps1 /
 #     npm run voice:service), que ja e protegido pelo guard de codigo
 #     desatualizado em scripts/voice/verificar-servico-voz.mjs. Reiniciar o
@@ -70,7 +70,7 @@ if (-not $acquired) {
 try {
     Write-Log '--- Ancora WSL/Asterisk: inicio ---'
 
-    # 1) Acorda a distro se estiver parada. Um comando trivial ja basta —
+    # 1) Acorda a distro se estiver parada. Um comando trivial ja basta -
     #    isso NAO altera nenhuma configuracao, so garante que a VM/distro
     #    esta em pe.
     $antes = (wsl.exe -l -v 2>$null | Out-String)
@@ -91,7 +91,7 @@ try {
     }
     Write-Log "Asterisk (systemctl is-active): $asteriskAtivo"
 
-    # 3) Evidencia somente-leitura a partir daqui — nada abaixo altera estado.
+    # 3) Evidencia somente-leitura a partir daqui - nada abaixo altera estado.
     $trunk = (wsl.exe -d $Distro -u root -- asterisk -rx 'pjsip show registrations' 2>$null | Out-String)
     Write-Log "NVOIP trunk (pjsip show registrations):`n$trunk"
 
@@ -102,18 +102,18 @@ try {
 
     try {
         $ollama = Invoke-WebRequest -Uri 'http://127.0.0.1:11434/api/version' -UseBasicParsing -TimeoutSec 3
-        Write-Log "Ollama (Windows, 127.0.0.1:11434): up — $($ollama.Content)"
+        Write-Log "Ollama (Windows, 127.0.0.1:11434): up - $($ollama.Content)"
     } catch {
-        Write-Log "Ollama (Windows, 127.0.0.1:11434): DOWN — $($_.Exception.Message)"
+        Write-Log "Ollama (Windows, 127.0.0.1:11434): DOWN - $($_.Exception.Message)"
     }
 
     $servicoVoz = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'run-voice-service' } |
         Select-Object -First 1
     if ($servicoVoz) {
-        Write-Log "Servico de voz (Windows): rodando — PID $($servicoVoz.ProcessId), desde $($servicoVoz.CreationDate)"
+        Write-Log "Servico de voz (Windows): rodando - PID $($servicoVoz.ProcessId), desde $($servicoVoz.CreationDate)"
     } else {
-        Write-Log 'Servico de voz (Windows): NAO esta rodando. Fora de escopo desta ancora (nao inicia sozinha) — suba manualmente com INICIAR-SERVICO-VOZ.ps1 / npm run voice:service antes da janela, se precisar.'
+        Write-Log 'Servico de voz (Windows): NAO esta rodando. Fora de escopo desta ancora (nao inicia sozinha) - suba manualmente com INICIAR-SERVICO-VOZ.ps1 / npm run voice:service antes da janela, se precisar.'
     }
 
     foreach ($rel in @('scripts\voice\tts_worker.py', 'scripts\voice\stt_worker.py', 'scripts\voice\tts_synthesize.py', 'scripts\voice\stt_transcribe.py')) {
@@ -126,7 +126,7 @@ try {
 catch {
     # Qualquer falha aqui (wsl.exe travado, systemctl sem resposta, WSL2
     # lento para acordar depois de horas ocioso, etc.) virava um stack trace
-    # cru do PowerShell e nada no log — quem olhasse o log via achar que a
+    # cru do PowerShell e nada no log - quem olhasse o log via achar que a
     # ancora nao tinha rodado. Agora vira uma linha objetiva e saida != 0.
     # Fail-closed sem efeito colateral: esta ancora nunca disca nem altera
     # configuracao, entao falhar aqui so significa evidencia incompleta
