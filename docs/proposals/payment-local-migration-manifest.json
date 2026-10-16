@@ -1,0 +1,9 @@
+{
+  "at": "2026-10-15T18:02:29.193Z",
+  "file": "supabase/migrations/20261015180229_collection_payment_atomic.sql",
+  "sha256": "809aa2bde4af4746e535d73d524c4b577b8e9f659dd8e5f5412f372513a98972",
+  "parent": "1404db2f060ac743cafa49b88d16956886d0c0d1",
+  "generation": "manual local file explicitly requested by user, UTC timestamp from current clock, CLI not executed",
+  "source": "https://supabase.com/docs/guides/deployment/database-migrations",
+  "remoteApplied": false
+}

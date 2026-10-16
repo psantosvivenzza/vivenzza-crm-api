@@ -10,7 +10,24 @@
 import { varrerTitulosPendentesEcancelarQuitados } from '../lib/collection/paymentGuard.js'
 
 export async function runPaymentReconciliationSweep() {
-  const resultado = await varrerTitulosPendentesEcancelarQuitados()
-  console.log('[payment-reconciliation-sweep] concluído:', resultado)
-  return resultado
+  try {
+    const resultado = await varrerTitulosPendentesEcancelarQuitados()
+    console.log('[payment-reconciliation-sweep] concluído:', resultado)
+    return resultado
+  } catch (error) {
+    // Sinal estável para monitoramento, sem mensagens/causas/IDs de títulos.
+    // Não envia alerta externo nem converte falha em execução bem-sucedida.
+    const parcial = error?.code === 'PAYMENT_RECONCILIATION_PARTIAL_FAILURE'
+    const contagem = campo => {
+      const valor = error?.resultado?.[campo]
+      return Number.isSafeInteger(valor) && valor >= 0 ? valor : null
+    }
+    console.error('[payment-reconciliation-sweep] falha:', {
+      code: parcial ? 'PAYMENT_RECONCILIATION_PARTIAL_FAILURE' : 'PAYMENT_RECONCILIATION_FAILURE',
+      verificados: contagem('verificados'),
+      quitados: contagem('quitados'),
+      falhas: contagem('falhas'),
+    })
+    throw error
+  }
 }

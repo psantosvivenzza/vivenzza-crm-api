@@ -1,0 +1,222 @@
+{
+  "at": "2026-10-16T23:40:50.150Z",
+  "run": "release-20261016-v3",
+  "port": 15579,
+  "database": "vivenzza_atomic_rpc_synthetic",
+  "postgres": "pg_ctl (PostgreSQL) 17.11",
+  "migrationFile": "supabase/migrations/20261015180229_collection_payment_atomic.sql",
+  "sqlSha256": "809aa2bde4af4746e535d73d524c4b577b8e9f659dd8e5f5412f372513a98972",
+  "network": {
+    "tcpAllowed": 28,
+    "tcpBlocked": 0,
+    "fetchBlocked": 0
+  },
+  "tests": [
+    {
+      "name": "RPC compile / service_role / DTO / events / retry after ignored committed result",
+      "status": "passed"
+    },
+    {
+      "name": "Rollback complete on PROMESSA_CUMPRIDA insert failure",
+      "status": "passed"
+    },
+    {
+      "name": "Rollback complete on PAGO insert failure",
+      "status": "passed"
+    },
+    {
+      "name": "Two real connections / same title / exact-once transitions and events",
+      "status": "passed",
+      "evidence": {
+        "backends": 2,
+        "dispatchTransitions": 1,
+        "promiseTransitions": 1,
+        "events": 2
+      }
+    },
+    {
+      "name": "Direct promise RPC concurrent / null retry / allowed origin / invalid origin",
+      "status": "passed"
+    },
+    {
+      "name": "Mixed cancel versus direct HUMAN fulfillment / dispatch=true / first=cancel",
+      "status": "passed",
+      "evidence": {
+        "backends": 2,
+        "promiseEvents": 1,
+        "pagoEvents": 1,
+        "winner": "PAYMENT_RECONCILIATION"
+      }
+    },
+    {
+      "name": "Mixed cancel versus direct HUMAN fulfillment / dispatch=true / first=human",
+      "status": "passed",
+      "evidence": {
+        "backends": 2,
+        "promiseEvents": 1,
+        "pagoEvents": 1,
+        "winner": "HUMAN"
+      }
+    },
+    {
+      "name": "Mixed cancel versus direct HUMAN fulfillment / dispatch=false / first=cancel",
+      "status": "passed",
+      "evidence": {
+        "backends": 2,
+        "promiseEvents": 1,
+        "pagoEvents": 1,
+        "winner": "PAYMENT_RECONCILIATION"
+      }
+    },
+    {
+      "name": "Mixed cancel versus direct HUMAN fulfillment / dispatch=false / first=human",
+      "status": "passed",
+      "evidence": {
+        "backends": 2,
+        "promiseEvents": 1,
+        "pagoEvents": 0,
+        "winner": "HUMAN"
+      }
+    },
+    {
+      "name": "Reason parity: open",
+      "status": "passed"
+    },
+    {
+      "name": "Reason parity: cancelled",
+      "status": "passed"
+    },
+    {
+      "name": "Reason parity: review",
+      "status": "passed"
+    },
+    {
+      "name": "Reason parity: zero balance",
+      "status": "passed"
+    },
+    {
+      "name": "Reason parity: partial",
+      "status": "passed"
+    },
+    {
+      "name": "Reason parity: overpaid",
+      "status": "passed"
+    },
+    {
+      "name": "Missing title / no invented payment event",
+      "status": "passed"
+    },
+    {
+      "name": "Existing historical PAGO preserved / no backfill or duplication",
+      "status": "passed"
+    },
+    {
+      "name": "Optional call queue present / cancellation and counts",
+      "status": "passed"
+    },
+    {
+      "name": "Optional call table permission failure rolls back",
+      "status": "passed"
+    },
+    {
+      "name": "Optional call column mismatch rolls back",
+      "status": "passed"
+    },
+    {
+      "name": "RPC ACL denies anon",
+      "status": "passed"
+    },
+    {
+      "name": "RPC ACL denies authenticated",
+      "status": "passed"
+    },
+    {
+      "name": "Isolation rejects REPEATABLE READ without transitions",
+      "status": "passed"
+    },
+    {
+      "name": "Row lock timeout preserves all pending work and retry recovers",
+      "status": "passed",
+      "evidence": {
+        "timeoutCode": "55P03",
+        "rollbackComplete": true,
+        "retryEvents": 2
+      }
+    },
+    {
+      "name": "Independent title proceeds while other title key is locked",
+      "status": "passed"
+    },
+    {
+      "name": "Future event ordering strictly promise before PAGO",
+      "status": "passed",
+      "evidence": {
+        "iterations": 20,
+        "strictlyOrdered": true
+      }
+    },
+    {
+      "name": "Actual JS adapters + actual SQL adapter + PostgreSQL RPC",
+      "status": "passed"
+    },
+    {
+      "name": "Actual sweep aggregates one rollback, continues and recovers on next sweep",
+      "status": "passed"
+    },
+    {
+      "name": "HTTP actual auth and financial write allowlist reject unauthorized callers",
+      "status": "passed",
+      "evidence": {
+        "auth": "real JWT middleware",
+        "denied": [
+          401,
+          401,
+          403,
+          403
+        ],
+        "mutations": 0
+      }
+    },
+    {
+      "name": "HTTP creates real promise, rejects invalid date and duplicate without extra rows",
+      "status": "passed"
+    },
+    {
+      "name": "HTTP promise -> synthetic payment fixture -> actual job/RPC -> HTTP sanitized ordered timeline",
+      "status": "passed",
+      "evidence": {
+        "httpEvents": 3,
+        "rawDataExposed": false,
+        "repeatDuplicates": 0,
+        "job": "real exported function; no scheduler started"
+      }
+    },
+    {
+      "name": "HTTP reads prove full rollback after job failure and next-run recovery",
+      "status": "passed"
+    },
+    {
+      "name": "HTTP paid-title promise blocked and missing-title read returns 404",
+      "status": "passed"
+    }
+  ],
+  "stopped": true,
+  "published": false,
+  "realData": false,
+  "identity": {
+    "db": "vivenzza_atomic_rpc_synthetic",
+    "host": "127.0.0.1",
+    "dir": "<exclusive-synthetic-cluster>",
+    "listen": "127.0.0.1",
+    "port": "15579"
+  },
+  "appliedToSynthetic": true,
+  "http": {
+    "host": "127.0.0.1",
+    "port": 53854,
+    "closed": true,
+    "auth": "actual middleware with ephemeral synthetic JWTs"
+  },
+  "passed": 33,
+  "failed": 0
+}
