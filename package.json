@@ -40,7 +40,7 @@
     "test:fretes:db": "node --test scripts/tests/fretes-api-db.test.mjs",
     "test:fretes:webhook": "node --test scripts/tests/fretes-webhook.test.mjs",
     "test:fretes:sync": "node --test scripts/tests/fretes-sync.test.mjs",
-    "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs"
+    "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs scripts/tests/fretes-cadastro-offline.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
