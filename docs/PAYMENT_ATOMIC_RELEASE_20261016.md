@@ -24,7 +24,7 @@ não são alterados grants/RLS das tabelas existentes.
 
 ## Verificação fresca
 
-- 50/50 testes unitários: `financial-guards-regression.test.mjs`,
+- 73/73 testes unitários: `financial-guards-regression.test.mjs`,
   `payment-atomic-rpc.test.mjs` e `payment-reconciliation-job.test.mjs`. Resolução de pacotes existentes via
   `VIVENZZA_TEST_PACKAGE_JSON`; nenhum .env ou serviço externo carregado.
 - 33/33 critérios PostgreSQL/HTTP nas execuções v1 e v2, preservadas
@@ -127,9 +127,56 @@ remota ocorreu neste preflight.
 Segunda revisão Claude, exit 0: nenhum bug de lógica bloqueante. Ajustes
 de evidência: comando sem usuário local; relatórios v1/v2 não serão enviados
 ao repositório; harness valida o caminho real, mas publica marcador redigido.
-O sinal de falha é deliberadamente genérico: não distingue RPC ausente,
-timeout de lock e isolamento incorreto. Diagnóstico de causa e monitoramento
-operacional permanecem gates explícitos antes de produção. FOR UPDATE pode
+Na segunda revisão, o sinal ainda não distinguia as causas de falha; essa
+pendência de diagnóstico foi tratada no incremento abaixo. Monitoramento
+operacional permanece gate explícito antes de produção. FOR UPDATE pode
 conflitar com KEY SHARE de FKs e triggers do sync; esse risco de contenção
 e deadlock exige validação no ambiente autorizado, sem presumir paridade
 do baseline parcial. Não foi alterado o SQL revisado nesta rodada.
+
+## Incremento — classificação sanitizada de falhas
+
+O job acrescenta `causas` ao log já existente: lista deduplicada e fechada
+de classes operacionais, tanto para erro individual quanto para os erros
+diretos de um AggregateError. Nunca expõe mensagem, detalhes, IDs, códigos
+arbitrários ou a árvore bruta de causas. Erro desconhecido ou agregado vazio
+produz `desconhecida`; a exceção original continua sendo propagada.
+
+| Código reconhecido | Classe registrada |
+| --- | --- |
+| PGRST202 | rpc_indisponivel (função ausente ou cache/assinatura desatualizado) |
+| 55P03 | timeout_lock |
+| 25001 | contexto_transacao (estas RPCs exigem READ COMMITTED) |
+| 40P01 | deadlock |
+| 40001 | falha_serializacao |
+| 42501 | permissao_negada |
+| 42P01, PGRST204, PGRST205 | schema_incompativel |
+| 57014 | consulta_cancelada |
+| ECONNRESET, ETIMEDOUT, 08006 | conexao_indisponivel |
+| 23514 | integridade_dados |
+| P0001 | rejeicao_banco |
+
+Allowlist propositalmente limitada; códigos não listados não são copiados
+nem inferidos pela mensagem. Classes indicam a categoria, não provam a causa
+raiz nem autorizam retry, correção de schema, ativação ou envio.
+
+Reprodução inicial antes da implementação: 17 casos novos falharam por
+ausência do campo de causas; os 3 testes anteriores ainda com suas asserções
+originais passaram. A primeira implementação passou 20/20 do job e 67/67
+financeiros. Revisão acrescentou deadlock, serialização e proteção contra
+getters/logger lançando erro: cobertura final de 26 testes do job e 73 financeiros.
+Casos incluem códigos arbitrários, `__proto__`, dados sensíveis sintéticos,
+causas repetidas e agregado vazio. Falhas ao construir/gravar o diagnóstico
+nunca substituem a exceção original; metadados ilegíveis viram desconhecidos.
+Nenhum SQL, guard de pagamento, transição financeira ou flag foi alterado.
+Referências primárias consultadas:
+[PostgREST](https://docs.postgrest.org/en/stable/references/errors.html) e
+[PostgreSQL](https://www.postgresql.org/docs/current/errcodes-appendix.html).
+
+Revisão final Claude deste incremento: exit 0, sem bug bloqueante ou
+regressão. Limites retidos: erros de rede sem `code` no nível direto (por
+exemplo, código somente em `cause`) continuam desconhecidos; não inspecionar
+mensagem ou árvore arbitrária para inferir conectividade. Um objeto com
+getter inválido pode rebaixar todo o diagnóstico para o fallback genérico,
+sem afetar a exceção original. Alertas devem contemplar ambos os códigos
+de falha, não depender exclusivamente de PARTIAL_FAILURE.
