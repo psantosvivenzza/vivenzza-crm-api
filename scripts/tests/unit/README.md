@@ -1,5 +1,11 @@
 # Testes unitários sem serviços
 
+O harness `payment-atomic-cluster.mjs` é uma exceção executada manualmente,
+não um teste unitário: cria PostgreSQL e HTTP exclusivamente locais e
+sintéticos. Não rode via scripts genéricos de reset. Veja
+`docs/PAYMENT_ATOMIC_RELEASE_20261016.md` para isolamento, dependências e
+gates de publicação. `payment-atomic-rpc.test.mjs` continua sem serviços.
+
 Execute `node --test scripts/tests/unit/*.test.mjs` na raiz do worktree.
 Esses testes não precisam de Postgres nem carregam credenciais de ambiente.
 

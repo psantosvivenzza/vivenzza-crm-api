@@ -1,0 +1,455 @@
+{
+  "columns": [
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "contas_financeiras_id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "etapa",
+      "data_type": "integer",
+      "udt_name": "int4",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "canal",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": "'whatsapp'::text"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "idempotency_key",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "status",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": "'queued'::text"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "origem",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "mensagem",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "cliente_nome",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "cliente_telefone",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "valor",
+      "data_type": "numeric",
+      "udt_name": "numeric",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "criado_em",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "atualizado_em",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "cancelado_em",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "cancelado_motivo",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_dispatches",
+      "column_name": "purpose",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": "'collection'::text"
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "contas_financeiras_id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "cliente_nome",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "cliente_telefone",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "valor",
+      "data_type": "numeric",
+      "udt_name": "numeric",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "promised_date",
+      "data_type": "date",
+      "udt_name": "date",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "origem",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "status",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": "'ativa'::text"
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "notes",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "created_at",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "fulfilled_at",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "broken_at",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_promises",
+      "column_name": "cancelled_at",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "contas_financeiras_id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "cliente_telefone",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "tipo",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "origem",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "canal",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "descricao",
+      "data_type": "text",
+      "udt_name": "text",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "dados",
+      "data_type": "jsonb",
+      "udt_name": "jsonb",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "criado_por",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "YES",
+      "column_default": null
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "column_name": "criado_em",
+      "data_type": "timestamp with time zone",
+      "udt_name": "timestamptz",
+      "is_nullable": "NO",
+      "column_default": "now()"
+    },
+    {
+      "table_name": "contas_financeiras",
+      "column_name": "id",
+      "data_type": "uuid",
+      "udt_name": "uuid",
+      "is_nullable": "NO",
+      "column_default": "gen_random_uuid()"
+    },
+    {
+      "table_name": "contas_financeiras",
+      "column_name": "valor",
+      "data_type": "numeric",
+      "udt_name": "numeric",
+      "is_nullable": "NO",
+      "column_default": null
+    },
+    {
+      "table_name": "contas_financeiras",
+      "column_name": "status",
+      "data_type": "character varying",
+      "udt_name": "varchar",
+      "is_nullable": "NO",
+      "column_default": "'aberta'::character varying"
+    },
+    {
+      "table_name": "contas_financeiras",
+      "column_name": "valor_pago",
+      "data_type": "numeric",
+      "udt_name": "numeric",
+      "is_nullable": "NO",
+      "column_default": "0"
+    },
+    {
+      "table_name": "contas_financeiras",
+      "column_name": "em_revisao_financeira",
+      "data_type": "boolean",
+      "udt_name": "bool",
+      "is_nullable": "NO",
+      "column_default": "false"
+    }
+  ],
+  "constraints": [
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_canal_check",
+      "definition": "CHECK ((canal = ANY (ARRAY['whatsapp'::text, 'ai_whatsapp'::text])))"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_contas_financeiras_id_fkey",
+      "definition": "FOREIGN KEY (contas_financeiras_id) REFERENCES contas_financeiras(id)"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_origem_check",
+      "definition": "CHECK ((origem = ANY (ARRAY['cron'::text, 'manual'::text, 'nba'::text])))"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_pkey",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_purpose_check",
+      "definition": "CHECK ((purpose = ANY (ARRAY['collection'::text, 'internal_test'::text])))"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_purpose_conta_check",
+      "definition": "CHECK (((purpose = 'internal_test'::text) OR (contas_financeiras_id IS NOT NULL)))"
+    },
+    {
+      "table_name": "collection_dispatches",
+      "conname": "collection_dispatches_status_check",
+      "definition": "CHECK ((status = ANY (ARRAY['queued'::text, 'sending'::text, 'sent'::text, 'delivered'::text, 'read'::text, 'failed'::text, 'expired'::text, 'cancelled'::text])))"
+    },
+    {
+      "table_name": "collection_promises",
+      "conname": "collection_promises_contas_financeiras_id_fkey",
+      "definition": "FOREIGN KEY (contas_financeiras_id) REFERENCES contas_financeiras(id)"
+    },
+    {
+      "table_name": "collection_promises",
+      "conname": "collection_promises_origem_check",
+      "definition": "CHECK ((origem = ANY (ARRAY['AUTOMATION'::text, 'AI'::text, 'HUMAN'::text])))"
+    },
+    {
+      "table_name": "collection_promises",
+      "conname": "collection_promises_pkey",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table_name": "collection_promises",
+      "conname": "collection_promises_status_check",
+      "definition": "CHECK ((status = ANY (ARRAY['ativa'::text, 'cumprida'::text, 'quebrada'::text, 'cancelada'::text])))"
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "conname": "collection_timeline_events_contas_financeiras_id_fkey",
+      "definition": "FOREIGN KEY (contas_financeiras_id) REFERENCES contas_financeiras(id)"
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "conname": "collection_timeline_events_criado_por_fkey",
+      "definition": "FOREIGN KEY (criado_por) REFERENCES usuarios(id)"
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "conname": "collection_timeline_events_origem_check",
+      "definition": "CHECK ((origem = ANY (ARRAY['AUTOMATION'::text, 'AI'::text, 'HUMAN'::text, 'SYSTEM'::text, 'PAYMENT_RECONCILIATION'::text])))"
+    },
+    {
+      "table_name": "collection_timeline_events",
+      "conname": "collection_timeline_events_pkey",
+      "definition": "PRIMARY KEY (id)"
+    }
+  ],
+  "rls": [
+    {
+      "relname": "contas_financeiras",
+      "relrowsecurity": true,
+      "relforcerowsecurity": false
+    },
+    {
+      "relname": "collection_timeline_events",
+      "relrowsecurity": true,
+      "relforcerowsecurity": false
+    },
+    {
+      "relname": "collection_promises",
+      "relrowsecurity": true,
+      "relforcerowsecurity": false
+    },
+    {
+      "relname": "collection_dispatches",
+      "relrowsecurity": true,
+      "relforcerowsecurity": false
+    }
+  ]
+}

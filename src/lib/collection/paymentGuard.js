@@ -8,8 +8,6 @@
 // Usa exatamente a mesma lógica de saldo já usada em cobranca-whatsapp.js
 // (valor - valor_pago <= 0 => quitado) — não reinventa outra fonte de verdade.
 import { supabase } from '../supabase-admin.server.js'
-import { registrarEvento, ORIGEM } from './timeline.js'
-import { promessaAtivaPara, marcarPromessaCumprida } from './promises.js'
 
 // Usar apenas nos acessos diretos a collection_calls, tabela opcional.
 // PostgreSQL direto retorna 42P01; PostgREST retorna PGRST205 para tabela ausente.
@@ -54,92 +52,9 @@ export async function tituloEstaQuitado(contasFinanceirasId) {
 // titulo_inexistente só param a automação pendente, nunca fingem que houve
 // pagamento (pedido explícito: separar claramente os motivos).
 export async function cancelarAutomacaoPorPagamento(contasFinanceirasId) {
-  const status = await statusQuitacaoTitulo(contasFinanceirasId)
-  const canceladas = { dispatches: 0, promessaCumprida: false, ligacoes: 0, motivo: status.motivo }
-  if (!status.quitado) return canceladas
-
-  const { data: dispatches, error: errDispatches } = await supabase
-    .from('collection_dispatches')
-    .select('id')
-    .eq('contas_financeiras_id', contasFinanceirasId)
-    .in('status', ['queued', 'sending'])
-  if (errDispatches) throw errDispatches
-
-  for (const d of dispatches ?? []) {
-    const { data: cancelado, error: errCancelar } = await supabase
-      .from('collection_dispatches')
-      .update({ status: 'cancelled', cancelado_em: new Date().toISOString(), cancelado_motivo: status.motivo })
-      .eq('id', d.id)
-      .in('status', ['queued', 'sending']) // condicional — se outra execução já cancelou, 0 linhas afetadas
-      .select()
-      .maybeSingle()
-    if (errCancelar) throw errCancelar
-    if (cancelado) canceladas.dispatches++
-  }
-
-  // collection_calls (fila de ligação agendada) é uma tabela da frente de
-  // voz experimental (docs/archive/cobranca-ai-v2-original/) — não existe no
-  // schema real hoje (a tabela real de voz, voice_calls, é só auditoria
-  // técnica de chamada já feita, não uma fila de pendências a cancelar).
-  // Somente ausência dessa tabela (42P01 em PostgreSQL direto ou PGRST205
-  // em PostgREST) é tratada como feature ainda não existente. Qualquer outro erro
-  // (conexão caída, auth, timeout) continua propagando normalmente, nunca é
-  // engolido. Se a tabela vier a existir no futuro, o cancelamento passa a
-  // funcionar sem mudar código.
-  const { data: ligacoes, error: errLigacoes } = await supabase
-    .from('collection_calls')
-    .select('id')
-    .eq('contas_financeiras_id', contasFinanceirasId)
-    .in('status', ['agendada', 'em_andamento'])
-  if (errLigacoes && !tabelaLigacoesOpcionalAusente(errLigacoes)) throw errLigacoes
-  for (const l of ligacoes ?? []) {
-    const { data: cancelada, error: errCancelarLigacao } = await supabase
-      .from('collection_calls')
-      .update({ status: 'cancelada' })
-      .eq('id', l.id)
-      .in('status', ['agendada', 'em_andamento'])
-      .select()
-      .maybeSingle()
-    if (errCancelarLigacao && !tabelaLigacoesOpcionalAusente(errCancelarLigacao)) throw errCancelarLigacao
-    if (cancelada) canceladas.ligacoes++
-  }
-
-  if (status.motivo === 'quitado') {
-    const promessa = await promessaAtivaPara(contasFinanceirasId)
-    if (promessa) {
-      const marcada = await marcarPromessaCumprida(promessa.id, { origem: ORIGEM.PAYMENT_RECONCILIATION })
-      canceladas.promessaCumprida = Boolean(marcada)
-    }
-    // Guarda extra contra o caso raro de duas execuções concorrentes
-    // cancelarem DISPATCHES DIFERENTES do mesmo título (cada uma vê
-    // canceladas.dispatches>0 de forma legítima, nenhuma delas duplicou uma
-    // transição já feita pela outra) — sem isso, as duas emitiriam PAGO. Um
-    // título só é pago 1x na vida neste domínio, então "já existe algum
-    // evento PAGO" é uma checagem suficiente (não uma janela de corrida
-    // perfeitamente atômica, mas node-cron noOverlap:true nos 2 jobs novos já
-    // elimina a fonte real de concorrência — isto é defesa em profundidade).
-    if (canceladas.dispatches || canceladas.promessaCumprida || canceladas.ligacoes) {
-      const { data: pagoExistente, error: errCheck } = await supabase
-        .from('collection_timeline_events')
-        .select('id')
-        .eq('contas_financeiras_id', contasFinanceirasId)
-        .eq('tipo', 'PAGO')
-        .limit(1)
-        .maybeSingle()
-      if (errCheck) throw errCheck
-      if (!pagoExistente) {
-        await registrarEvento({
-          contasFinanceirasId,
-          tipo: 'PAGO',
-          origem: ORIGEM.PAYMENT_RECONCILIATION,
-          descricao: `Automação cancelada por pagamento confirmado (${canceladas.dispatches} disparo(s), ${canceladas.ligacoes} ligação(ões), promessa cumprida=${canceladas.promessaCumprida})`,
-          dados: canceladas,
-        })
-      }
-    }
-  }
-
-  return canceladas
+  const { data, error } = await supabase.rpc('collection_cancel_paid_atomic', { p_title_id: contasFinanceirasId })
+  if (error) throw error
+  return data
 }
 
 // Job periódico (src/jobs/payment-reconciliation-sweep.js) — varre títulos com

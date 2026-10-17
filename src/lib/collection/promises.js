@@ -136,24 +136,8 @@ export async function cancelarPromessaAtiva(contasFinanceirasId, { origem = ORIG
 // Retorna null quando a transição não ocorreu (idempotência real, não só
 // "segunda chamada sequencial não encontra mais nada pendente").
 export async function marcarPromessaCumprida(promiseId, { origem = ORIGEM.SYSTEM } = {}) {
-  const { data, error } = await supabase
-    .from('collection_promises')
-    .update({ status: 'cumprida', fulfilled_at: new Date().toISOString() })
-    .eq('id', promiseId)
-    .eq('status', 'ativa')
-    .select()
-    .maybeSingle()
+  const { data, error } = await supabase.rpc('collection_fulfill_promise_atomic', { p_promise_id: promiseId, p_origin: origem })
   if (error) throw error
-  if (!data) return null
-
-  await registrarEvento({
-    contasFinanceirasId: data.contas_financeiras_id,
-    clienteTelefone: data.cliente_telefone,
-    tipo: 'PROMESSA_CUMPRIDA',
-    origem,
-    descricao: 'Promessa de pagamento cumprida',
-    dados: { promise_id: promiseId },
-  })
   return data
 }
 

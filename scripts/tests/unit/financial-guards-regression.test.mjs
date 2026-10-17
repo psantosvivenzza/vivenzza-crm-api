@@ -15,6 +15,10 @@ delete process.env.COBRANCA_SYNC_MAX_ATRASO_MIN
 const fixtureKey = Symbol.for('vivenzza.financial-guards.regression')
 const fixture = globalThis[fixtureKey] = { responses: {}, queries: [] }
 fixture.client = {
+  rpc(name,args) {
+    if(fixture.httpClient)return fixture.httpClient.rpc(name,args)
+    return Promise.resolve(fixture.responses.rpc ?? {data:{dispatches:0,promessaCumprida:false,ligacoes:0,motivo:null},error:null})
+  },
   from(table) {
     if (fixture.httpClient) return fixture.httpClient.from(table)
     fixture.queries.push(table)
@@ -120,8 +124,8 @@ function mockHttp(t, respond) {
     fetch: async (url, options) => {
       const table = new URL(url).pathname.split('/').at(-1)
       const method = options?.method ?? 'GET'
-      requests.push({ table, method })
-      const response = respond(table, method, new URL(url))
+      requests.push({ table, method, body: options?.body ? JSON.parse(options.body) : null })
+      const response = respond(table, method, new URL(url), options?.body ? JSON.parse(options.body) : null)
       return new Response(JSON.stringify(response.body), { status: response.status ?? 200, headers: { 'Content-Type': 'application/json' } })
     },
   })
@@ -136,21 +140,6 @@ for (const code of ['PGRST205', '42P01']) {
     mockHttp(t, (table) => table === 'collection_calls' ? missingTable(code) : { body: [] })
     assert.deepEqual(await varrerTitulosPendentesEcancelarQuitados(), { verificados: 0, quitados: 0 })
   })
-  for (const stage of ['select', 'update']) {
-    test(`individual cancellation tolerates optional missing table on ${stage}: ${code}`, async (t) => {
-      mockHttp(t, (table, method) => {
-        if (table === 'contas_financeiras') return { body: { status: 'cancelada' } }
-        if (table === 'collection_calls') {
-          if (stage === 'select' || method === 'PATCH') return missingTable(code)
-          return { body: [{ id: 'synthetic-call' }] }
-        }
-        return { body: [] }
-      })
-      const result = await cancelarAutomacaoPorPagamento('synthetic-title')
-      assert.equal(result.motivo, 'cancelado')
-      assert.equal(result.ligacoes, 0)
-    })
-  }
   for (const table of ['collection_dispatches', 'collection_promises']) {
     test(`missing mandatory table still rejects via HTTP client: ${table}/${code}`, async (t) => {
       const requests = mockHttp(t, (current) => current === table ? missingTable(code) : { body: [] })
@@ -165,19 +154,7 @@ for (const code of ['42501', '08006', 'ECONNRESET', 'PGRST204', 'PGRST2050', '42
       ? { status: 503, body: { code, message: 'synthetic failure' } } : { body: [] })
     await assert.rejects(varrerTitulosPendentesEcancelarQuitados(), (error) => error.code === code)
   })
-  for (const stage of ['select', 'update']) {
-    test(`individual optional ${stage} propagates non-absence error: ${code}`, async (t) => {
-      mockHttp(t, (table, method) => {
-        if (table === 'contas_financeiras') return { body: { status: 'cancelada' } }
-        if (table === 'collection_calls') {
-          if (stage === 'select' || method === 'PATCH') return { status: 400, body: { code, message: 'synthetic failure' } }
-          return { body: [{ id: 'synthetic-call' }] }
-        }
-        return { body: [] }
-      })
-      await assert.rejects(cancelarAutomacaoPorPagamento('synthetic-title'), (error) => error.code === code)
-    })
-  }
+
 }
 test('optional table propagates rejected fetch (network failure)', async (t) => {
   fixture.httpClient = new PostgrestClient('https://synthetic.invalid/rest/v1', { retry: false, fetch: async (url) => {
@@ -203,11 +180,11 @@ for (const broken of ['first', 'last', 'all', 'none']) {
     const titles = ['synthetic-first', 'synthetic-last']
     const seen = []
     const isBroken = (id) => broken === 'all' || (broken === 'first' && id === titles[0]) || (broken === 'last' && id === titles[1])
-    const requests = mockHttp(t, (table, method, url) => {
-      if (table === 'contas_financeiras') {
-        const id = url.searchParams.get('id').slice(3)
+    const requests = mockHttp(t, (table, method, url, body) => {
+      if (table === 'collection_cancel_paid_atomic') {
+        const id = body.p_title_id
         seen.push(id)
-        return isBroken(id) ? { status: 400, body: { code: 'SYNTHETIC_FAILURE', message: 'sensitive synthetic title detail' } } : { body: { status: 'cancelada' } }
+        return isBroken(id) ? { status: 400, body: { code: 'SYNTHETIC_FAILURE', message: 'sensitive synthetic title detail' } } : { body: {dispatches:1,promessaCumprida:false,ligacoes:0,motivo:'cancelado'} }
       }
       if (table === 'collection_dispatches') {
         if (url.searchParams.get('select') === 'contas_financeiras_id') return { body: titles.map(contas_financeiras_id => ({ contas_financeiras_id })) }
@@ -223,7 +200,7 @@ for (const broken of ['first', 'last', 'all', 'none']) {
       assert.equal(failure, undefined)
       assert.deepEqual(result, { verificados: 2, quitados: 2 })
       assert.deepEqual(seen, titles)
-      assert.equal(requests.filter(r => r.method === 'PATCH').length, 2)
+      assert.equal(requests.filter(r => r.method === 'POST').length, 2)
       return
     }
     assert.ok(failure instanceof AggregateError)
@@ -233,6 +210,13 @@ for (const broken of ['first', 'last', 'all', 'none']) {
     assert.equal(failure.errors.length, broken === 'all' ? 2 : 1)
     assert.ok(failure.errors.every(error => error.code === 'SYNTHETIC_FAILURE'))
     assert.doesNotMatch(failure.message, /synthetic|sensitive|title detail/)
-    assert.equal(requests.filter(r => r.method === 'PATCH').length, broken === 'all' ? 0 : 1)
+    assert.equal(requests.filter(r => r.method === 'POST').length, 2)
   })
 }
+
+// Per-title optional-table semantics now run in the actual SQL cluster.
+for(const code of ['PGRST202','42P01','PGRST205','42501','08006','P0001'])test('RPC failure propagates without non-atomic fallback: '+code,async(t)=>{
+  const requests=mockHttp(t,(name)=>name==='collection_cancel_paid_atomic'?{status:400,body:{code,message:'SYNTHETIC'}}:{body:[]})
+  await assert.rejects(()=>cancelarAutomacaoPorPagamento('synthetic-title'),e=>e.code===code)
+  assert.equal(requests.length,1);assert.equal(requests[0].method,'POST');assert.deepEqual(requests[0].body,{p_title_id:'synthetic-title'})
+})
