@@ -9,14 +9,29 @@
  * das 07h às 19h — a régua de cobrança só dispara 08h-17h e exige sincronização
  * com no máximo 4h de atraso.
  */
-import 'dotenv/config'
-import { executarSincronizacaoFinanceira } from '../src/jobs/sync-financeiro-legado.js'
-import { conferirEregistrar } from '../src/lib/conferenciaFinanceira.js'
-import { enviarAlertaWhatsapp } from '../src/lib/whatsappAlert.js'
+const argumentos = process.argv.slice(2)
+const flagsPermitidas = new Set(['--dry-run', '--watch', '--completo'])
+if (argumentos.some(argumento => !flagsPermitidas.has(argumento))) {
+  // Não ecoar argumentos desconhecidos: podem conter dados sensíveis.
+  console.error('Argumentos não reconhecidos. Use somente --dry-run, --watch ou --completo; nenhuma operação foi iniciada.')
+  process.exit(2)
+}
 
 const dryRun = process.argv.includes('--dry-run')
 const watch = process.argv.includes('--watch')
 const completo = process.argv.includes('--completo')
+
+// O loop residente aplica alterações e pode enviar alertas. Nunca permita
+// que --dry-run seja silenciosamente ignorado; recuse antes de carregar env/IO.
+if (dryRun && watch) {
+  console.error('Combinação não suportada: --watch com --dry-run. Para simular, use somente --dry-run (execução pontual).')
+  process.exit(2)
+}
+
+await import('dotenv/config')
+const { executarSincronizacaoFinanceira } = await import('../src/jobs/sync-financeiro-legado.js')
+const { conferirEregistrar } = await import('../src/lib/conferenciaFinanceira.js')
+const { enviarAlertaWhatsapp } = await import('../src/lib/whatsappAlert.js')
 
 const fmtBRL = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 
