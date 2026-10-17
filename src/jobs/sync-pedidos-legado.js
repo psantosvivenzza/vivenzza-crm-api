@@ -228,14 +228,17 @@ export async function processarPedido({ row, legacyId, mapaClientes, mapaProduto
 export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
   let logisticaAtiva=process.env.FRETE_LOGISTICA_SYNC_ATIVA==='true'
   if(logisticaAtiva){const probe=await supabase.from('pedidos').select('frete_logistica').limit(1);if(probe.error){logisticaAtiva=false;console.warn('[sync pedidos] snapshot logístico desabilitado: schema/leitura indisponível')}}
-  const { data: ultima } = await supabase
+  const { data: ultima, error: erroHistorico } = await supabase
     .from('sincronizacoes_pedidos')
     .select('cursor_final')
-    .in('status', ['concluido', 'concluido_com_erros'])
+    // Um ciclo parcial pode ter sucesso após a linha que falhou. Seu cursor
+    // não comprova que todas as linhas anteriores foram persistidas.
+    .eq('status', 'concluido')
     .not('cursor_final', 'is', null)
     .order('concluido_em', { ascending: false })
     .limit(1)
     .maybeSingle()
+  if (erroHistorico) throw erroHistorico
 
   const cursorAnterior = ultima?.cursor_final ? new Date(ultima.cursor_final) : null
   const desde = cursorAnterior ? new Date(cursorAnterior.getTime() - JANELA_SEGURANCA_MS) : null
@@ -249,7 +252,8 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
 
   const contadores = { total_lido: 0, total_criado: 0, total_atualizado: 0, total_ignorado: 0, total_com_erro: 0 }
   const erros = []
-  let cursorFinal = desde ?? new Date(0)
+  // A janela amplia a leitura, não deve regredir o checkpoint em ciclo vazio.
+  let cursorFinal = cursorAnterior ?? new Date(0)
   let e01Client
 
   try {
@@ -304,17 +308,19 @@ export async function executarSincronizacaoPedidos({ usuarioId = null } = {}) {
       // PostgREST aceita até 1000 linhas por insert em lote — nunca teremos isso
       // numa sincronização real, mas fatia por segurança de qualquer forma.
       for (let i = 0; i < erros.length; i += 500) {
-        await supabase.from('sincronizacao_pedidos_erros').insert(erros.slice(i, i + 500))
+        const { error } = await supabase.from('sincronizacao_pedidos_erros').insert(erros.slice(i, i + 500))
+        if (error) throw error
       }
     }
 
     const statusFinal = erros.length > 0 ? 'concluido_com_erros' : 'concluido'
-    await supabase.from('sincronizacoes_pedidos').update({
+    const { error: erroConclusao } = await supabase.from('sincronizacoes_pedidos').update({
       status: statusFinal,
       concluido_em: new Date().toISOString(),
       cursor_final: cursorFinal.toISOString(),
       ...contadores,
     }).eq('id', sync.id)
+    if (erroConclusao) throw erroConclusao
 
     if(logisticaAtiva){
       try{const resultado=await sincronizarLogisticaProdutos({e01Client,peso:process.env.NETVISION_LOGISTICA_UNIDADE_PESO||null,cubagem:process.env.NETVISION_LOGISTICA_UNIDADE_CUBAGEM||null});if(resultado.status!=='concluido')console.warn('[sync pedidos] catálogo físico pendente; fluxo comercial preservado')}catch{console.warn('[sync pedidos] catálogo físico indisponível; fluxo comercial preservado')}
