@@ -14,6 +14,13 @@ export async function enviarAlertaWhatsapp(texto) {
   await axios.post(
     `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`,
     { number: WHATSAPP_REPORT_NUMBER, text: texto },
-    { headers: { apikey: EVOLUTION_API_KEY } }
+    {
+      headers: { apikey: EVOLUTION_API_KEY },
+      // O alerta não pode prender indefinidamente o ciclo financeiro ou os
+      // outros jobs que o aguardam. Cancela o transporte, sem retry: timeout
+      // não comprova que o destinatário deixou de receber a mensagem.
+      timeout: 15000,
+      signal: AbortSignal.timeout(15000),
+    }
   )
 }
