@@ -1,9 +1,11 @@
 {
-  "at": "2026-10-15T18:02:29.193Z",
-  "file": "supabase/migrations/20261015180229_collection_payment_atomic.sql",
+  "at": "2026-10-17T00:36:12.3626306Z",
+  "file": "supabase/migrations/20261017003612_collection_payment_atomic.sql",
   "sha256": "809aa2bde4af4746e535d73d524c4b577b8e9f659dd8e5f5412f372513a98972",
-  "parent": "1404db2f060ac743cafa49b88d16956886d0c0d1",
-  "generation": "manual local file explicitly requested by user, UTC timestamp from current clock, CLI not executed",
-  "source": "https://supabase.com/docs/guides/deployment/database-migrations",
+  "parent": "4abe79ace956777165582509f69063c7d976001f",
+  "generation": "supabase CLI 2.121.0 migration new collection_payment_atomic; explicit workdir; isolated SUPABASE_HOME; DO_NOT_TRACK=1; SUPABASE_TELEMETRY_DISABLED=1",
+  "previousFile": "supabase/migrations/20261015180229_collection_payment_atomic.sql",
+  "cliArchiveSha256": "2606459be86e12e03fb6f6b9aa12a02aa00cfe21374857ec837a09c70b837eca",
+  "source": "https://github.com/supabase/cli/releases/tag/v2.121.0",
   "remoteApplied": false
 }

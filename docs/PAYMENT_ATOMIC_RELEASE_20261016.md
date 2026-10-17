@@ -14,11 +14,13 @@ DTOs, motivos, origens, atualizações condicionais e o contrato de PAGO
 somente para quitação real. Não altera saldo, histórico antigo, contatos,
 limites, DNC ou flags operacionais.
 
-A migration existente `20261015180229_collection_payment_atomic.sql` foi
-transplantada sem alterar seu payload: SHA256
+A migration atual é `20261017003612_collection_payment_atomic.sql`, gerada
+pelo CLI conforme a seção de ordenação abaixo. Preserva byte a byte o SQL
+anterior `20261015180229_collection_payment_atomic.sql`: SHA256
 `809aa2bde4af4746e535d73d524c4b577b8e9f659dd8e5f5412f372513a98972`.
-O manifesto preserva a proveniência da preparação anterior, não descreve
-uma execução do CLI nesta rodada. Nenhuma migration remota foi aplicada.
+O manifesto registra a geração atual pelo CLI e o nome anterior. O comentário
+de rascunho herdado no SQL é histórico; a geração atual está comprovada pelo
+CLI/manifesto. Nenhuma migration remota foi aplicada.
 As funções são SECURITY INVOKER e apenas service_role recebe EXECUTE;
 não são alterados grants/RLS das tabelas existentes.
 
@@ -72,13 +74,11 @@ Revisão crítica do Claude é obrigatória antes de concluir a entrega.
 Primeira revisão Claude, exit 0: sem bug de lógica bloqueante; os riscos de
 publicação abaixo mantêm o pacote em DRAFT, sem autorização para merge.
 
-1. A migration preservada tem timestamp anterior às migrations de frete
-   `20261015183819` e `20261015194843`. CLI Supabase não foi encontrado
-   no PATH nem no runtime local inspecionado. Resolver ordenação pelo
-   procedimento suportado antes da promoção; não inventar outro timestamp,
-   instalar CLI ou rodar push abrangente silenciosamente. O checksum do SQL
-   é do conteúdo: renomear sozinho não altera esse hash, mas exige atualizar
-   manifesto, atributo LF, referências e repetir a homologação.
+1. A primeira preparação tinha timestamp anterior às migrations de frete
+   `20261015183819` e `20261015194843`, e CLI indisponível. Pendência resolvida
+   localmente na rodada de ordenação abaixo, com CLI oficial isolado,
+   manifesto e atributo LF atualizados e homologação repetida. Não usar
+   push abrangente nem inferir autorização para aplicar a migration remota.
 2. Atomicidade é uma decisão explícita deste desenho: uma falha persistente
    de auditoria também desfaz cancelamentos. As pendências permanecem para
    retry e o guard de pagamento segue obrigatório antes de cada tentativa
@@ -116,7 +116,7 @@ BYPASSRLS e SELECT/INSERT/UPDATE nas quatro tabelas. Isso não substitui
 conferência integral de schema, triggers, backup recuperável ou probes.
 O runtime sintético é 17.11, mesmo major, patch diferente não homologado
 contra serviço real. Última migration registrada `20261016135055`:
-confirma que a ordenação do arquivo preservado precisa ser resolvida.
+confirmava o bloqueio de ordenação da primeira preparação; ver solução abaixo.
 
 A última sincronização financeira real continua concluída às 17:09 UTC,
 com atraso de 389,9 minutos nessa leitura. É incidente externo separado
@@ -180,3 +180,46 @@ mensagem ou árvore arbitrária para inferir conectividade. Um objeto com
 getter inválido pode rebaixar todo o diagnóstico para o fallback genérico,
 sem afetar a exceção original. Alertas devem contemplar ambos os códigos
 de falha, não depender exclusivamente de PARTIAL_FAILURE.
+
+## Ordenação resolvida localmente — 17/10/2026 UTC
+
+CLI oficial Supabase2.121.0 baixado exclusivamente em tools do workspace,
+sem instalação global/PATH, login ou conexão a projeto. ZIP Windows AMD64:
+SHA256 `2606459be86e12e03fb6f6b9aa12a02aa00cfe21374857ec837a09c70b837eca`,
+conferido contra o digest publicado na
+[release oficial](https://github.com/supabase/cli/releases/tag/v2.121.0).
+Entradas ZIP verificadas antes da extração; versão e help executados.
+
+A primeira tentativa de geração foi recusada pelo sandbox ao tentar gravar
+telemetria no diretório global. Não se ampliou a permissão nem se repetiu
+essa gravação: a execução seguinte usou o mecanismo oficial SUPABASE_HOME
+em tools/profile-local, DO_NOT_TRACK=1 e SUPABASE_TELEMETRY_DISABLED=1,
+somente no processo. A documentação/código da mesma tag confirma as opções;
+desativar envio não elimina escrita de estado, por isso o perfil também foi
+isolado. Nenhuma credencial ou configuração global foi alterada.
+
+`supabase --workdir <worktree-exclusivo> migration new collection_payment_atomic`
+retornou Migration created, exit0, com arquivo vazio
+`20261017003612_collection_payment_atomic.sql`. Preenchido com o SQL já
+revisado e removido o nome antigo somente deste branch (renomeação
+recuperável pelo Git). SHA809aa2…8972 permaneceu idêntico; não há alteração
+de função, ACL, saldo ou dados. Manifesto e atributo LF acompanham o novo
+nome. É a última migration local; SELECT remoto às00:37UTC confirmou a
+última aplicada20261016135055, anterior ao novo arquivo. Revalidar no rollout.
+
+O harness lê o novo arquivo pelo manifesto: execução ordered-20261017-v1
+em cluster PostgreSQL/HTTP sintético exclusivo: 33/33 passaram, HTTP fechado
+e PostgreSQL encerrado. Não foi usado db push,
+apply_migration, login, link ou manipulação do histórico remoto. Não alegar
+migration list --local: essa operação de banco não foi executada.
+Backup recuperável, revisão e autorização de produção, drenagem dos
+executores antigos, cache PostgREST e probes continuam gates antes do merge.
+
+Revisão crítica Claude da renomeação: exit 0, sem bloqueio. Fetch posterior
+confirmou origin/main77e5a16 e última migration versionada20261015194843,
+também anterior à nova. Conferência independente corrigiu duas premissas do
+texto da revisão: o SQL usa CREATE FUNCTION, NÃO CREATE OR REPLACE; trocar
+o nome do arquivo NÃO troca o nome das funções. Portanto, reaplicar contra
+função já existente não é idempotente: falha e a transação deve ser desfeita.
+Confirmar ausência/estado das funções e histórico em cada ambiente antes
+de aplicar, incluindo staging; não inferir segurança de reaplicação.
