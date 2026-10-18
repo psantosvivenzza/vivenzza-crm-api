@@ -21,6 +21,7 @@ import { execFileSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { interpretarInventarioVoz } from '../lib/voice-preflight-inventory.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DIR_VOZ = path.join(__dirname, '..', '..', 'src', 'lib', 'voice')
@@ -34,21 +35,26 @@ function processoDoServico() {
   try {
     saida = execFileSync('powershell.exe', [
       '-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
-      "Where-Object { $_.CommandLine -match 'run-voice-service' } | " +
-      "Select-Object -First 1 | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CreationDate.ToString('o') }",
+      "$ErrorActionPreference='Stop'; " +
+      "$nodes=@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction Stop); " +
+      "$servicos=@($nodes | Where-Object { $_.CommandLine -match 'run-voice-service' } | " +
+      "ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId; criadoEm=$(if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null})} }); " +
+      "[pscustomobject]@{invisiveis=@($nodes | Where-Object {[string]::IsNullOrWhiteSpace($_.CommandLine)}).Count; servicos=$servicos} | ConvertTo-Json -Compress -Depth 3",
     ], { encoding: 'utf8', timeout: 30000 }).trim()
   } catch (erro) {
     // Timeout ou qualquer outra falha ao consultar o processo: nao sabemos
     // se o servico esta no ar, entao tratamos como se nao estivesse (mesmo
     // fail-closed do caso "servico parado" abaixo, so que com causa raiz
     // registrada em vez de um crash nao tratado.
-    log(`NAO CONSEGUI CONFIRMAR O SERVICO DE VOZ (${erro.code || erro.message}). Nao vou discar por seguranca.`)
+    log('NAO CONSEGUI CONFIRMAR O SERVICO DE VOZ (falha de consulta). Nao vou discar por seguranca.')
     process.exit(1)
   }
-  if (!saida) return null
-  const [pid, criadoEm] = saida.split('|')
-  return { pid: Number(pid), criadoEm: new Date(criadoEm) }
+  const inventario = interpretarInventarioVoz(saida)
+  if (inventario.estado === 'inconclusivo') {
+    log('NAO CONSEGUI CONFIRMAR O SERVICO DE VOZ (inventario incompleto, ambiguo ou invalido). Nao vou discar por seguranca.')
+    process.exit(1)
+  }
+  return inventario.servico ?? null
 }
 
 function codigoDeVozMaisRecente() {
