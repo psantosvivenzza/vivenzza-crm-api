@@ -29,6 +29,8 @@ if (dryRun && watch) {
 }
 
 await import('dotenv/config')
+const { criarObservadorFinanceiro } = await import('./lib/financeiro-phase.mjs')
+const observar = criarObservadorFinanceiro()
 const { executarSincronizacaoFinanceira } = await import('../src/jobs/sync-financeiro-legado.js')
 const { conferirEregistrar } = await import('../src/lib/conferenciaFinanceira.js')
 const { enviarAlertaWhatsapp } = await import('../src/lib/whatsappAlert.js')
@@ -67,7 +69,7 @@ if (watch) {
   // clicar é verificação que não acontece.
   async function conferir() {
     try {
-      const c = await conferirEregistrar({ log: console.error })
+      const c = await observar('conferencia', () => conferirEregistrar({ log: console.error }))
       const carimbo = new Date().toLocaleTimeString('pt-BR')
 
       if (c.bateu) {
@@ -88,13 +90,13 @@ if (watch) {
       const podeAlertar = Date.now() - ultimoAlertaEm >= ALERTA_COOLDOWN_H * 3600_000
       if (grave > 0 && podeAlertar) {
         ultimoAlertaEm = Date.now()
-        await enviarAlertaWhatsapp(
+        await observar('alerta', () => enviarAlertaWhatsapp(
           `⚠️ Vivenzza — conferência financeira\n\n` +
           `${grave} título(s) estão em aberto no CRM mas já foram encerrados no NetVision.\n` +
           `Nesse estado a régua pode cobrar cliente que já pagou.\n\n` +
           `CRM: ${c.crm.abertos} abertos, R$ ${c.crm.saldo.toFixed(2)}\n` +
           `NetVision: ${c.erp.abertos} abertos, R$ ${c.erp.saldo.toFixed(2)}`
-        ).catch((e) => console.error(`  (nao consegui enviar o alerta: ${e.message})`))
+        )).catch((e) => console.error(`  (nao consegui enviar o alerta: ${e.message})`))
       }
     } catch (err) {
       console.error(`[conferencia] falhou: ${err.message}`)
@@ -107,7 +109,8 @@ if (watch) {
     const fazerCompleto = agora - ultimoCompletoEm >= COMPLETO_A_CADA_MIN * 60_000
 
     try {
-      const r = await executarSincronizacaoFinanceira({ completo: fazerCompleto, log: () => {} })
+      const r = await observar(fazerCompleto ? 'sincronizacao_completa' : 'sincronizacao_incremental',
+        () => executarSincronizacaoFinanceira({ completo: fazerCompleto, log: () => {} }))
       if (fazerCompleto) ultimoCompletoEm = agora
       errosSeguidos = 0
       ciclos++
@@ -147,7 +150,8 @@ if (watch) {
 
 try {
   console.log(`\n=== Sincronização financeira NetVision → CRM ${dryRun ? '(DRY-RUN)' : ''} ===\n`)
-  const r = await executarSincronizacaoFinanceira({ dryRun, completo: completo || dryRun })
+  const r = await observar(completo || dryRun ? 'sincronizacao_completa' : 'sincronizacao_incremental',
+    () => executarSincronizacaoFinanceira({ dryRun, completo: completo || dryRun }))
 
   if (r.pulado) {
     console.log(`Pulado: ${r.motivo}`)

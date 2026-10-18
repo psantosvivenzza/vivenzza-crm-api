@@ -15,3 +15,15 @@ Baseline inicial: quatro casos da combinação proibida falharam porque alcança
 ## Implantação e limites
 
 Somente código/testes preparados, sem execução do CLI real, restart, merge, deploy ou alteração de tarefa. Esta correção não recupera o worker atualmente parado sem progresso, não resolve divergências financeiras e não prova backup recuperável. O timeout de alerta do PR 154 é independente. Implantação e qualquer recuperação que possa gravar dados continuam sujeitas à autorização específica e aos gates operacionais registrados.
+
+## Diagnóstico por etapa — continuação
+
+O CLI também registra eventos JSON em stderr: `tipo=financeiro_etapa`, `etapa` (sincronizacao_completa/incremental, conferencia, alerta), `evento` (inicio/fim/erro), horário UTC e duração em ms ao terminar. Uma etapa que permanece aguardando deixa somente início. Isso diferencia as três fronteiras na próxima execução autorizada; não identifica retroativamente a causa da espera do worker antigo.
+
+O observador aguarda a operação original: nenhum timeout artificial, cancelamento, retry, execução paralela ou restart. O resultado e a exceção são preservados. Falha síncrona do logger/relógio não impede a operação. Os novos eventos não incluem resultado, mensagem/stack de erro, cliente, título, telefone ou valor financeiro; nomes de etapas desconhecidas viram `desconhecida`. Logs preexistentes do CLI continuam com seu conteúdo anterior e não devem ser tratados como sanitizados.
+
+`fim` significa Promise resolvida, não ausência de divergências ou homologação financeira. A instrumentação começa depois dos imports e não cobre espera durante carregamento de módulos. O observador não resolve I/O pendente; serve para localizar a etapa antes de tratar a fronteira correta sem abandonar escritas em andamento.
+
+Comando agora executa **22 testes**: os 13 de proteção anteriores, cinco do observador, três ciclos watch inteiramente sintéticos (conclusão, falha de conferência, falha de alerta) e erro do job pontual preservando exit 1. Controles pontuais também verificam as etapas, inclusive dry-run completo. O teste sai no descanso após um ciclo; stdout/stderr são escritos sincronamente nos FDs do filho para não perder eventos antes do exit controlado no Windows. Não houve envio nem acesso real. Requisito Node dos hooks permanece separado do runtime produtivo. Nenhuma prova de produção foi adicionada.
+
+O módulo `scripts/lib/financeiro-phase.mjs` precisa acompanhar o CLI no mesmo rollout. Estimativa no intervalo padrão: cerca de 2.900 linhas adicionais por dia; considerar retenção/rotação dos logs no planejamento operacional. Uma exceção síncrona do alerta passa a ser descrita como falha do alerta (antes era capturada como falha de conferência); ambos os caminhos continuam sem interromper o ciclo.
