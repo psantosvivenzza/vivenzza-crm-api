@@ -23,3 +23,28 @@ Não executada a suíte inteira de banco ou validação física nesta alteraçã
 Nenhuma instalação/autostart, flag estrutural ou configuração produtiva mudou.
 Não normalizados path/query da URL persistida: comportamento anterior fora
 do escopo, a revisar separadamente se houver consumidor por concatenação.
+
+## Check remoto independente da validação física
+
+Workflow `ponto-local-preflight.yml` executa 14 testes em Node 24 nos
+runners Windows e Ubuntu, sem instalar dependências ou fornecer secrets.
+Há processo Node temporário com HTTP somente loopback; execFile é substituído
+antes do import do serviço. Não executa CNG, PowerShell, MessageBox ou banco.
+Nenhum serviço é instalado e nenhuma chave de equipamento é gerada.
+
+Actions oficiais fixadas por SHA, contents read, token de checkout não
+persistido, timeout de cinco minutos por job. Executa em PRs inclusive draft
+e pushes main filtrados por caminhos; não marcar como required global sem
+rever filtro. Cancelamento de runs anteriores apenas em PRs.
+Resultado verde não homologa TPM, diálogo visível, equipamento ou produção.
+
+O conjunto combina oito controles HTTP e seis controles de lifecycle com
+EventEmitter sintético. Processo encerrado antes da prontidão rejeita logo;
+limpeza não espera novamente exit já emitido e tem timeout de cinco segundos.
+Token só é lido após a linha completa, mesmo com stdout fragmentado. Porta é
+selecionada pelo sistema operacional antes do spawn; uma corrida residual de
+ocupação ainda pode causar falha explícita de inicialização, não falso verde.
+Cleanup recursivo valida o caminho temporário exato antes de remover a fixture.
+Se não confirmar encerramento, preserva a fixture e falha explicitamente em vez
+de apagar estado de processo possivelmente vivo. Remoção após encerramento
+confirmado tem retry limitado para EBUSY/EPERM, sem ignorar erro permanente.

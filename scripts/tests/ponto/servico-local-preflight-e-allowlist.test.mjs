@@ -11,6 +11,7 @@ import os from 'node:os'
 import fs from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
+import { aguardarProntidaoLocal, encerrarProcessoLocal } from './_processo-local.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SERVICO_DIR = path.join(__dirname, '..', '..', '..', 'local-equipamento-service')
@@ -20,7 +21,10 @@ const API_OK = 'http://127.0.0.1:3999'
 let proc, porta, token, configDir, erros = ''
 
 before(async () => {
-  porta = 47000 + Math.floor(Math.random() * 900)
+  const reserva = http.createServer()
+  await new Promise((resolve, reject) => { reserva.once('error', reject); reserva.listen(0, '127.0.0.1', resolve) })
+  porta = reserva.address().port
+  await new Promise((resolve, reject) => reserva.close(e => e ? reject(e) : resolve()))
   configDir = path.join(os.tmpdir(), `meu-ponto-preflight-${crypto.randomBytes(4).toString('hex')}`)
   // Nenhum caso desta suíte precisa de CNG/diálogo. Bloquear a fronteira
   // inclusive nas reproduções de entradas que antes chegavam ao PowerShell.
@@ -47,24 +51,17 @@ before(async () => {
     windowsHide: true,
   })
   proc.stderr.on('data', (c) => { erros += c.toString() })
-  await new Promise((resolve, reject) => {
-    let saida = ''
-    const t = setTimeout(() => reject(new Error('timeout subindo serviço local')), 15000)
-    proc.stdout.on('data', (c) => {
-      saida += c.toString()
-      const m = saida.match(/token de pareamento.*?:\s*(\S+)/)
-      if (m && saida.includes('escutando em')) { clearTimeout(t); token = m[1]; resolve() }
-    })
-    proc.on('error', reject)
-  })
+  token = await aguardarProntidaoLocal(proc)
 })
 
 after(async () => {
-  if (proc) {
-    proc.kill()
-    await new Promise((resolve) => proc.once('exit', resolve))
+  await encerrarProcessoLocal(proc)
+  if (configDir) {
+    const alvo = path.resolve(configDir)
+    assert.equal(path.dirname(alvo), path.resolve(os.tmpdir()))
+    assert.match(path.basename(alvo), /^meu-ponto-preflight-[a-f0-9]{8}$/)
+    await fs.rm(alvo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
-  if (configDir) await fs.rm(configDir, { recursive: true, force: true }).catch(() => {})
 })
 
 function chamar(caminho, { method = 'GET', body, origin = ORIGEM, host = `127.0.0.1:${porta}`, headers = {} } = {}) {
