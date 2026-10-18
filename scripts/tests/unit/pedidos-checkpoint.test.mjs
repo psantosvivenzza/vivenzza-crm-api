@@ -14,7 +14,8 @@ const modulos = new Map([
 // Intercepta antes do import: não carrega pg, SDK, dotenv ou configuração real.
 const hooks = registerHooks({resolve(specifier, context, next) {
  if(modulos.has(specifier))return {url: `data:text/javascript,${encodeURIComponent(modulos.get(specifier))}`,shortCircuit:true}
- if(specifier.startsWith('node:') || specifier.endsWith('/src/jobs/sync-pedidos-legado.js'))return next(specifier,context)
+ // Helper puro da PR151; manter bloqueados SDK, pg e configuração reais.
+ if(specifier.startsWith('node:') || specifier.endsWith('/src/jobs/sync-pedidos-legado.js') || specifier === '../lib/pedidos-conexao.js')return next(specifier,context)
  throw Error(`Import não permitido no teste: ${specifier}`)
 }})
 const {executarSincronizacaoPedidos} = await import('../../../src/jobs/sync-pedidos-legado.js')
