@@ -37,7 +37,7 @@ const { conferirEregistrar } = await import('../src/lib/conferenciaFinanceira.js
 // Suprime apenas o remetente deste CLI; não altera a régua geral de cobrança.
 const enviarAlertaWhatsapp = semAlertas ? null
   : (await import('../src/lib/whatsappAlert.js')).enviarAlertaWhatsapp
-if (semAlertas) console.log('Alertas WhatsApp deste CLI desabilitados; sincronização e conferência permanecem habilitadas.')
+if (semAlertas) console.log('Alertas WhatsApp deste CLI desabilitados; demais operações seguem o modo selecionado.')
 
 const fmtBRL = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 

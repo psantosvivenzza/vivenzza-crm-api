@@ -136,6 +136,8 @@ test('sem alertas no modo pontual preserva dry-run e não importa remetente',()=
  assert.equal(r.status,0,r.stderr)
  assert.match(r.stdout,/JOB:\{"dryRun":true,"completo":true\}/)
  assert.doesNotMatch(r.stdout,/IMPORT:alerta|^ALERTA$/m)
+ assert.match(r.stdout,/demais operações seguem o modo selecionado/)
+ assert.doesNotMatch(r.stdout,/conferência permanecem habilitadas/)
 })
 
 for(const args of [['--watch','--dry-run','--sem-alertas'],['--watch','--sem-alertas=true']])
