@@ -29,3 +29,15 @@ O observador aguarda a operação original: nenhum timeout artificial, cancelame
 Comando atual executa **27 testes**: os 13 de proteção iniciais, cinco do observador, três ciclos watch inteiramente sintéticos (conclusão, falha de conferência, falha de alerta), erro do job pontual preservando exit 1 e cinco casos de `--sem-alertas`. Esses cinco cobrem ambas as ordens no watch, dry-run pontual sem remetente e duas recusas antecipadas. Sem flag, os controles também comprovam um alerta sintético quando cabível. Controles pontuais verificam etapas e mensagem compatível com o modo, inclusive dry-run completo. O teste sai no descanso após um ciclo; stdout/stderr são escritos sincronamente nos FDs do filho para não perder eventos antes do exit controlado no Windows. Não houve envio nem acesso real. Requisito Node dos hooks permanece separado do runtime produtivo. Nenhuma prova de produção foi adicionada.
 
 O módulo `scripts/lib/financeiro-phase.mjs` precisa acompanhar o CLI no mesmo rollout. Estimativa no intervalo padrão: cerca de 2.900 linhas adicionais por dia; considerar retenção/rotação dos logs no planejamento operacional. Uma exceção síncrona do alerta passa a ser descrita como falha do alerta (antes era capturada como falha de conferência); ambos os caminhos continuam sem interromper o ciclo.
+
+## Check remoto isolado
+
+O workflow `.github/workflows/financeiro-cli-safety.yml` executa os dois arquivos
+de teste em Node 24, sem instalar dependências, carregar .env ou iniciar a
+aplicação. Roda em PRs que alteram esses caminhos e em pushes correspondentes
+para main; inclui PRs draft. Actions oficiais fixadas por SHA, token somente
+leitura, credenciais de checkout não persistidas, timeout de cinco minutos.
+Não usa secrets, environments de produção, serviços de banco ou deploy.
+Esse check valida apenas o CLI/observador com adaptadores sintéticos, não a
+sincronização real nem as implementações dos adaptadores substituídos.
+Não configurar como required check global sem rever o filtro por caminhos.

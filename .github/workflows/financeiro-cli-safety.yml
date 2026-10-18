@@ -1,0 +1,49 @@
+name: Financeiro CLI safety
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/financeiro-cli-safety.yml'
+      - 'scripts/sync-financeiro-legado.mjs'
+      - 'scripts/lib/financeiro-phase.mjs'
+      - 'scripts/tests/financeiro-cli-safety.test.mjs'
+      - 'scripts/tests/financeiro-phase.test.mjs'
+      - 'src/jobs/sync-financeiro-legado.js'
+      - 'src/lib/conferenciaFinanceira.js'
+      - 'src/lib/whatsappAlert.js'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/financeiro-cli-safety.yml'
+      - 'scripts/sync-financeiro-legado.mjs'
+      - 'scripts/lib/financeiro-phase.mjs'
+      - 'scripts/tests/financeiro-cli-safety.test.mjs'
+      - 'scripts/tests/financeiro-phase.test.mjs'
+      - 'src/jobs/sync-financeiro-legado.js'
+      - 'src/lib/conferenciaFinanceira.js'
+      - 'src/lib/whatsappAlert.js'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: financeiro-cli-safety-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  financeiro-cli-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # Native Node tests only; no npm install, .env, secrets or application boot.
+      - name: Hermetic CLI and phase tests
+        run: node --test scripts/tests/financeiro-cli-safety.test.mjs scripts/tests/financeiro-phase.test.mjs
