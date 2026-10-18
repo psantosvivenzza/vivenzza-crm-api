@@ -10,4 +10,8 @@ Limite: corrige uma espera ilimitada comprovada no código, mas não comprova qu
 
 Referência da opção timeout: https://axios-http.com/docs/req_config . A implementação usa a dependência já instalada/lockfile existente, sem atualização de pacote.
 
+## Sanitização do fallback — 18/10/2026
+
+Quando URL, instância ou destinatário estão ausentes, o warning agora é uma mensagem fixa, sem o texto do alerta. Preserva retorno undefined e ausência de transporte; não muda payload do envio configurado, timeout, cooldown ou retries. Os três casos de configuração ausente reproduziram a exposição com conteúdo sintético antes da correção e passaram depois. Suíte completa: 6/6, exit 0, incluindo cancelamento HTTP exclusivamente em loopback. Não comprova limpeza de logs históricos nem sanitização dos demais chamadores; sem implantação ou envio real.
+
 Revisão crítica Claude concluída, somente leitura, sem bloqueantes. Gates adicionais: conferir AbortSignal.timeout no runtime de todos os consumidores antes de implantação (não alterar engines global por inferência). ERR_CANCELED pode representar o prazo total expirado, não cancelamento humano. O cooldown financeiro é marcado antes da tentativa; uma tentativa abortada pode suprimir outro alerta durante o cooldown. Não mover esse marco sem decidir como evitar duplicação em entrega ambígua. Este patch limita a espera, mas não garante entrega de alertas.

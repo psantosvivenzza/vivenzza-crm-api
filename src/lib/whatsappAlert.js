@@ -8,7 +8,8 @@ const { EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE, WHATSAPP_REPOR
 
 export async function enviarAlertaWhatsapp(texto) {
   if (!EVOLUTION_API_URL || !EVOLUTION_INSTANCE || !WHATSAPP_REPORT_NUMBER) {
-    console.warn('[whatsapp-alert] WhatsApp não configurado — pulando envio:', texto)
+    // Alerta pode conter dados financeiros ou pessoais; nunca copiar ao log.
+    console.warn('[whatsapp-alert] WhatsApp não configurado — pulando envio.')
     return
   }
   await axios.post(

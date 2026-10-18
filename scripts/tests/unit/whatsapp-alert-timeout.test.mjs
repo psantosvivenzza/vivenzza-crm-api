@@ -41,16 +41,19 @@ test('falha do transporte é propagada sem retry automático',async()=>{
  assert.equal(chamadas,1)
 })
 
-test('sem configuração não chama transporte',async()=>{
+for(const ausente of ['EVOLUTION_API_URL','EVOLUTION_INSTANCE','WHATSAPP_REPORT_NUMBER'])test(`sem ${ausente} não chama transporte nem registra conteúdo do alerta`,async()=>{
  const url='http://127.0.0.1:1'
  await modulo(url)
- delete process.env.EVOLUTION_INSTANCE
+ delete process.env[ausente]
  const {enviarAlertaWhatsapp}=await import(`../../../src/lib/whatsappAlert.js?teste=${++sequencia}`)
  let chamadas=0
  axios.defaults.adapter=async()=>{chamadas++;throw Error('transporte proibido')}
- const warn=console.warn;console.warn=()=>{}
- try{await enviarAlertaWhatsapp('alerta sintético')}finally{console.warn=warn}
+ const avisos=[]
+ const warn=console.warn;console.warn=(...args)=>avisos.push(args)
+ try{await enviarAlertaWhatsapp('conteudo-financeiro-sintetico-privado')}finally{console.warn=warn}
  assert.equal(chamadas,0)
+ assert.deepEqual(avisos,[['[whatsapp-alert] WhatsApp não configurado — pulando envio.']])
+ assert.doesNotMatch(JSON.stringify(avisos),/conteudo-financeiro|chave-sintetica|destinatario-sintetico/)
 })
 
 test('HTTP local que aceita e nunca responde é cancelado, sem repetir envio',{timeout:22000},async t=>{
