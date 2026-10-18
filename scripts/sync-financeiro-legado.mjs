@@ -10,16 +10,17 @@
  * com no máximo 4h de atraso.
  */
 const argumentos = process.argv.slice(2)
-const flagsPermitidas = new Set(['--dry-run', '--watch', '--completo'])
+const flagsPermitidas = new Set(['--dry-run', '--watch', '--completo', '--sem-alertas'])
 if (argumentos.some(argumento => !flagsPermitidas.has(argumento))) {
   // Não ecoar argumentos desconhecidos: podem conter dados sensíveis.
-  console.error('Argumentos não reconhecidos. Use somente --dry-run, --watch ou --completo; nenhuma operação foi iniciada.')
+  console.error('Argumentos não reconhecidos. Use somente --dry-run, --watch, --completo ou --sem-alertas; nenhuma operação foi iniciada.')
   process.exit(2)
 }
 
 const dryRun = process.argv.includes('--dry-run')
 const watch = process.argv.includes('--watch')
 const completo = process.argv.includes('--completo')
+const semAlertas = process.argv.includes('--sem-alertas')
 
 // O loop residente aplica alterações e pode enviar alertas. Nunca permita
 // que --dry-run seja silenciosamente ignorado; recuse antes de carregar env/IO.
@@ -33,7 +34,10 @@ const { criarObservadorFinanceiro } = await import('./lib/financeiro-phase.mjs')
 const observar = criarObservadorFinanceiro()
 const { executarSincronizacaoFinanceira } = await import('../src/jobs/sync-financeiro-legado.js')
 const { conferirEregistrar } = await import('../src/lib/conferenciaFinanceira.js')
-const { enviarAlertaWhatsapp } = await import('../src/lib/whatsappAlert.js')
+// Suprime apenas o remetente deste CLI; não altera a régua geral de cobrança.
+const enviarAlertaWhatsapp = semAlertas ? null
+  : (await import('../src/lib/whatsappAlert.js')).enviarAlertaWhatsapp
+if (semAlertas) console.log('Alertas WhatsApp deste CLI desabilitados; sincronização e conferência permanecem habilitadas.')
 
 const fmtBRL = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 
@@ -88,7 +92,7 @@ if (watch) {
       // encerrou e o CRM ainda trata como cobrável.
       const grave = c.contagens.crm_aberto_erp_fechado
       const podeAlertar = Date.now() - ultimoAlertaEm >= ALERTA_COOLDOWN_H * 3600_000
-      if (grave > 0 && podeAlertar) {
+      if (!semAlertas && grave > 0 && podeAlertar) {
         ultimoAlertaEm = Date.now()
         await observar('alerta', () => enviarAlertaWhatsapp(
           `⚠️ Vivenzza — conferência financeira\n\n` +

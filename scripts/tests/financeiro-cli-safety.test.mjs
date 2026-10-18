@@ -116,3 +116,31 @@ test('falha pontual mantém exit 1 e registra erro da etapa',()=>{
  assert.deepEqual(etapas.map(e=>[e.etapa,e.evento]),[['sincronizacao_completa','inicio'],['sincronizacao_completa','erro']])
  assert.equal(r.stdout.split(/\r?\n/).filter(l=>l.startsWith('JOB:')).length,1)
 })
+
+for(const args of [['--watch','--sem-alertas'],['--sem-alertas','--watch']])
+test(`suprime importação e envio de alertas, preservando conferência: ${args.join(' ')}`,()=>{
+ const r=executar(args,{ciclo:true,falha:'alerta'})
+ assert.equal(r.status,89,r.stderr)
+ assert.doesNotMatch(r.stdout,/IMPORT:alerta|^ALERTA$/m)
+ assert.equal(r.stdout.split(/\r?\n/).filter(l=>l==='CONFERENCIA').length,1)
+ assert.equal(r.stdout.split(/\r?\n/).filter(l=>l.startsWith('JOB:')).length,1)
+ const eventos=r.stderr.split(/\r?\n/).filter(l=>l.startsWith('{')).map(l=>JSON.parse(l))
+ assert.deepEqual(eventos.map(e=>[e.etapa,e.evento]),[
+  ['sincronizacao_completa','inicio'],['sincronizacao_completa','fim'],
+  ['conferencia','inicio'],['conferencia','fim'],
+ ])
+})
+
+test('sem alertas no modo pontual preserva dry-run e não importa remetente',()=>{
+ const r=executar(['--dry-run','--sem-alertas'])
+ assert.equal(r.status,0,r.stderr)
+ assert.match(r.stdout,/JOB:\{"dryRun":true,"completo":true\}/)
+ assert.doesNotMatch(r.stdout,/IMPORT:alerta|^ALERTA$/m)
+})
+
+for(const args of [['--watch','--dry-run','--sem-alertas'],['--watch','--sem-alertas=true']])
+test(`sem alertas não contorna validação antecipada: ${args.join(' ')}`,()=>{
+ const r=executar(args)
+ assert.equal(r.status,2)
+ assert.doesNotMatch(r.stdout,/IMPORT:|JOB:/)
+})
