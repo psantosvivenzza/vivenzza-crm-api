@@ -59,11 +59,16 @@ function processoDoServico() {
 
 function codigoDeVozMaisRecente() {
   let maisRecente = { arquivo: null, em: new Date(0) }
+  const agora = Date.now()
   for (const nome of fs.readdirSync(DIR_VOZ)) {
     if (!nome.endsWith('.js')) continue
     const st = fs.statSync(path.join(DIR_VOZ, nome))
+    const em = st.mtime.getTime()
+    if (!st.isFile() || !Number.isFinite(em) || em <= 0
+      || !Number.isFinite(agora) || em > agora) throw new Error('codigo nao verificavel')
     if (st.mtime > maisRecente.em) maisRecente = { arquivo: nome, em: st.mtime }
   }
+  if (!maisRecente.arquivo) throw new Error('codigo ausente')
   return maisRecente
 }
 
@@ -74,7 +79,13 @@ if (!servico) {
   process.exit(1)
 }
 
-const codigo = codigoDeVozMaisRecente()
+let codigo
+try {
+  codigo = codigoDeVozMaisRecente()
+} catch {
+  log('NAO CONSEGUI CONFIRMAR O CODIGO DE VOZ (arquivos ausentes, invalidos ou inacessiveis). Nao vou discar por seguranca.')
+  process.exit(1)
+}
 if (codigo.arquivo && codigo.em > servico.criadoEm) {
   log(`SERVICO RODANDO CODIGO VELHO. Nao vou discar.`)
   log(`  servico subiu em .....: ${servico.criadoEm.toLocaleString('pt-BR')} (PID ${servico.pid})`)

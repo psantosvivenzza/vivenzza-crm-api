@@ -1,14 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { interpretarInventarioVoz } from '../../lib/voice-preflight-inventory.mjs'
 
 const entrada = new URL('../../voice/verificar-servico-voz.mjs', import.meta.url).href
-function executar(inventario, legado = '', falhar = false) {
+function executar(inventario, legado = '', falhar = false, arquivos = {}) {
   const child = `export function execFileSync(exe,args){
     if(${falhar})throw Object.assign(new Error('detalhe-sintetico-privado'),{code:'ETIMEDOUT'});
     if(exe!=='powershell.exe')throw Error('executavel inesperado');
     return args.join(' ').includes('ConvertTo-Json')?${JSON.stringify(JSON.stringify(inventario))}:${JSON.stringify(legado)};
+  }`
+  const diretorioEsperado = fileURLToPath(new URL('../../../src/lib/voice', import.meta.url))
+  const filesystem = `const cfg=${JSON.stringify(arquivos)}; const dir=${JSON.stringify(diretorioEsperado)}; const sep=${JSON.stringify(path.sep)}; export default {
+    readdirSync:(p)=>{if(p!==dir)throw Error('diretorio inesperado');if(cfg.erro==='leitura')throw Error('caminho-sintetico-privado');return cfg.nomes??['servico.js']},
+    statSync:(p)=>{if(!p.startsWith(dir+sep)||(cfg.nomes??['servico.js']).every(n=>p!==dir+sep+n))throw Error('arquivo inesperado');if(cfg.erro==='stat')throw Error('caminho-sintetico-privado');return {isFile:()=>cfg.regular!==false,mtime:new Date(cfg.mtimes?.[p.slice(dir.length+1)]??cfg.mtime??'2026-10-18T10:00:00Z')}}
   }`
   const bootstrap = `
     import {registerHooks} from 'node:module';
@@ -21,7 +28,7 @@ function executar(inventario, legado = '', falhar = false) {
       return r;
     },load(url,c,next){
       if(url==='mock:child')return {format:'module',shortCircuit:true,source:${JSON.stringify(child)}};
-      if(url==='mock:fs')return {format:'module',shortCircuit:true,source:"export default {readdirSync:()=>['servico.js'],statSync:()=>({mtime:new Date('2026-10-18T10:00:00Z')})}"};
+      if(url==='mock:fs')return {format:'module',shortCircuit:true,source:${JSON.stringify(filesystem)}};
       return next(url,c);
     }});
     await import(${JSON.stringify(entrada)});
@@ -85,4 +92,17 @@ test('timestamp UTC com sete casas do CIM é aceito',()=>{
   const r=interpretarInventarioVoz(json,Date.parse('2026-10-18T11:00:00Z'))
   assert.equal(r.estado,'identificado')
   assert.equal(r.servico.criadoEm.toISOString(),'2026-10-18T10:05:00.123Z')
+})
+
+for(const arquivos of [
+  {nomes:[]}, {nomes:['README.md']}, {mtime:'invalida'},
+  {mtime:'2099-01-01T00:00:00Z'}, {regular:false},
+  {erro:'leitura'}, {erro:'stat'},
+  {mtime:'1970-01-01T00:00:00Z'},
+  {nomes:['servico.js','invalido.js'],mtimes:{'invalido.js':'invalida'}},
+])test('código não verificável bloqueia com diagnóstico sanitizado: '+JSON.stringify(arquivos),()=>{
+  const r=executar({invisiveis:0,servicos:[{pid:42,criadoEm:'2026-10-18T10:05:00Z'}]},'',false,arquivos)
+  assert.equal(r.status,1)
+  assert.match(r.stdout,/NAO CONSEGUI CONFIRMAR O CODIGO DE VOZ/)
+  assert.doesNotMatch(r.stdout+r.stderr,/Liberado|caminho-sintetico-privado|\bat file:/)
 })
