@@ -17,3 +17,9 @@ Somente função pura e fixtures: não grava propostas, não contata transportad
 não ativa WhatsApp/IA/sync, não envia valores reais ou cria compromisso comercial.
 Testes de domínio incluem import do SDK pelo assistente para respostas locais;
 execução adicional bloqueia fetch e sockets, sem chamar o modelo ou rede.
+
+Os três testes numéricos ficam em fretes-ranking.test.mjs, independente do SDK.
+A workflow frete-ranking-safety executa esse arquivo em Node 24 / Ubuntu 24.04,
+sem instalar dependências, segredos, banco ou iniciar a aplicação. O comando
+test:fretes preserva a suíte de domínio e worker e inclui o novo arquivo.
+Esse check cobre o ranking numérico; não valida envio, IA ou operação em produção.
