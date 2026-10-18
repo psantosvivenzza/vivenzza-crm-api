@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { interpretarInventarioVoz } from '../../lib/voice-preflight-inventory.mjs'
 
 const entrada = new URL('../../voice/verificar-servico-voz.mjs', import.meta.url).href
-function executar(inventario, legado = '', falhar = false, arquivos = {}) {
+function executar(inventario, legado = '', falhar = false, arquivos = {}, sondarAlias = false) {
   const child = `export function execFileSync(exe,args){
     if(${falhar})throw Object.assign(new Error('detalhe-sintetico-privado'),{code:'ETIMEDOUT'});
     if(exe!=='powershell.exe')throw Error('executavel inesperado');
@@ -20,8 +20,8 @@ function executar(inventario, legado = '', falhar = false, arquivos = {}) {
   const bootstrap = `
     import {registerHooks} from 'node:module';
     registerHooks({resolve(s,c,next){
-      if(s==='child_process')return {url:'mock:child',shortCircuit:true};
-      if(s==='fs')return {url:'mock:fs',shortCircuit:true};
+      if(s==='child_process'||s==='node:child_process')return {url:'mock:child',shortCircuit:true};
+      if(s==='fs'||s==='node:fs')return {url:'mock:fs',shortCircuit:true};
       if(s.startsWith('node:')||['path','url'].includes(s))return next(s,c);
       const r=next(s,c);
       if(![${JSON.stringify(entrada)},new URL('../lib/voice-preflight-inventory.mjs',${JSON.stringify(entrada)}).href].includes(r.url))throw Error('import bloqueado');
@@ -31,6 +31,11 @@ function executar(inventario, legado = '', falhar = false, arquivos = {}) {
       if(url==='mock:fs')return {format:'module',shortCircuit:true,source:${JSON.stringify(filesystem)}};
       return next(url,c);
     }});
+    if(${JSON.stringify(sondarAlias)}) {
+      const bareChild=await import('child_process'); const nodeChild=await import('node:child_process');
+      const bareFs=await import('fs'); const nodeFs=await import('node:fs');
+      if(bareChild.execFileSync!==nodeChild.execFileSync || bareFs.default.readdirSync!==nodeFs.default.readdirSync)throw Error('alias nao isolado');
+    }
     await import(${JSON.stringify(entrada)});
   `
   const r=spawnSync(process.execPath,['--input-type=module','--eval',bootstrap],{
@@ -92,6 +97,12 @@ test('timestamp UTC com sete casas do CIM é aceito',()=>{
   const r=interpretarInventarioVoz(json,Date.parse('2026-10-18T11:00:00Z'))
   assert.equal(r.estado,'identificado')
   assert.equal(r.servico.criadoEm.toISOString(),'2026-10-18T10:05:00.123Z')
+})
+
+test('aliases node: de fs e child_process usam os mesmos mocks sem invocar comandos',()=>{
+  const r=executar({invisiveis:0,servicos:[{pid:42,criadoEm:'2026-10-18T10:05:00Z'}]},'',false,{},true)
+  assert.equal(r.status,0,r.stderr)
+  assert.match(r.stdout,/Liberado/)
 })
 
 for(const arquivos of [

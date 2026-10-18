@@ -46,3 +46,20 @@ correção é reprodução dos sete primeiros cenários, não execução em prod
 Esse gate ainda não verifica hash, dependências externas, workers Python,
 extensões .mjs/.cjs/.ts ou subpastas: só JS no nível raiz. Não cobre todo o
 grafo de imports, não homologa o serviço e não autoriza contato.
+
+## CI isolado do pré-voo
+
+Workflow `voice-preflight-safety.yml` executa somente os 29 testes de inventário
+e CLI em Node 24, nos runners GitHub Windows e Ubuntu. Não instala dependências
+da aplicação nem inicia PowerShell, ARI, WSL, STT/TTS ou chamadas: subprocessos
+Node usam os mocks de child_process/fs descritos acima. Sem .env, secrets ou
+deploy. Actions oficiais fixadas por SHA, token contents read, checkout sem
+persistir credenciais e timeout de cinco minutos por job.
+Os aliases fs/node:fs e child_process/node:child_process usam os mesmos mocks,
+com teste de identidade sem chamar comandos reais. Runs anteriores em main
+não são cancelados por novos pushes; cancelamento automático só para PRs.
+
+Aciona em PRs (inclusive draft) e pushes main nos quatro caminhos relevantes.
+Não marcar como required global sem rever filtro de caminhos. Verde confirma
+apenas o pré-voo sintético nessas plataformas, não telefonia real nem os outros
+24 testes de lógica financeira/voz do conjunto local mais amplo.
