@@ -177,9 +177,11 @@ async function tratarCadastrar(req, res) {
   if (!codigoVinculo || !crmApiBaseUrl) {
     return enviarJson(res, 400, { erro: 'codigoVinculo e crmApiBaseUrl são obrigatórios.' })
   }
-  let apiOrigem
-  try { apiOrigem = new URL(crmApiBaseUrl).origin } catch { apiOrigem = null }
-  if (!apiOrigem || !APIS_PERMITIDAS.includes(apiOrigem)) {
+  let apiUrl
+  try { apiUrl = new URL(crmApiBaseUrl) } catch { apiUrl = null }
+  // A origem não inclui userinfo. Recusar credenciais antes de criar qualquer
+  // chave CNG; fetch também rejeita URLs com userinfo, mas seria tarde demais.
+  if (!apiUrl || apiUrl.username || apiUrl.password || !APIS_PERMITIDAS.includes(apiUrl.origin)) {
     return enviarJson(res, 400, { erro: 'crmApiBaseUrl não está na lista de APIs permitidas deste serviço.' })
   }
 

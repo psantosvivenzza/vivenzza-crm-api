@@ -9,7 +9,7 @@ import http from 'node:http'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -17,12 +17,25 @@ const SERVICO_DIR = path.join(__dirname, '..', '..', '..', 'local-equipamento-se
 const ORIGEM = 'http://localhost:5173'
 const API_OK = 'http://127.0.0.1:3999'
 
-let proc, porta, token, configDir
+let proc, porta, token, configDir, erros = ''
 
 before(async () => {
   porta = 47000 + Math.floor(Math.random() * 900)
   configDir = path.join(os.tmpdir(), `meu-ponto-preflight-${crypto.randomBytes(4).toString('hex')}`)
-  proc = spawn('node', ['servico.mjs'], {
+  // Nenhum caso desta suíte precisa de CNG/diálogo. Bloquear a fronteira
+  // inclusive nas reproduções de entradas que antes chegavam ao PowerShell.
+  const bootstrap = `
+    import {registerHooks} from 'node:module';
+    registerHooks({resolve(s,c,next){
+      if(s==='node:child_process'||s==='child_process')return {url:'mock:processo-externo',shortCircuit:true};
+      return next(s,c);
+    },load(url,c,next){
+      if(url==='mock:processo-externo')return {format:'module',shortCircuit:true,source:"export function execFile(...args){console.error('TESTE_PROCESSO_EXTERNO_BLOQUEADO');args.at(-1)(new Error('processo externo bloqueado pelo teste'))}"};
+      return next(url,c);
+    }});
+    await import(${JSON.stringify(pathToFileURL(path.join(SERVICO_DIR, 'servico.mjs')).href)});
+  `
+  proc = spawn(process.execPath, ['--input-type=module', '--eval', bootstrap], {
     cwd: SERVICO_DIR,
     env: {
       ...process.env,
@@ -33,6 +46,7 @@ before(async () => {
     },
     windowsHide: true,
   })
+  proc.stderr.on('data', (c) => { erros += c.toString() })
   await new Promise((resolve, reject) => {
     let saida = ''
     const t = setTimeout(() => reject(new Error('timeout subindo serviço local')), 15000)
@@ -120,4 +134,16 @@ test('/cadastrar recusa crmApiBaseUrl fora da allowlist, antes de tocar no CNG',
 test('/cadastrar continua exigindo token de pareamento antes de qualquer outra coisa', async () => {
   const res = await chamar('/cadastrar', { method: 'POST', body: { codigoVinculo: 'x', crmApiBaseUrl: API_OK } })
   assert.equal(res.status, 401)
+})
+
+test('/cadastrar recusa credenciais na URL antes de criar chave ou contatar backend', async () => {
+  for (const url of ['http://usuario:senha@127.0.0.1:3999', 'http://usuario@127.0.0.1:3999', 'http://:senha@127.0.0.1:3999']) {
+    const res = await chamar('/cadastrar', {
+      method: 'POST', body: { codigoVinculo: 'x', crmApiBaseUrl: url },
+      headers: { 'x-ponto-pairing-token': token },
+    })
+    assert.equal(res.status, 400)
+    assert.doesNotMatch(JSON.stringify(res.body), /usuario|senha/)
+  }
+  assert.doesNotMatch(erros, /TESTE_PROCESSO_EXTERNO_BLOQUEADO/)
 })
