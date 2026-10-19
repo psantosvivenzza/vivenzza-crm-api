@@ -54,6 +54,15 @@ test.before(async () => {
  const novaMigration=await readFile(new URL('../../supabase/migrations/20261015194843_frete_concorrencia_orcamento.sql',import.meta.url),'utf8')
  for(const fn of novaMigration.match(/create (?:or replace )?function[\s\S]*?\$\$;/g)??[])await sql.query(fn.replace(/^create (?:or replace )?function/,'create or replace function'))
  for(const nome of ['frete_consulta_versao','frete_orcamento_insercao'])if(!(await sql.query('select 1 from pg_trigger where tgname=$1',[nome])).rows.length)await sql.query(novaMigration.match(new RegExp('create trigger '+nome+'[^;]+;'))[0])
+ await sql.query('begin')
+ try {
+  const budgetSql=await readFile(new URL('../../supabase/migrations/20261019153929_frete_orcamentos_distintos.sql',import.meta.url),'utf8')
+  const definitions=()=>sql.query("select proname,pg_get_functiondef(oid) definition from pg_proc where oid in ('public.frete_contar_orcamento(timestamptz,text)'::regprocedure,'public.frete_guardar_orcamento()'::regprocedure,'public.frete_claim_envio(uuid)'::regprocedure) order by proname")
+  await sql.query(budgetSql);const first=(await definitions()).rows
+  await sql.query(budgetSql);assert.deepEqual((await definitions()).rows,first)
+  await sql.query('commit')
+ }
+ catch(error){await sql.query('rollback');throw error}
  await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
@@ -114,17 +123,17 @@ test('fila desligada não envia, dupla solicitação é idempotente e claim conc
  const claims = await Promise.all([claim(), claim()]); assert.ok(claims.every(r => !r.error)); assert.equal(claims.filter(r => r.data).length, 1)
  assert.equal((await sql.query('select status,attempted_at from frete_envios where id=$1', [e.id])).rows[0].status, 'enviando')
 })
-test('tentativas de frete consomem teto global e por instância mesmo com envios pausados', async () => {
+test('tentativas de frete não consomem teto financeiro global nem por instância', async () => {
  await sql.query(`create table if not exists automacoes_config(id integer primary key,multi_whatsapp boolean,global_daily_limit integer,global_hourly_limit integer); insert into automacoes_config values(1,true,1,1) on conflict(id) do update set multi_whatsapp=true,global_daily_limit=1,global_hourly_limit=1; create table if not exists collection_dispatches(id uuid primary key,purpose text,origem text,criado_em timestamptz); create table if not exists collection_dispatch_attempts(id uuid primary key,dispatch_id uuid,whatsapp_instance_id uuid,criado_em timestamptz); create table if not exists whatsapp_instances(id uuid primary key default gen_random_uuid(),instance_name text unique); insert into whatsapp_instances(instance_name) values('vivenzza-financeiro') on conflict do nothing`)
  process.env.FRETE_MODULO_INSTALADO = 'true'
  try {
   const { contarTentativasReaisDesde } = await import('../../src/lib/collection/providerAttemptCounter.js')
   const { verificarLimiteGlobalEnvio } = await import('../../src/lib/collection/globalSendLimit.js')
   const { contarEnviosReaisHojePorInstancia } = await import('../../src/lib/collection/whatsappInstances.js')
-  assert.equal(await contarTentativasReaisDesde({ desde: '2000-01-01T00:00:00Z' }), 1)
-  assert.equal((await verificarLimiteGlobalEnvio()).permitido, false)
+  assert.equal(await contarTentativasReaisDesde({ desde: '2000-01-01T00:00:00Z' }), 0)
+  assert.equal((await verificarLimiteGlobalEnvio()).permitido, true)
   const instance = (await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0]
-  assert.equal((await contarEnviosReaisHojePorInstancia()).get(instance.id), 1)
+  assert.equal((await contarEnviosReaisHojePorInstancia()).get(instance.id), 0)
  } finally { process.env.FRETE_MODULO_INSTALADO = 'false';await sql.query('update automacoes_config set global_daily_limit=1000,global_hourly_limit=1000 where id=1') }
 })
 test('proposta conferida entra no ranking, pausa assistente e consulta alheia é recusada', async () => {
@@ -234,10 +243,30 @@ test('opt-out com tela antiga nao pode restaurar consentimento',async()=>{
  assert.equal((await sql.query('select cotacao_frete_consentimento from fornecedores where id=$1',[supplier])).rows[0].cotacao_frete_consentimento,false)
 })
 
-test('reserva atomica disputa a ultima vaga entre frete, v2 e legado',async()=>{
+test('cadência própria de 60s é atômica entre réplicas e não debita cobrança',async()=>{
+ const q=(await sql.query('select id from frete_consultas where fornecedor_id=$1 limit 1',[supplier])).rows[0].id
+ await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '2 minutes' where attempted_at is not null")
+ const ids=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key)select $1,'5551999990001','teste cadencia',gen_random_uuid()::text from generate_series(1,2)returning id",[q])).rows.map(r=>r.id)
+ try {
+  const before=Number((await sql.query("select frete_contar_orcamento('2000-01-01'::timestamptz) n")).rows[0].n)
+  const results=await Promise.allSettled(ids.map(id=>db._pool.query('update frete_envios set attempted_at=clock_timestamp() where id=$1 returning id',[id])))
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1)
+  assert.match(results.find(r=>r.status==='rejected').reason.message,/limite_frete_cadencia/)
+  const waiting=results[0].status==='rejected'?ids[0]:ids[1]
+  const first=waiting===ids[0]?ids[1]:ids[0]
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '59 seconds' where id=$1",[first])
+  await assert.rejects(sql.query('update frete_envios set attempted_at=clock_timestamp() where id=$1',[waiting]),/limite_frete_cadencia/)
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '61 seconds' where id=$1",[first])
+  assert.equal((await sql.query('update frete_envios set attempted_at=clock_timestamp() where id=$1 returning id',[waiting])).rows.length,1)
+  assert.equal(Number((await sql.query("select frete_contar_orcamento('2000-01-01'::timestamptz) n")).rows[0].n),before)
+ } finally { await sql.query('delete from frete_envios where id=any($1::uuid[])',[ids]) }
+})
+
+test('frete reserva à parte enquanto v2 e legado disputam somente a ultima vaga financeira',async()=>{
  const q=(await sql.query('select id from frete_consultas where fornecedor_id=$1 limit 1',[supplier])).rows[0].id
  const instancia=(await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0].id
  for(const porInstancia of [false,true]){
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '2 minutes' where attempted_at is not null")
   const d=(await sql.query("insert into collection_dispatches(id,purpose,origem,criado_em)values(gen_random_uuid(),'collection','manual',now())returning id")).rows[0].id
   const e=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key)values($1,'5551999990001','teste concorrente',gen_random_uuid()::text)returning id",[q])).rows[0].id
   let ids=[]
@@ -250,7 +279,8 @@ test('reserva atomica disputa a ultima vaga entre frete, v2 e legado',async()=>{
     db._pool.query('insert into collection_dispatch_attempts(id,dispatch_id,whatsapp_instance_id,criado_em)values(gen_random_uuid(),$1,$2,clock_timestamp())returning id',[d,instancia]),
     db._pool.query("select frete_reservar_legado('vivenzza-financeiro') as id")
    ])
-   assert.equal(tentativas.filter(r=>r.status==='fulfilled').length,1)
+   assert.equal(tentativas[0].status,'fulfilled')
+   assert.equal(tentativas.slice(1).filter(r=>r.status==='fulfilled').length,1)
    for(const r of tentativas.filter(r=>r.status==='rejected'))assert.match(r.reason.message,/limite_.*reserva/)
    if(tentativas[2].status==='fulfilled')ids.push(tentativas[2].value.rows[0].id)
   }finally{

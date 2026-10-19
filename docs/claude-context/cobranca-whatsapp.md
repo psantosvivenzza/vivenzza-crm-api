@@ -5,7 +5,11 @@
 - `cobranca_whatsapp_ativa=true`
 - `multi_whatsapp=true`
 - `whatsapp_failover=false` — **nunca ativar sem autorização explícita**.
-- Limites globais: **10/hora**, **30/dia**.
+- Limites de cobrança autorizados em 19/10/2026: **10/hora**, **50/dia**.
+- Frete tem orçamento independente: uma tentativa a cada **60 segundos**,
+  garantida no banco entre réplicas. Solicitações e respostas do assistente de
+  frete não consomem os limites de cobrança, mesmo usando o número financeiro.
+  Saúde da instância, DNC, consentimento e restrições do provedor permanecem.
 - Cadência entre mensagens: 45–90s (aleatório).
 - No máximo 1 mensagem por telefone por dia.
 - Janela permitida: 08h–17h, dias úteis.

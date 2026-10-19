@@ -3,8 +3,7 @@ import { FRETE_INSTANCE } from './domain.js'
 export { FRETE_INSTANCE } from './domain.js'
 import { enviarTexto, classifyEvolutionFailure } from '../collection/evolutionAdapter.js'
 import { estaEmDoNotContact } from '../collection/doNotContactGuard.js'
-import { verificarLimiteGlobalEnvio } from '../collection/globalSendLimit.js'
-import { contarEnviosReaisHojePorInstancia, contarEnviosReaisDesdePorInstancia, registrarSucessoEnvio, registrarFalhaEnvio } from '../collection/whatsappInstances.js'
+import { registrarSucessoEnvio, registrarFalhaEnvio } from '../collection/whatsappInstances.js'
 import { candidatosTelefone, telefonesEquivalentes } from '../telefone.js'
 
 export async function checked(query) {
@@ -12,7 +11,7 @@ export async function checked(query) {
   if (result.error) throw result.error
   return result.data
 }
-export async function runFreteQueue({ db = supabase, send = enviarTexto, now = new Date(), installed = process.env.FRETE_MODULO_INSTALADO === 'true', enabled = process.env.FRETE_ENVIO_ATIVO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', dnc = estaEmDoNotContact, globalLimit = verificarLimiteGlobalEnvio, instanceCounts = contarEnviosReaisHojePorInstancia, instanceHourCounts = contarEnviosReaisDesdePorInstancia, recordSuccess = registrarSucessoEnvio, recordFailure = registrarFalhaEnvio } = {}) {
+export async function runFreteQueue({ db = supabase, send = enviarTexto, now = new Date(), installed = process.env.FRETE_MODULO_INSTALADO === 'true', enabled = process.env.FRETE_ENVIO_ATIVO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', dnc = estaEmDoNotContact, recordSuccess = registrarSucessoEnvio, recordFailure = registrarFalhaEnvio } = {}) {
   if (!installed) return { status: 'nao_instalado' }
   const cutoff = new Date(new Date(now).getTime() - 120000).toISOString()
   // Crash/timeout reconciliation never puts a possibly delivered message back into fila.
@@ -47,14 +46,9 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
     for (const candidato of candidatosTelefone(envio.telefone)) {
       if ((await dnc(candidato)).blocked) return finish('bloqueado', 'DNC')
     }
-    if (!(await globalLimit()).permitido) return { status: 'aguardando_limite' }
-    const counts = await instanceCounts()
-    if (instancia.daily_limit != null && (counts.get(instancia.id) ?? 0) >= instancia.daily_limit) return { status: 'aguardando_limite' }
-    if (instancia.hourly_limit != null) {
-      const inicioHora = new Date(now); inicioHora.setUTCMinutes(0, 0, 0)
-      const countsHora = await instanceHourCounts(inicioHora.toISOString())
-      if ((countsHora.get(instancia.id) ?? 0) >= instancia.hourly_limit) return { status: 'aguardando_limite' }
-    }
+    // Frete tem cadência própria de 60s, garantida atomicamente pelo claim e
+    // trigger no banco. Não consulta nem consome a cota financeira 50/dia 10/h.
+    // Saúde, conexão, consentimento, DNC e revisão humana continuam obrigatórios.
     const claimed = await checked(db.rpc('frete_claim_envio', { p_envio_id: envio.id }))
     const reservado = Array.isArray(claimed) ? claimed[0] : claimed
     if (!reservado) return { status: 'ocupado' }
@@ -80,7 +74,7 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
       console.error('[fretes] envio confirmado; histórico pendente de conferência')
       return { status: 'enviado', error_code: 'HISTORICO_PENDENTE' }
     }
-    if (!reservadoParaEnvio) return { status: 'aguardando_banco' }
+    if (!reservadoParaEnvio) return { status: error?.message === 'limite_frete_cadencia' ? 'aguardando_cadencia' : 'aguardando_banco' }
     if (classifyEvolutionFailure(error).affectsInstanceHealth) { try { await recordFailure(instanciaId) } catch {} }
     return finish('revisao', error.numeroInvalido ? 'NUMERO_INVALIDO' : 'VERIFICAR_ENVIO_MANUALMENTE')
   }
