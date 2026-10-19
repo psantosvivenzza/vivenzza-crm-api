@@ -19,3 +19,17 @@ PR deve permanecer draft até revisão operacional. Sem histórico totalmente co
 Complementar ao PR 151 (código de saída da CLI), sem incluí-lo. Este patch não modifica CLI, agendamento, banco, flags, env ou produção. Falha retornada ao gravar o próprio estado `falhou` ainda pode deixar metadados incompletos; se essa gravação rejeitar a Promise, pode mascarar a exceção original (comportamento anterior, não corrigido aqui). Não promete transação atômica por pedido nem processamento exatamente uma vez.
 
 Outros gates apontados pela revisão: impedir sobreposição de execução HTTP e agendada com exclusão mútua real; limitar/reconciliar a repetição de detalhes em sincronizacao_pedidos_erros diante de falha persistente. Ordenação é verificada nos argumentos do double, não contra PostgREST real. Linhas históricas inconsistentes (concluido sem data/cursor) exigem validação operacional antes de implantação.
+
+## Verificação automática do checkpoint (19/10/2026)
+
+A workflow pedidos-checkpoint-safety executa os nove testes de checkpoint e os
+seis guards estáticos do wrapper em Node 24, Ubuntu 24.04 e Windows. Não executa
+o BAT; apenas lê sua estrutura e a cadeia de arquivos. Import hooks substituem pg, Supabase, conexão
+E01 e logística física antes de carregar o job. Não instala dependências, carrega
+.env, acessa banco real ou inicia a aplicação. GITHUB_TOKEN com contents: read,
+actions fixadas por SHA. O check filtrado por paths não é requisito global de merge.
+
+Os casos incluem execução parcial, preservação do último cursor concluído,
+falha de leitura/persistência e sucesso posterior que não pode esconder linha
+anterior com erro. Não prova importação produtiva, backfill completo, resolução
+de linha permanentemente inválida ou compatibilidade da CLI da PR 151.
