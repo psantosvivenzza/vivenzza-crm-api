@@ -32,8 +32,9 @@ O módulo `scripts/lib/financeiro-phase.mjs` precisa acompanhar o CLI no mesmo r
 
 ## Check remoto isolado
 
-O workflow `.github/workflows/financeiro-cli-safety.yml` executa os dois arquivos
-de teste em Node 24, sem instalar dependências, carregar .env ou iniciar a
+O workflow `.github/workflows/financeiro-cli-safety.yml` executa testes de
+CLI/observador, diagnóstico de progresso e guards dos lançadores em Node 24,
+sem instalar dependências, carregar .env ou iniciar a
 aplicação. Roda em PRs que alteram esses caminhos e em pushes correspondentes
 para main; inclui PRs draft. Actions oficiais fixadas por SHA, token somente
 leitura, credenciais de checkout não persistidas, timeout de cinco minutos.
@@ -41,3 +42,22 @@ Não usa secrets, environments de produção, serviços de banco ou deploy.
 Esse check valida apenas o CLI/observador com adaptadores sintéticos, não a
 sincronização real nem as implementações dos adaptadores substituídos.
 Não configurar como required check global sem rever o filtro por caminhos.
+
+## Contenção dos lançadores versionada (19/10/2026)
+
+Após autorização humana para bloquear disparos e recuperar somente o sync
+financeiro em 18/10, watchdog-sync-financeiro.ps1 e vivenzza-sync-financeiro.bat
+passam --watch --sem-alertas. São as mesmas duas alterações já aplicadas e
+revisadas no checkout operacional; esta etapa apenas as preserva na PR.
+Nenhum novo restart, instalação de tarefa ou alteração do protocolo de parada.
+
+O watchdog continua com RequestId/ACK, sinalizador persistente e identidade do
+worker. O BAT manual continua sem exclusão mútua própria: não executar enquanto
+o watchdog estiver ativo. O caminho absoluto legado do BAT não foi alterado.
+Dois guards estáticos verificam o argumento e preservação do append do log;
+não executam PowerShell, BAT ou scheduler. A suíte remota passa a 48 testes.
+
+--sem-alertas bloqueia somente os alertas do CLI, não toda a régua do CRM nem
+outros consumidores de whatsappAlert.js. As flags globais de cobrança precisam
+continuar bloqueadas separadamente. Não retirar o argumento nem reativar canais
+sem aprovação. O CLI direto sem essa opção mantém comportamento anterior.
