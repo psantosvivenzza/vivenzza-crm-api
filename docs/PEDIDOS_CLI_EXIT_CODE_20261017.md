@@ -34,3 +34,20 @@ correção isolada, não resolvidos por esta mudança de exit code.
 Ativar retry do agendador com exit 1 pode repetir escritas parciais: revisar
 idempotência/cursor e política de retentativas antes da implantação. Sem
 autorizar sync ou afirmar êxito com base só no código de saída.
+
+## Verificação automática (19/10/2026)
+
+A workflow pedidos-cli-safety executa 51 testes em Node 24, Ubuntu 24.04 e
+Windows: 27 de diagnóstico puro de conexão, um do job com adaptadores fictícios,
+17 de subprocesso CLI com job/dotenv substituídos e seis guards estáticos do BAT.
+Não executa o BAT ou sincronização real, instala dependências, carrega .env ou
+consulta banco/rede. GITHUB_TOKEN com contents:read e actions fixadas por SHA.
+
+Os subprocessos recebem somente SystemRoot e variáveis sintéticas da fixture.
+O hook permite apenas o entry exato e os dois módulos substituídos: qualquer
+import extra falha antes de carregar a dependência, inclusive módulo nativo.
+Diagnóstico de conexão rejeita mensagens/códigos não permitidos, inclusive quando
+o fechamento falha. A CI não prova acesso real ao e01, sucesso da tarefa agendada,
+reparo das lacunas ou segurança de reprocessamento. Não incorpora o checkpoint
+da PR 153. Os gates de implantação acima permanecem; check filtrado por paths
+não deve ser requisito global de merge para arquivos não relacionados.
