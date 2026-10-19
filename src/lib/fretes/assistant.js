@@ -11,11 +11,49 @@ const CAMPOS = {
  descricao: d => ['Mercadoria', d.descricao],
 }
 const normalizar = v => String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
+const menuLine=/^(?:digite\s*)?(\d{1,2})\s*[-:.)=]\s*(.+)$/
+export function pedidoHumanoExplicitoFrete(texto){
+ if(typeof texto!=='string'||texto.length>2000)return true
+ const t=normalizar(texto).replace(/[\uFE0F\u20E3*]/gu,'')
+ const lines=t.split(/\r?\n/),menu=lines.filter(l=>menuLine.test(l.trim())).length>=2
+ const prose=menu?lines.filter(l=>!menuLine.test(l.trim())).join(' '):t
+ return /(?:quero|preciso|prefiro|desejo).*\b(?:humano|atendente)\b|falar com (?:um |o |uma |a )?(?:humano|atendente|financeiro)/.test(prose)
+}
 function guard(texto) {
  const t = normalizar(texto)
  if (/^(stop|sair|parar|descadastrar|unsubscribe)[.!]?$/.test(t) || /nao (envie|mande) (mais )?(mensagens|cotacoes)|nao quero mais(?:[.!]|$)|nao quero mais (receber|mensagens|cotacoes)|nao (quero|desejo).*(receber|mensagens|contato)|pare de (me contatar|me chamar|enviar mensagens|mandar mensagens)|descadastre|(remov(a|er)|retire|exclua).*(numero|contato|cadastro|lista)|nao me (contate|chame)|prefiro.*nao.*(contat|mensag)|nao tenho interesse.*(mensagens|contato)/.test(t)) return 'opt_out'
  if (/peso.*(cubad|unitari|liquid)|fator.*cub|cubagem.*fator|coletar|agendar|contratar|pagar|pix|confirma.*coleta|aceita|fechar|credencia|senha|token|ignore.*instruc|dados fiscais|cfop|remov(a|er)|pare de|cancelar|nao tenho interesse/.test(t)) return 'revisao'
  if (/r\$|frete.*\d|valor.*\d|prazo.*\d/.test(t)) return 'proposta'
+ return null
+}
+// Menus são dados não confiáveis: só uma opção explícita de cotação pode
+// virar resposta numérica. Nunca executar texto, acessar links ou contratar.
+export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
+ const t=normalizar(texto).replace(/[\uFE0F\u20E3*]/gu,'')
+ if(!t||t.length>2000)return null
+ if(guard(texto)==='opt_out')return {tipo:'opt_out'}
+ if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
+ const lines=t.split(/\r?\n/)
+ const options=lines.map(line=>line.trim().match(menuLine)).filter(Boolean)
+ if(options.length>=2){
+  const prose=lines.filter(l=>!menuLine.test(l.trim())).join(' ')
+  if(guard(prose)||options.some(o=>o[2].length>80||/[?]/.test(o[2])))return {tipo:'revisao'}
+  const ids=options.map(o=>o[1])
+  const safe=options.filter(o=>!/cancel|coleta|contrat|pagamento|financeiro|rastrea|status/.test(o[2]))
+  const quote=safe.filter(o=>/^(?:cotac(?:ao|oes)|orcamentos?)(?: de (?:frete|transporte))?$|^comercial\s*\/\s*cotac(?:ao|oes)$/.test(o[2]))
+  const commercial=safe.filter(o=>/^comercial$|^setor comercial$/.test(o[2]))
+  const customer=safe.filter(o=>/^atendimento ao cliente$/.test(o[2]))
+  const candidates=quote.length?quote:commercial.length?commercial:customer
+  return new Set(ids).size===ids.length&&candidates.length===1?{tipo:'resposta',texto:candidates[0][1]}:{tipo:'revisao'}
+ }
+ if(guard(texto))return null
+ if(/como (?:posso|podemos) (?:te |lhe |vos )?ajudar|em que (?:posso|podemos) ajudar/.test(t)){
+  const campos=['peso','volumes','retirada','entrega','descricao'].filter(c=>{const v=CAMPOS[c](dados)[1];return v!=null&&v!==''&&(!Array.isArray(v)||v.length)})
+  const response=responderCampos(campos,dados)
+  return response.tipo==='resposta'?{tipo:'resposta',texto:'Solicito uma cotação de frete.\n'+response.texto}:response
+ }
+ const substantive=t.replace(/nao estamos disponiveis/g,'')
+ if(t.length<=500&&!/\d|\b(?:nao|sem|reais|cobramos|infelizmente)\b|r\$/.test(substantive)&&/nao estamos disponiveis|responderemos assim que|agradecemos (?:o )?seu contato|recebemos sua mensagem|sou .*assistente virtual/.test(t))return {tipo:'aguardar'}
  return null
 }
 function responderCampos(campos, dados) {
@@ -53,6 +91,7 @@ export async function classificarComClaude(pergunta, {client:injectedClient}={})
 // O modelo recebe somente a pergunta, nunca o objeto completo da cotação.
 // Nenhum texto livre do modelo, preço extraído ou ferramenta é executado/enviado.
 export async function interpretarPerguntaFrete(texto,dados={}, {classify=classificarComClaude}={}) {
+ const automatic=decidirInteracaoAutomaticaFrete(texto,dados);if(automatic)return automatic
  const blocked=guard(texto); if(blocked) return {tipo:blocked}
  if(dados.modo_volumes==='cubagem_total' && /dimens|medida|comprimento|largura|altura/.test(normalizar(texto)))return {tipo:'revisao'}
  const known=decidirRespostaFrete(texto,dados)

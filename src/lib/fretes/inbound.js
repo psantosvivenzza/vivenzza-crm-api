@@ -1,7 +1,7 @@
 import { supabase } from '../supabase-admin.server.js'
 import { candidatosTelefone, telefonesEquivalentes } from '../telefone.js'
 import { checked, FRETE_INSTANCE } from './worker.js'
-import { decidirRespostaFrete, interpretarPerguntaFrete } from './assistant.js'
+import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete } from './assistant.js'
 
 export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete } = {}) {
   if (!installed || instanceName !== FRETE_INSTANCE) return false
@@ -40,7 +40,8 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     const respostas=await checked(db.from('frete_envios').select('id').eq('mensagem_id',old[0].id).limit(1))
     let eco=false
     if(fromMe){const enviados=await checked(db.from('frete_envios').select('provider_id,texto').in('consulta_id',matches.map(c=>c.id)).limit(100));const normalizar=v=>String(v||'').replace(/\s+/gu,' ').trim();eco=enviados?.some(e=>e.provider_id===evolutionId||normalizar(e.texto)===normalizar(texto))}
-    if(!respostas?.length&&!eco)await pause()
+    const avisoAutomatico=!fromMe&&!mediaTipo&&decidirInteracaoAutomaticaFrete(texto)?.tipo==='aguardar'
+    if(!respostas?.length&&!eco&&!avisoAutomatico)await pause()
     return true
   }
   if (matches.length > 1) {
@@ -68,15 +69,24 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
     await pause(); return true
   }
-  if (!single || mediaTipo || /humano|atendente|financeiro/i.test(String(texto || ''))) { await pause(); return true }
+  if (!single || mediaTipo || pedidoHumanoExplicitoFrete(texto)) { await pause(); return true }
   if (single.ia_pausada || single.completa || !assistantEnabled) return true
   const cotacao = await checked(db.from('frete_cotacoes').select('*').eq('id', single.cotacao_id).single())
   if (cotacao.status !== 'aberta') return true
   const resposta = await interpret(texto, cotacao.dados)
+  if(resposta.tipo==='aguardar')return true
   if (resposta.tipo === 'opt_out') {
     for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
   }
   if (resposta.tipo !== 'resposta') { await pause(); return true }
+  // IDs diferentes não autorizam loop bot-bot com a mesma pergunta/resposta.
+  const automatic=decidirInteracaoAutomaticaFrete(texto,cotacao.dados)
+  if(automatic?.tipo==='resposta'){
+    const replies=await checked(db.from('frete_envios').select('mensagem_id,texto').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
+    const history=await checked(db.from('frete_mensagens').select('id,texto').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
+    const normalized=v=>String(v||'').replace(/\s+/gu,' ').trim()
+    if((replies??[]).some(e=>e.mensagem_id&&normalized(e.texto)===normalized(resposta.texto)&&(history??[]).some(m=>m.id===e.mensagem_id&&normalized(m.texto)===normalized(texto)))){await pause();return true}
+  }
   await checked(db.rpc('frete_enfileirar_resposta', { p_consulta_id: single.id, p_mensagem_id: mensagemId, p_texto: resposta.texto }))
   return true
   } catch (error) {

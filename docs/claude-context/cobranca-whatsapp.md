@@ -83,6 +83,18 @@ Dentro do mesmo grupo, preserva a primeira ocorrência do array original.
 Nunca infere se um número tem WhatsApp — só decide qual contato existente
 usar.
 
+## Assistente de frete — menus (19/10/2026)
+
+Menus de transportadoras não são pedidos de atendimento financeiro: escolher
+somente uma opção inequívoca de cotação/orçamento de frete, comercial ou
+atendimento ao cliente. Menus ambíguos e listas de perguntas não autorizam
+seleção. Avisos automáticos de ausência aguardam; recusa, mídia, encerramento,
+proposta e pedido humano explícito exigem revisão. Não retomar menus expirados.
+Pares repetidos de menu/resposta pausam para impedir loops entre bots.
+O teto transacional de seis respostas, DNC, consentimento, pausa humana e
+cadência independente de 60s continuam vigentes. Nunca contratar, agendar
+coleta, pagar, abrir links ou inventar dados para concluir uma cotação.
+
 ## Fila de revisão cadastral
 
 Tela `/revisao-contatos` (Financeiro) + `GET /api/collection-contact-review`
