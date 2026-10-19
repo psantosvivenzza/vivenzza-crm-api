@@ -1,10 +1,10 @@
 import { supabase } from '../supabase-admin.server.js'
 import { candidatosTelefone, telefonesEquivalentes } from '../telefone.js'
 import { checked, FRETE_INSTANCE } from './worker.js'
-import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete,guardFrete } from './assistant.js'
+import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete,guardFrete,parRepetidoFrete } from './assistant.js'
 import { extrairPropostaTextualFrete } from './proposal.js'
 import { validarProposta } from './domain.js'
-import {extrairProgressoFrete,solicitarPendenciasFrete} from './progress.js'
+import {extrairProgressoFrete,solicitarPendenciasFrete,confirmouTaxasFrete} from './progress.js'
 import {preservarAnexoFrete} from './attachments.js'
 
 async function capturarPropostaTextual(db,consulta,texto){
@@ -112,9 +112,14 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     // OCR é evidência auxiliar, nunca autoriza contratar ou marcar completa.
     texto=extraido
   }
-  if(guardFrete(texto)==='revisao'&&decidirInteracaoAutomaticaFrete(texto)?.tipo!=='resposta'){await pause();return true}
+  if(guardFrete(texto)==='revisao'&&!['resposta','aguardar'].includes(decidirInteracaoAutomaticaFrete(texto)?.tipo)){await pause();return true}
   if(!single.ia_pausada&&!single.completa&&assistantEnabled){
     const campos=extrairProgressoFrete(texto)
+    let taxasPorContexto=false
+    if(!mediaTipo&&/^(?:sim|sim,? todas as taxas inclusas|confirmo)[.!]?$/i.test(String(texto||'').trim())&&single.valor_total!=null&&single.prazo_dias!=null&&single.validade){
+      const ultimas=await checked(db.from('frete_envios').select('texto,status,provider_id').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(1))
+      if(confirmouTaxasFrete(texto,single,ultimas?.[0])){campos.taxas_inclusas=true;taxasPorContexto=true}
+    }
     if(Object.keys(campos).length){
       if(mediaTipo){delete campos.taxas_inclusas;campos.origem_anexo=true}
       let snapshot=single,atual=null
@@ -123,6 +128,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
         if(atual)break
         snapshot=await checked(db.from('frete_consultas').select('*').eq('id',single.id).single())
         if(snapshot.ia_pausada||snapshot.completa||![single.atualizado_por,'assistente_frete_progresso'].includes(snapshot.atualizado_por))return true
+        if(taxasPorContexto&&(Number(snapshot.valor_total)!==Number(single.valor_total)||Number(snapshot.prazo_dias)!==Number(single.prazo_dias)||Date.parse(snapshot.validade)!==Date.parse(single.validade)))return true
       }
       if(!atual)return true // CAS/handoff concorrente: não continuar com snapshot antigo.
       const pendencias=solicitarPendenciasFrete(atual)
@@ -151,10 +157,9 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   // IDs diferentes não autorizam loop bot-bot com a mesma pergunta/resposta.
   const automatic=decidirInteracaoAutomaticaFrete(texto,cotacao.dados)
   if(automatic?.tipo==='resposta'){
-    const replies=await checked(db.from('frete_envios').select('mensagem_id,texto').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
-    const history=await checked(db.from('frete_mensagens').select('id,texto').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
-    const normalized=v=>String(v||'').replace(/\s+/gu,' ').trim()
-    if((replies??[]).some(e=>e.mensagem_id&&normalized(e.texto)===normalized(resposta.texto)&&(history??[]).some(m=>m.id===e.mensagem_id&&normalized(m.texto)===normalized(texto)))){await pause();return true}
+    const replies=await checked(db.from('frete_envios').select('mensagem_id,texto,status,provider_id,attempted_at,created_at').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
+    const history=await checked(db.from('frete_mensagens').select('id,texto,created_at').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
+    if(parRepetidoFrete(texto,resposta.texto,replies,history)){await pause();return true}
   }
   await checked(db.rpc('frete_enfileirar_resposta', { p_consulta_id: single.id, p_mensagem_id: mensagemId, p_texto: resposta.texto }))
   return true

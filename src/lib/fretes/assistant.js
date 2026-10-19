@@ -34,6 +34,11 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  if(!t||t.length>2000)return null
  if(guard(texto)==='opt_out')return {tipo:'opt_out'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
+ if(/https?:\/\//.test(t)&&/cotac|orcamento/.test(t)&&/site|acesse|link|digital|cadastro/.test(t))return {tipo:'revisao'}
+ // Alguns bots enviam orientações e só depois a pergunta em outro evento.
+ // Aguardar não significa aceitar regras, confirmar enquadramento ou contratar.
+ if(!guard(texto)&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}
+ if(guard(texto)!=='revisao'&&!/destinat|remet|transportador|motorista|filial/.test(t)&&/\b(?:informe|digite)\s+(?:o\s+)?seu\s+cnpj(?:\s*(?:ou|\/)\s*cpf)?[:.!?\s]*$/.test(t)&&/^\d{14}$/.test(dados.pagador?.cnpj||''))return {tipo:'resposta',texto:dados.pagador.cnpj}
  if(/^(?:por (?:favor|gentileza)[, ]*)?(?:informe|digite|qual(?: e)?|como (?:voce )?(?:gostaria de ser chamado|se chama)).{0,35}(?:seu nome|nome por gentileza)|^informe seu nome[.!]?$|^como voce gostaria de ser chamado\?$/.test(t))return {tipo:'resposta',texto:'Assistente de cotações da Vivenzza Professional'}
  if(/^(?:ola[,! ]*)?(?:boa tarde|bom dia|boa noite)(?:[,! .]*(?:tudo bem\??))?[!. ]*$/.test(t))return {tipo:'resposta',texto:'Olá! Sou o assistente de cotações da Vivenzza. Buscamos o valor total do frete com todas as taxas, prazo em dias úteis e validade. Posso esclarecer os dados da solicitação já enviada.'}
  const lines=t.split(/\r?\n/)
@@ -58,6 +63,12 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  const substantive=t.replace(/nao estamos disponiveis/g,'')
  if(t.length<=500&&!/\d|\b(?:nao|sem|reais|cobramos|infelizmente)\b|r\$/.test(substantive)&&/nao estamos disponiveis|responderemos assim que|agradecemos (?:o )?seu contato|recebemos sua mensagem|sou .*assistente virtual/.test(t))return {tipo:'aguardar'}
  return null
+}
+export function parRepetidoFrete(texto,resposta,replies,history){
+ const normalize=v=>String(v||'').replace(/\s+/gu,' ').trim()
+ const reinicios=(replies??[]).filter(e=>e.status==='enviado'&&e.provider_id&&e.texto?.startsWith('Olá! Sou o assistente de cotações da Vivenzza. Solicitação de frete FRETE-')).map(e=>Date.parse(e.attempted_at||e.created_at)).filter(Number.isFinite)
+ const inicio=reinicios.length?Math.max(...reinicios):0
+ return (replies??[]).some(e=>e.mensagem_id&&normalize(e.texto)===normalize(resposta)&&(history??[]).some(m=>m.id===e.mensagem_id&&normalize(m.texto)===normalize(texto)&&(!inicio||!Number.isFinite(Date.parse(m.created_at))||Date.parse(m.created_at)>=inicio)))
 }
 function responderCampos(campos, dados) {
  if (!Array.isArray(campos) || !campos.length || campos.length > 7 || campos.some(c => typeof c !== 'string' || !Object.hasOwn(CAMPOS,c))) return { tipo:'revisao' }

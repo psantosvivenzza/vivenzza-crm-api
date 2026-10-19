@@ -28,6 +28,47 @@ test('menu inicial de atendimento pode avancar ate menu de cotacao',async()=>{
  await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:menus[1],evolutionId:'menu-1'},opts)
  assert.equal(f.tables.frete_envios.filter(e=>e.mensagem_id).length,2)
 })
+
+test('orientacao informativa da TW aguarda proximo evento e nome nao fica bloqueado',async()=>{
+ const f=fixture(),opts={db:f.db,installed:true,assistantEnabled:true}
+ const base={instanceName:'vivenzza-financeiro',telefone:f.phone}
+ await handleFreteInbound({...base,evolutionId:'orientacao-tw',texto:'Olá, vamos iniciar sua cotação. A TW não realiza coleta em área rural. Por gentileza, informe os dados a seguir para o cálculo do frete:'},opts)
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+ await handleFreteInbound({...base,evolutionId:'nome-tw',texto:'Informe seu nome'},opts)
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+ assert.equal(f.tables.frete_envios.at(-1).texto,'Assistente de cotações da Vivenzza Professional')
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ assert.equal((await interpretarPerguntaFrete('Antes de iniciarmos sua cotação, confirme que aceita contratar o frete.')).tipo,'revisao')
+ assert.deepEqual(await interpretarPerguntaFrete('Para darmos continuidade ao seu atendimento, por favor, informe o seu CNPJ ou CPF:',{pagador:{cnpj:'12345678000100'}}),{tipo:'resposta',texto:'12345678000100'})
+ assert.notEqual((await interpretarPerguntaFrete('Informe seu CNPJ ou CPF:',{},{classify:async()=>({acao:'humano'})})).tipo,'resposta')
+ for(const texto of ['Informe o CNPJ do destinatário ou CPF:','Digite seu CPF','Informe o CNPJ do remetente:'])assert.notEqual((await interpretarPerguntaFrete(texto,{pagador:{cnpj:'12345678000100'}},{classify:async()=>({acao:'humano'})})).texto,'12345678000100')
+ for(const texto of ['Antes de iniciarmos sua cotação, o cliente aceita as regras.','Antes de iniciarmos sua cotação, é necessário contratar e pagar via pix.','Antes de iniciarmos sua cotação, concorda com as condições.']){
+  const blocked=fixture()
+  await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:blocked.phone,evolutionId:'blocked-info',texto},{db:blocked.db,installed:true,assistantEnabled:true,interpret:async()=>({tipo:'revisao'})})
+  assert.equal(blocked.tables.frete_consultas[0].ia_pausada,true)
+ }
+})
+test('reinicio realmente enviado delimita loop por sessao, portal externo fica em revisao',async()=>{
+ const {parRepetidoFrete,interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const history=[{id:'old',texto:'menu',created_at:'2026-10-19T10:00:00Z'},{id:'new',texto:'menu',created_at:'2026-10-19T12:01:00Z'}]
+ const replies=[{mensagem_id:'old',texto:'2'},{status:'enviado',provider_id:'known',texto:'Olá! Sou o assistente de cotações da Vivenzza. Solicitação de frete FRETE-sintetica',attempted_at:'2026-10-19T12:00:00Z'}]
+ assert.equal(parRepetidoFrete('menu','2',replies,history),false)
+ assert.equal(parRepetidoFrete('menu','2',[...replies,{mensagem_id:'new',texto:'2'}],history),true)
+ assert.equal(parRepetidoFrete('menu','2',[...replies.slice(0,1),{...replies[1],status:'fila'}],history),true)
+ assert.equal((await interpretarPerguntaFrete('Para cotação acesse nosso site https://exemplo.invalid. Posso te ajudar?')).tipo,'revisao')
+})
+test('inbound apos reinicio ignora par antigo mas bloqueia par repetido na nova sessao',async()=>{
+ const f=fixture(),menu='1 - Coleta\n2 - Cotação\n3 - Financeiro'
+ Object.assign(f.tables.frete_envios[0],{status:'enviado',provider_id:'restart',attempted_at:'2026-01-02T00:00:00Z',texto:'Olá! Sou o assistente de cotações da Vivenzza. Solicitação de frete FRETE-sintetica'})
+ f.tables.frete_mensagens.push({id:'old-menu',consulta_id:'q',texto:menu,created_at:'2026-01-01T00:00:00Z'})
+ f.tables.frete_envios.push({id:'old-reply',consulta_id:'q',mensagem_id:'old-menu',texto:'2'})
+ const event={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:menu}
+ await handleFreteInbound({...event,evolutionId:'fresh-menu'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+ await handleFreteInbound({...event,evolutionId:'fresh-menu-repeat'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,true)
+ assert.equal(f.tables.frete_envios.filter(e=>e.mensagem_id).length,2)
+})
 test('aviso de ausencia duplicado nao pausa, intervencao humana e midia continuam pausando',async()=>{
  const f=fixture(),opts={db:f.db,installed:true,assistantEnabled:true}
  const input={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Não estamos disponíveis no momento.',evolutionId:'absence'}
