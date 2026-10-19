@@ -67,8 +67,8 @@ test.before(async () => {
   await sql.query('commit')
  }
  catch(error){await sql.query('rollback');throw error}
- await sql.query(await readFile(new URL('../../supabase/migrations/20261019180129_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
- await sql.query(await readFile(new URL('../../supabase/migrations/20261019180129_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
  await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
