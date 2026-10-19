@@ -27,10 +27,24 @@ export function guardFrete(texto) {
  return null
 }
 const guard=guardFrete
+// Formulários de bots exigem o campo isolado, não um cadastro concatenado.
+// Só aceitar um documento/CEP e um papel inequívoco; nunca inferir CPF.
+function campoIsoladoFrete(t,dados){
+ t=t.replace(/\\n/g,' ')
+ if(t.length>300||/[?][\s\S]*[?]/.test(t)||/https?:|\b(?:cpf|senha|token|aceite|concordo)\b/.test(t))return null
+ const roles=[['retirada',/\b(?:remetente|origem|retirada)\b/],['entrega',/\b(?:destinatario|destino|entrega)\b/],['pagador',/\b(?:pagador|tomador)\b/]].filter(([,r])=>r.test(t))
+ const fields=[['cnpj',/\bcnpj\b/],['cep',/\bcep\b/]].filter(([,r])=>r.test(t))
+ if(!fields.length)return null
+ // Vocabulário fechado: uma pergunta composta não pode virar resposta parcial.
+ const rest=t.replace(/\b(?:cnpj|cep|do|da|de|o|a|e|remetente|origem|retirada|destinatario|destino|entrega|pagador|tomador|somente|apenas|letras|numeros|digitos|caracteres|informe|digite|verifique|se|possui|por|favor|gentileza|qual|eh|sem|pontuacao)\b|\b(?:14|8)\b|[\s():,.!?-]/g,'')
+ if(rest||roles.length!==1||fields.length!==1)return null
+ const field=fields[0][0],value=String(dados[roles[0][0]]?.[field]||'').replace(/[.\-/\s]/g,'')
+ return new RegExp(`^\\d{${field==='cnpj'?14:8}}$`).test(value)?{tipo:'resposta',texto:value}:{tipo:'revisao'}
+}
 // Menus são dados não confiáveis: só uma opção explícita de cotação pode
 // virar resposta numérica. Nunca executar texto, acessar links ou contratar.
 export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
- const t=normalizar(texto).replace(/[\uFE0F\u20E3*]/gu,'')
+ const t=normalizar(texto).replace(/[\uFE0F\u20E3*]/gu,'').replace(/\\n/g,'\n')
  if(!t||t.length>2000)return null
  if(guard(texto)==='opt_out')return {tipo:'opt_out'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
@@ -38,6 +52,13 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  // Preambulo e transferencia da TRANSPORTADORA não são handoff da Vivenzza.
  // São eventos separados do menu/pergunta; não responder nem pausar aqui.
  if(!guard(texto)&&/^(?:(?:por favor,?\s*)?escolha uma das opcoes|estamos transferindo o seu atendimento,?\s*(?:por favor,?\s*)?aguarde|we['’]re transferring you to an agent)[.!\s]*$/.test(t))return {tipo:'aguardar'}
+ // Cartão introdutório real: as menções a entrega e comprimento são orientações,
+ // não perguntas. Aguardar a próxima mensagem não aceita condições comerciais.
+ const intro=t.replace(/tudo certo\?\s*vamos continuar!/g,'')
+ if(!guard(t.replace(/\b3 metros\b/g,'tres metros'))&&t.includes('vamos iniciar sua cotacao de frete')&&t.includes('orientacoes importantes')&&/por gentileza, informe os dados solicitados a seguir para calcularmos o valor do seu frete\.\s*$/.test(t)&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(intro))return {tipo:'aguardar'}
+ if(!guard(texto)){
+  const isolated=campoIsoladoFrete(t,dados);if(isolated)return isolated
+ }
  // Alguns bots enviam orientações e só depois a pergunta em outro evento.
  // Aguardar não significa aceitar regras, confirmar enquadramento ou contratar.
  if(!guard(texto)&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}

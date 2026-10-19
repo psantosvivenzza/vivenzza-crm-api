@@ -4,6 +4,31 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('formulário de CNPJ/CEP recebe somente o campo cadastrado do papel solicitado',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const d=payload()
+ for(const [text,value] of [
+  ['CNPJ do Remetente (somente letras e números)',d.retirada.cnpj],
+  ['Digite somente letras e números.\nVerifique se o CNPJ do Remetente possui 14 caracteres.',d.retirada.cnpj],
+  ['Digite somente letras e números.\\nVerifique se o CNPJ do Remetente possui 14 caracteres.',d.retirada.cnpj],
+  ['CNPJ do destinatário:',d.entrega.cnpj],['Informe CEP da entrega',d.entrega.cep],['CNPJ do pagador',d.pagador.cnpj],
+ ])assert.deepEqual(await interpretarPerguntaFrete(text,d),{tipo:'resposta',texto:value})
+ assert.deepEqual(await interpretarPerguntaFrete('CNPJ do remetente',{...d,retirada:{cnpj:'incorreto'}}),{tipo:'revisao'})
+ const composite=await interpretarPerguntaFrete('CNPJ e endereço do remetente',d)
+ assert.notEqual(composite.texto,d.retirada.cnpj)
+ assert.notEqual((await interpretarPerguntaFrete('CNPJ do remetente e destinatário',d)).texto,d.retirada.cnpj)
+ assert.equal((await interpretarPerguntaFrete('Pare de enviar mensagens. CNPJ do remetente',d)).tipo,'opt_out')
+})
+
+test('orientação de abertura não responde comprimento/entrega antes da pergunta seguinte',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const intro='Olá! Vamos iniciar sua cotação de frete! Orientações importantes: as mercadorias devem estar embaladas. Comprimento superior a 3 metros exige alternativas. Coletas e entregas não são realizadas em áreas rurais. Tudo certo? Vamos continuar! Por gentileza, informe os dados solicitados a seguir para calcularmos o valor do seu frete.'
+ assert.deepEqual(await interpretarPerguntaFrete(intro,payload()),{tipo:'aguardar'})
+ assert.deepEqual(await interpretarPerguntaFrete(intro.replace('Tudo certo? Vamos continuar!','Tudo certo?\\nVamos continuar!'),payload()),{tipo:'aguardar'})
+ assert.equal((await interpretarPerguntaFrete('CEP do pagador',payload())).tipo,'revisao')
+ assert.notEqual((await interpretarPerguntaFrete(intro.replace('Tudo certo?','Você aceita as condições?'),payload())).tipo,'aguardar')
+})
+
 test('cotação aceita até 50 transportadoras distintas sem ampliar volumes ou permitir duplicatas', () => {
  const ids = Array.from({length:51}, (_, i) => `11111111-1111-4111-8111-${String(i+1).padStart(12,'0')}`)
  for(const n of [1,30,31,45,50])assert.deepEqual(validarCotacao({...payload(),transportadora_ids:ids.slice(0,n)}).transportadora_ids,ids.slice(0,n))
