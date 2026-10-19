@@ -10,6 +10,8 @@ on:
       - 'scripts/tests/pedidos-conexao.test.mjs'
       - 'scripts/tests/unit/pedidos-conexao-job.test.mjs'
       - 'scripts/tests/unit/pedidos-cli-exit-code.test.mjs'
+      - 'scripts/tests/unit/pedidos-checkpoint.test.mjs'
+      - 'scripts/tests/unit/pedidos-cli-job-integration.test.mjs'
       - 'scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs'
       - 'sync-pedidos.bat'
       - 'package.json'
@@ -23,6 +25,8 @@ on:
       - 'scripts/tests/pedidos-conexao.test.mjs'
       - 'scripts/tests/unit/pedidos-conexao-job.test.mjs'
       - 'scripts/tests/unit/pedidos-cli-exit-code.test.mjs'
+      - 'scripts/tests/unit/pedidos-checkpoint.test.mjs'
+      - 'scripts/tests/unit/pedidos-cli-job-integration.test.mjs'
       - 'scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs'
       - 'sync-pedidos.bat'
       - 'package.json'
@@ -54,5 +58,5 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       # Native tests use doubles before import. BAT is read, never executed.
-      - name: Hermetic CLI connection and wrapper tests
-        run: node --test scripts/tests/pedidos-conexao.test.mjs scripts/tests/unit/pedidos-conexao-job.test.mjs scripts/tests/unit/pedidos-cli-exit-code.test.mjs scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs
+      - name: Hermetic CLI checkpoint and job integration tests
+        run: node --test scripts/tests/pedidos-conexao.test.mjs scripts/tests/unit/pedidos-conexao-job.test.mjs scripts/tests/unit/pedidos-cli-exit-code.test.mjs scripts/tests/unit/pedidos-checkpoint.test.mjs scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs scripts/tests/unit/pedidos-cli-job-integration.test.mjs
