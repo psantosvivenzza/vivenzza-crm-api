@@ -6,6 +6,7 @@ import { extrairPropostaTextualFrete } from './proposal.js'
 import { validarProposta } from './domain.js'
 import {extrairProgressoFrete,solicitarPendenciasFrete,confirmouTaxasFrete} from './progress.js'
 import {preservarAnexoFrete} from './attachments.js'
+import {completarLocalFormularioFrete} from './form.js'
 
 async function capturarPropostaTextual(db,consulta,texto){
  if(consulta.ia_pausada&&!String(consulta.atualizado_por||'').startsWith('assistente_frete_'))return false
@@ -60,9 +61,9 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     }
     return { semCotacao: true }
   }
-  const pause = async () => {
+  const pause = async (actor) => {
     for (const c of matches) {
-      await checked(db.from('frete_consultas').update({ ia_pausada: true }).eq('id', c.id).neq('status', 'encerrada'))
+      await checked(db.from('frete_consultas').update({ ia_pausada: true,...(actor?{atualizado_por:actor}:{}) }).eq('id', c.id).neq('status', 'encerrada'))
       await checked(db.from('frete_consultas').update({ status: 'revisao' }).eq('id', c.id).eq('completa', false).neq('status', 'encerrada'))
     }
   }
@@ -73,7 +74,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     let eco=false
     if(fromMe){const enviados=await checked(db.from('frete_envios').select('provider_id,texto').in('consulta_id',matches.map(c=>c.id)).limit(100));const normalizar=v=>String(v||'').replace(/\s+/gu,' ').trim();eco=enviados?.some(e=>e.provider_id===evolutionId||normalizar(e.texto)===normalizar(texto))}
     const avisoAutomatico=!fromMe&&!mediaTipo&&decidirInteracaoAutomaticaFrete(texto)?.tipo==='aguardar'
-    if(!respostas?.length&&!eco&&!avisoAutomatico)await pause()
+    if(!respostas?.length&&!eco&&!avisoAutomatico)await pause(fromMe?'humano_whatsapp':undefined)
     return true
   }
   if (matches.length > 1) {
@@ -90,10 +91,10 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   if (!inserted) return true
   if (fromMe) {
     if (single) {
-      const known = await checked(db.from('frete_envios').select('id,texto,provider_id').eq('consulta_id', single.id).limit(20))
+      const known = await checked(db.from('frete_envios').select('id,texto,provider_id').eq('consulta_id', single.id).order('created_at',{ascending:false}).limit(100))
       const normalizar = v => String(v || '').replace(/\s+/gu, ' ').trim()
-      if (!known?.some(e => e.provider_id === evolutionId || normalizar(e.texto) === normalizar(texto))) await pause()
-    } else await pause()
+      if (!known?.some(e => e.provider_id === evolutionId || normalizar(e.texto) === normalizar(texto))) await pause('humano_whatsapp')
+    } else await pause('humano_whatsapp')
     return true
   }
   const decision = decidirRespostaFrete(texto)
@@ -143,7 +144,9 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   if (single.ia_pausada || single.completa || !assistantEnabled) return true
   const cotacao = await checked(db.from('frete_cotacoes').select('*').eq('id', single.cotacao_id).single())
   if (cotacao.status !== 'aberta') return true
-  const resposta = await interpret(texto, cotacao.dados)
+  let dadosFormulario=cotacao.dados
+  if(/cidade|municipio/i.test(String(texto||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')))try{dadosFormulario=await completarLocalFormularioFrete(db,cotacao.dados)}catch{await pause();return true}
+  const resposta = await interpret(texto, dadosFormulario)
   if(resposta.tipo==='aguardar')return true
   if(resposta.tipo==='proposta'){
     const pendencias=solicitarPendenciasFrete(single)
@@ -155,7 +158,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   }
   if (resposta.tipo !== 'resposta') { await pause(); return true }
   // IDs diferentes não autorizam loop bot-bot com a mesma pergunta/resposta.
-  const automatic=decidirInteracaoAutomaticaFrete(texto,cotacao.dados)
+  const automatic=decidirInteracaoAutomaticaFrete(texto,dadosFormulario)
   if(automatic?.tipo==='resposta'){
     const replies=await checked(db.from('frete_envios').select('mensagem_id,texto,status,provider_id,attempted_at,created_at').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))
     const history=await checked(db.from('frete_mensagens').select('id,texto,created_at').eq('consulta_id',single.id).order('created_at',{ascending:false}).limit(100))

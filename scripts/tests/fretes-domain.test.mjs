@@ -4,6 +4,20 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('formulario escalar usa unidade e dado cadastrado, nao confirma fiscal nem agenda coleta',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const d=payload();d.retirada.endereco='Rua teste, Bauru, SP';d.retirada.cidade='Bauru';d.entrega.endereco='Rua destino, Pareci Novo, RS'
+ const pairs=[['Peso bruto total (kg)','20'],['Valor da nota fiscal','1000,00'],['Quantidade de volumes','10'],['Comprimento em cm','50'],['Largura em cm','40'],['Altura em cm','30'],['UF de destino','RS'],['Cidade de origem','Bauru'],['Insira a sigla do estado brasileiro para o qual necessita atendimento (exemplo: RS, SP, AM).\\n0️⃣: Retornar','SP']]
+ for(const [texto,expected] of pairs)assert.deepEqual(await interpretarPerguntaFrete(texto,d),{tipo:'resposta',texto:expected},texto)
+ const menu='Coleta (essa opção não gera coleta automaticamente)\\n\\n1 - A mercadoria será coletada pela TW\\n2 - A mercadoria será levada até uma base da TW'
+ assert.deepEqual(await interpretarPerguntaFrete(menu,d),{tipo:'resposta',texto:'1'})
+ assert.equal((await interpretarPerguntaFrete(menu.replace(' (essa opção não gera coleta automaticamente)',''),d)).tipo,'revisao')
+ for(const text of ['Confirme coleta para amanhã','O pagador é consignatário?','Tem troca de NF?','Peso líquido em kg','Peso cubado em kg','Pare de enviar mensagens'])assert.notEqual((await interpretarPerguntaFrete(text,d)).tipo,'resposta',text)
+ assert.equal((await interpretarPerguntaFrete('Altura em cm',{...d,volumes:[d.volumes[0],{...d.volumes[0],altura_cm:99}]})).tipo,'revisao')
+ assert.equal((await interpretarPerguntaFrete('Altura em cm',{...d,modo_volumes:'cubagem_total'})).tipo,'revisao')
+ for(const endereco of ['Rua X, 123, SP','Rua X, Bairro, SP'])assert.equal((await interpretarPerguntaFrete('Cidade de destino',{...d,entrega:{...d.entrega,endereco}})).tipo,'revisao')
+})
+
 test('formulário de CNPJ/CEP recebe somente o campo cadastrado do papel solicitado',async()=>{
  const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
  const d=payload()

@@ -5,6 +5,23 @@ process.env.LOCAL_PG_URL = 'postgresql://test:test@127.0.0.1:1/test'
 const { runFreteQueue } = await import('../../src/lib/fretes/worker.js')
 const { handleFreteInbound } = await import('../../src/lib/fretes/inbound.js')
 const { decidirRespostaFrete } = await import('../../src/lib/fretes/assistant.js')
+test('intervencao humana identifica pausa e impede importar preco de outra cotacao',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ Object.assign(q,{atualizado_por:'assistente_frete_proposta_textual',valor_total:null,protocolo:null,updated_at:'2026-10-19T12:00:00Z'})
+ const opts={db:f.db,installed:true,assistantEnabled:true},base={instanceName:'vivenzza-financeiro',telefone:f.phone}
+ await handleFreteInbound({...base,texto:'Outro frete manual para RN',fromMe:true,evolutionId:'manual-other-quote'},opts)
+ assert.equal(q.atualizado_por,'humano_whatsapp');assert.equal(q.ia_pausada,true)
+ await handleFreteInbound({...base,texto:'Total do frete: R$ 500,00',fromMe:false,evolutionId:'reply-other-quote'},opts)
+ assert.equal(q.valor_total,null)
+})
+
+test('eco da resposta 24 continua automatico, nao vira intervencao humana',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ for(let i=0;i<24;i++)f.tables.frete_envios.push({consulta_id:q.id,texto:'Resposta '+i,provider_id:'own-'+i})
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Resposta 23',fromMe:true,evolutionId:'own-23'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(q.ia_pausada,false)
+})
+
 test('menus selecionam somente cotacao inequivoca, nunca financeiro ou coleta',async()=>{
  const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
  for(const menu of ['1 - Coletas\n2 - Comercial / Cotações\n3 - Financeiro','Digite 1️⃣: Rastreamento\nDigite 2️⃣: Cotação\nDigite 3️⃣: Coleta']) {

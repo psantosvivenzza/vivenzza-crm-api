@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { cubagemM3 } from './domain.js'
+import { responderFormularioFrete } from './form.js'
 
 const CAMPOS = {
  peso: d => ['Peso bruto total', d.peso_kg],
@@ -22,7 +23,7 @@ export function pedidoHumanoExplicitoFrete(texto){
 export function guardFrete(texto) {
  const t = normalizar(texto)
  if (/^(stop|sair|parar|descadastrar|unsubscribe)[.!]?$/.test(t) || /nao (envie|mande) (mais )?(mensagens|cotacoes)|nao quero mais(?:[.!]|$)|nao quero mais (receber|mensagens|cotacoes)|nao (quero|desejo).*(receber|mensagens|contato)|pare de (me contatar|me chamar|enviar mensagens|mandar mensagens)|descadastre|(remov(a|er)|retire|exclua).*(numero|contato|cadastro|lista)|nao me (contate|chame)|prefiro.*nao.*(contat|mensag)|nao tenho interesse.*(mensagens|contato)/.test(t)) return 'opt_out'
- if (/peso.*(cubad|unitari|liquid)|fator.*cub|cubagem.*fator|coletar|agendar|contratar|pagar|pix|confirma.*coleta|aceita|fechar|credencia|senha|token|ignore.*instruc|dados fiscais|cfop|remov(a|er)|pare de|cancelar|nao tenho interesse/.test(t)) return 'revisao'
+ if (/peso.*(cubad|unitari|liquid)|fator.*cub|cubagem.*fator|coletar|agendar|contratar|pagar|pix|confirma.*coleta|aceita|fechar|credencia|senha|token|ignore.*instruc|dados fiscais|cfop|consignatario|troca (?:de )?(?:nota|nf)|remov(a|er)|pare de|cancelar|nao tenho interesse/.test(t)) return 'revisao'
  if (/r\$|frete.*\d|valor.*\d|prazo.*\d/.test(t)) return 'proposta'
  return null
 }
@@ -47,8 +48,10 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  const t=normalizar(texto).replace(/[\uFE0F\u20E3*]/gu,'').replace(/\\n/g,'\n')
  if(!t||t.length>2000)return null
  if(guard(texto)==='opt_out')return {tipo:'opt_out'}
+ if(/consignatario|troca (?:de )?(?:nota|nf)|\bcfop\b|dados fiscais/.test(t))return {tipo:'revisao'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
  if(/https?:\/\//.test(t)&&/cotac|orcamento/.test(t)&&/site|acesse|link|digital|cadastro/.test(t))return {tipo:'revisao'}
+ const form=responderFormularioFrete(t,dados);if(form)return form
  // Preambulo e transferencia da TRANSPORTADORA não são handoff da Vivenzza.
  // São eventos separados do menu/pergunta; não responder nem pausar aqui.
  if(!guard(texto)&&/^(?:(?:por favor,?\s*)?escolha uma das opcoes|estamos transferindo o seu atendimento,?\s*(?:por favor,?\s*)?aguarde|we['’]re transferring you to an agent)[.!\s]*$/.test(t))return {tipo:'aguardar'}

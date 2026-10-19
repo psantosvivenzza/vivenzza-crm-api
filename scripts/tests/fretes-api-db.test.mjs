@@ -196,6 +196,61 @@ test('tabelas e RPCs não ficam disponíveis para anon/authenticated', async () 
  assert.equal((await sql.query("select has_table_privilege('anon','frete_anexos','select') a,has_table_privilege('authenticated','frete_anexos','select') b,has_function_privilege('anon','frete_registrar_progresso(uuid,uuid,timestamptz,jsonb)','execute') c")).rows[0].a,false)
 })
 
+test('formulario inteiro atravessa inbound RPC worker e termina em proposta, sem provider real',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const {runFreteQueue}=await import('../../src/lib/fretes/worker.js')
+ const c=(await request('/','POST',payload())).data
+ await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
+ const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+ const event={instanceName:'vivenzza-financeiro',telefone:q.telefone,fromMe:false},opts={db,installed:true,assistantEnabled:true}
+ const sequence=[['CNPJ do remetente','11111111000111'],['CNPJ do destinatário','22222222000122'],['CEP de origem','90000000'],['CEP de destino','91000000'],['Coleta (essa opção não gera coleta automaticamente)\\n\\n1 - A mercadoria será coletada pela TW\\n2 - A mercadoria será levada até uma base da TW','1'],['Peso bruto total (kg)','20'],['Valor da nota fiscal','1000,00'],['Quantidade de volumes','2'],['Comprimento em cm','50'],['Largura em cm','40'],['Altura em cm','30']]
+ let sent=0
+ try{
+  for(const [i,[texto,expected]] of sequence.entries()){
+   await handleFreteInbound({...event,texto,evolutionId:`form-${c.id}-${i}`},opts)
+   await handleFreteInbound({...event,texto,evolutionId:`form-${c.id}-${i}`},opts)
+   const reply=(await sql.query('select * from frete_envios where consulta_id=$1 order by created_at desc limit 1',[q.id])).rows[0]
+   assert.equal(reply?.texto,expected,texto)
+   assert.equal((await sql.query('select ia_pausada from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,false,texto)
+   // Cadencia e global para frete: recuar somente o relogio das fixtures deste ensaio.
+   await sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where consulta_id in(select id from frete_consultas where fornecedor_id=$1) and attempted_at is not null",[supplier])
+   const result=await runFreteQueue({...opts,enabled:true,dnc:async()=>({blocked:false}),recordSuccess:async()=>{},recordFailure:async()=>{},send:async(_instance,_phone,body)=>{assert.equal(body,expected);return {ok:true,providerMessageId:`synthetic-form-${c.id}-${++sent}`}}})
+   assert.equal(result.status,'enviado',JSON.stringify(result))
+  }
+  assert.equal(sent,sequence.length)
+  assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1',[q.id])).rows[0].n,sequence.length)
+  for(const [i,texto] of ['Total do frete: R$ 100,00','Prazo: 3 dias úteis','Validade: 31/12/2099','Todas as taxas inclusas'].entries())await handleFreteInbound({...event,texto,evolutionId:`form-proposal-${c.id}-${i}`},opts)
+  const final=(await sql.query('select * from frete_consultas where id=$1',[q.id])).rows[0]
+  assert.equal(final.completa,true);assert.equal(final.prazo_dias,3);assert.equal(Number(final.valor_total),100)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})}
+})
+
+test('cidade vem do cadastro compativel CNPJ CEP e endereco, nao de bairro ou numero',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const doc=String(Date.now()).padStart(14,'0'),body=payload()
+ const party=(await sql.query("insert into fornecedores(cnpj,razao_social,endereco)values($1,'Origem sintetica',$2) returning id",[doc,{cep:'90000000',cidade:'Bauru',uf:'SP'}])).rows[0]
+ body.retirada={...body.retirada,cnpj:doc,endereco:'Rua sintetica, Bauru, SP'}
+ const c=(await request('/','POST',body)).data
+ try{
+  await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
+  const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+  const input={instanceName:'vivenzza-financeiro',telefone:q.telefone,texto:'Cidade de origem',evolutionId:'city-'+c.id}
+  await handleFreteInbound(input,{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select texto from frete_envios where consulta_id=$1',[q.id])).rows[0]?.texto,'Bauru')
+  await handleFreteInbound({...input,texto:'Município de origem',evolutionId:'city-accent-'+c.id},{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select texto from frete_envios where consulta_id=$1 order by created_at desc limit 1',[q.id])).rows[0]?.texto,'Bauru')
+  const {completarLocalFormularioFrete}=await import('../../src/lib/fretes/form.js')
+  for(const part of [{...body.retirada,cep:'99999999'},{...body.retirada,endereco:'Rua X, Bairro, SP'},{...body.retirada,endereco:'Rua X, 123, SP'}])assert.equal((await completarLocalFormularioFrete(db,{retirada:part})).retirada.cidade,undefined)
+  const unavailable={...db,from(table){const query=db.from(table),select=query.select.bind(query);query.select=fields=>fields==='cnpj,endereco'?{in:async()=>({error:{code:'READ_FAILURE'}})}:select(fields);return query}}
+  assert.equal(await handleFreteInbound({...input,evolutionId:'city-failure-'+c.id},{db:unavailable,installed:true,assistantEnabled:true}),true)
+  assert.equal((await sql.query('select ia_pausada,status from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,true)
+  await sql.query("update frete_consultas set ia_pausada=false,status='aguardando' where id=$1",[q.id])
+  await handleFreteInbound({...input,texto:'Município de origem',evolutionId:'city-repeat-'+c.id},{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select ia_pausada from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,true)
+  assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1',[q.id])).rows[0].n,2)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'});await sql.query('delete from fornecedores where id=$1',[party.id])}
+})
+
 test('conversa guarda valor, prazo e validade em mensagens separadas e conclui somente com taxas confirmadas',async()=>{
  const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
  const c=(await request('/','POST',payload())).data

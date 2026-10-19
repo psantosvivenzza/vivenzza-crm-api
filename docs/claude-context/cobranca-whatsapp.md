@@ -127,6 +127,19 @@ executados. Nome solicitado recebe identidade verdadeira de assistente Vivenzza.
 
 ## Fila de revisão cadastral
 
+### Formulários progressivos de frete (19/10/2026)
+
+Campos isolados usam o cadastro: documento/CEP por papel; peso escalar só total,
+medidas só com unidade e grupos compatíveis; valor declarado da carga para
+estimativa (não leitura de NF, tributos ou emissão fiscal). Município exige campo
+estruturado, nunca inferência de número/bairro. UF do atendimento inicial usa
+o local de retirada, sem mudar origem/destino. Seleção de coleta só no menu
+específico que declara não gerar coleta automaticamente: estimativa porta a porta
+dos endereços solicitados, sem agendar nem contratar. Outras confirmações pausam.
+Intervenção humana marca ator humano_whatsapp, impede importar preço posterior
+de outro frete; eco automático é reconhecido em até100reservas, não só20.
+Regressão atravessa entrada→RPC→worker sintético→proposta completa no Postgres local.
+
 Tela `/revisao-contatos` (Financeiro) + `GET /api/collection-contact-review`
 — lista clientes com telefone confirmado como `PERMANENT_RECIPIENT`, para o
 Financeiro corrigir o cadastro **no NetVision** (nunca edição direta no
