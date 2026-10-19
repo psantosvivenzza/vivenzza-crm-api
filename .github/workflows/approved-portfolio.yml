@@ -9,6 +9,12 @@ on:
       - 'scripts/*approved-portfolio.mjs'
       - 'scripts/correct-approved-recipient.mjs'
       - 'scripts/tests/unit/approved-portfolio*.test.mjs'
+      - 'src/lib/voice/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/voice/rodar-fila-cobranca.mjs'
+      - 'scripts/voice/approved-portfolio-scope.mjs'
+      - 'scripts/tests/unit/approved-voice-*.test.mjs'
       - '.github/workflows/approved-portfolio.yml'
   workflow_dispatch:
 permissions:
@@ -28,11 +34,15 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Pure rules and real engine with external boundaries mocked
-        run: node --experimental-test-module-mocks --test scripts/tests/unit/approved-portfolio.test.mjs scripts/tests/unit/approved-portfolio-dispatch.test.mjs
+      - name: Install locked runtime dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+      - name: Offline tests (portfolio and voice, external boundaries mocked)
+        run: node --experimental-test-module-mocks --test scripts/tests/unit/approved-portfolio.test.mjs scripts/tests/unit/approved-portfolio-dispatch.test.mjs scripts/tests/unit/approved-voice-scope.test.mjs scripts/tests/unit/approved-voice-adapter.test.mjs scripts/tests/unit/approved-voice-dispatcher.test.mjs
       - name: Syntax only - never execute operational scripts
         run: |
           node --check scripts/audit-approved-portfolio.mjs
           node --check scripts/send-approved-portfolio.mjs
           node --check scripts/report-approved-portfolio.mjs
           node --check scripts/correct-approved-recipient.mjs
+          node --check scripts/voice/rodar-fila-cobranca.mjs
+          node --check scripts/voice/approved-portfolio-scope.mjs
