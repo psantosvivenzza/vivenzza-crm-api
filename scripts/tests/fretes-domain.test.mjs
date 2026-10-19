@@ -4,6 +4,15 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('menu mercadoria classifica somente embalagem declarada e nao executa links ou certifica quimicos',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const menu='Tipo de mercadoria\\nConsulte as mercadorias não transportadas em: https://example.invalid/restricoes\\nMaterial longo, somente até 3 metros.\\n1 - Diversos\\n2 - Metais\\n3 - Químico'
+ const d={...payload(),descricao:'Embalagens Plasticas'}
+ assert.deepEqual(await interpretarPerguntaFrete(menu,d),{tipo:'resposta',texto:'1'})
+ for(const bad of [{...d,descricao:'Produtos químicos'},{...d,modo_volumes:'cubagem_total'},{...d,volumes:[{...d.volumes[0],comprimento_cm:301}]}])assert.equal((await interpretarPerguntaFrete(menu,bad)).tipo,'revisao')
+ assert.equal((await interpretarPerguntaFrete(menu+'\\nConfirme a contratação e pague agora',d)).tipo,'revisao')
+})
+
 test('formulario escalar usa unidade e dado cadastrado, nao confirma fiscal nem agenda coleta',async()=>{
  const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
  const d=payload();d.retirada.endereco='Rua teste, Bauru, SP';d.retirada.cidade='Bauru';d.entrega.endereco='Rua destino, Pareci Novo, RS'

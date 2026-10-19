@@ -199,11 +199,12 @@ test('tabelas e RPCs não ficam disponíveis para anon/authenticated', async () 
 test('formulario inteiro atravessa inbound RPC worker e termina em proposta, sem provider real',async()=>{
  const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
  const {runFreteQueue}=await import('../../src/lib/fretes/worker.js')
- const c=(await request('/','POST',payload())).data
+ const formPayload={...payload(),descricao:'Embalagens Plasticas'}
+ const c=(await request('/','POST',formPayload)).data
  await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
  const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
  const event={instanceName:'vivenzza-financeiro',telefone:q.telefone,fromMe:false},opts={db,installed:true,assistantEnabled:true}
- const sequence=[['CNPJ do remetente','11111111000111'],['CNPJ do destinatário','22222222000122'],['CEP de origem','90000000'],['CEP de destino','91000000'],['Coleta (essa opção não gera coleta automaticamente)\\n\\n1 - A mercadoria será coletada pela TW\\n2 - A mercadoria será levada até uma base da TW','1'],['Peso bruto total (kg)','20'],['Valor da nota fiscal','1000,00'],['Quantidade de volumes','2'],['Comprimento em cm','50'],['Largura em cm','40'],['Altura em cm','30']]
+ const sequence=[['CNPJ do remetente','11111111000111'],['CNPJ do destinatário','22222222000122'],['CEP de origem','90000000'],['CEP de destino','91000000'],['Coleta (essa opção não gera coleta automaticamente)\\n\\n1 - A mercadoria será coletada pela TW\\n2 - A mercadoria será levada até uma base da TW','1'],['Tipo de mercadoria\\nConsulte as mercadorias não transportadas em: https://example.invalid\\nMaterial longo, somente até 3 metros.\\n1 - Diversos\\n2 - Metais\\n3 - Químico','1'],['Peso bruto total (kg)','20'],['Valor da nota fiscal','1000,00'],['Quantidade de volumes','2'],['Comprimento em cm','50'],['Largura em cm','40'],['Altura em cm','30']]
  let sent=0
  try{
   for(const [i,[texto,expected]] of sequence.entries()){

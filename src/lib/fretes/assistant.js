@@ -55,6 +55,7 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  // Preambulo e transferencia da TRANSPORTADORA não são handoff da Vivenzza.
  // São eventos separados do menu/pergunta; não responder nem pausar aqui.
  if(!guard(texto)&&/^(?:(?:por favor,?\s*)?escolha uma das opcoes|estamos transferindo o seu atendimento,?\s*(?:por favor,?\s*)?aguarde|we['’]re transferring you to an agent)[.!\s]*$/.test(t))return {tipo:'aguardar'}
+ if(!guard(texto)&&/^vou transferir,?\s*aguarde[.!\s…⏳]*$/u.test(t))return {tipo:'aguardar'}
  // Cartão introdutório real: as menções a entrega e comprimento são orientações,
  // não perguntas. Aguardar a próxima mensagem não aceita condições comerciais.
  const intro=t.replace(/tudo certo\?\s*vamos continuar!/g,'')
@@ -64,7 +65,7 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  }
  // Alguns bots enviam orientações e só depois a pergunta em outro evento.
  // Aguardar não significa aceitar regras, confirmar enquadramento ou contratar.
- if(!guard(texto)&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}
+ if(!guard(texto)&&!t.split(/\r?\n/).some(l=>menuLine.test(l.trim()))&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}
  if(guard(texto)!=='revisao'&&!/destinat|remet|transportador|motorista|filial/.test(t)&&/\b(?:informe|digite)\s+(?:o\s+)?seu\s+cnpj(?:\s*(?:ou|\/)\s*cpf)?[:.!?\s]*$/.test(t)&&/^\d{14}$/.test(dados.pagador?.cnpj||''))return {tipo:'resposta',texto:dados.pagador.cnpj}
  if(/^(?:por (?:favor|gentileza)[, ]*)?(?:informe|digite|qual(?: e)?|como (?:voce )?(?:gostaria de ser chamado|se chama)).{0,35}(?:seu nome|nome por gentileza)|^informe seu nome[.!]?$|^como voce gostaria de ser chamado\?$/.test(t))return {tipo:'resposta',texto:'Assistente de cotações da Vivenzza Professional'}
  if(/^(?:ola[,! ]*)?(?:boa tarde|bom dia|boa noite)(?:[,! .]*(?:tudo bem\??))?[!. ]*$/.test(t))return {tipo:'resposta',texto:'Olá! Sou o assistente de cotações da Vivenzza. Buscamos o valor total do frete com todas as taxas, prazo em dias úteis e validade. Posso esclarecer os dados da solicitação já enviada.'}
@@ -77,6 +78,12 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
   const docs=[dados.retirada?.cnpj,dados.entrega?.cnpj,dados.pagador?.cnpj]
   if(/^o frete sera pago pelo remetente \(cif\) ou pelo destinatario \(fob\)\?\s*em caso de um terceiro pagador, considere a opcao 2$/.test(prose.trim())&&options.length===2&&options[0][1]==='1'&&options[0][2]==='cif - remetente'&&options[1][1]==='2'&&options[1][2]==='fob - destinatario'&&docs.every(v=>/^\d{14}$/.test(v||''))&&docs[2]!==docs[0]&&docs[2]!==docs[1])return {tipo:'resposta',texto:'2'}
   if(guard(prose)||options.some(o=>o[2].length>80||/[?]/.test(o[2])))return {tipo:'revisao'}
+  // Categoria generica da carga declarada, nao certificacao ONU/periculosidade.
+  // Nao seguir links do menu nem classificar cosmeticos/quimicos por palpite.
+  if(options.length===3&&options.every((o,i)=>o[1]===String(i+1)&&o[2]===['diversos','metais','quimico'][i])){
+   const remainder=prose.replace(/^tipo de mercadoria\b/,'').replace(/consulte as mercadorias nao transportadas em:\s*https:\/\/\S+/g,'').replace(/consulte as onu[’']s nao transportadas em:\s*https:\/\/\S+/g,'').replace(/material longo, somente ate 3 metros\./,'').trim()
+   return !remainder&&normalizar(dados.descricao)==='embalagens plasticas'&&dados.modo_volumes!=='cubagem_total'&&dados.volumes?.length&&dados.volumes.every(v=>[v.comprimento_cm,v.largura_cm,v.altura_cm].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0&&n<=300))?{tipo:'resposta',texto:'1'}:{tipo:'revisao'}
+  }
   const ids=options.map(o=>o[1])
   const safe=options.filter(o=>!/cancel|coleta|contrat|pagamento|financeiro|rastrea|status/.test(o[2]))
   const quote=safe.filter(o=>/^(?:cotac(?:ao|oes)|orcamentos?)(?: de (?:frete|transporte))?$|^comercial\s*\/\s*cotac(?:ao|oes)$/.test(o[2]))
