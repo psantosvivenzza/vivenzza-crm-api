@@ -2,6 +2,34 @@ import { supabase } from '../supabase-admin.server.js'
 import { candidatosTelefone, telefonesEquivalentes } from '../telefone.js'
 import { checked, FRETE_INSTANCE } from './worker.js'
 import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete } from './assistant.js'
+import { extrairPropostaTextualFrete } from './proposal.js'
+import { validarProposta } from './domain.js'
+
+async function capturarPropostaTextual(db,consulta,texto){
+ const proposta=extrairPropostaTextualFrete(texto)
+ if(!proposta)return false
+ const actor=consulta.atualizado_por
+ for(let attempt=0;attempt<2;attempt++){
+  try{
+   if(attempt)consulta=await checked(db.from('frete_consultas').select('*').eq('id',consulta.id).single())
+   if(consulta.completa||consulta.valor_total!=null||consulta.protocolo||!consulta.updated_at||consulta.status==='encerrada'||consulta.atualizado_por!==actor)return false
+   const cotacao=await checked(db.from('frete_cotacoes').select('status').eq('id',consulta.cotacao_id).single())
+   if(cotacao.status!=='aberta')return false
+   const campos=validarProposta({valor_total:proposta.valor_total,prazo_dias:consulta.prazo_dias,validade:consulta.validade,protocolo:proposta.protocolo||'',observacoes:'',completa:false,ia_pausada:true})
+   campos.observacoes=consulta.observacoes
+   campos.validade=consulta.validade
+   campos.versao=consulta.updated_at
+   await checked(db.rpc('frete_salvar_proposta',{p_cotacao_id:consulta.cotacao_id,p_consulta_id:consulta.id,p_campos:campos,p_actor:'assistente_frete_proposta_textual'}))
+   return true
+  }catch{
+   if(attempt){
+    console.error('[fretes] proposta textual pendente: conferir histórico; gravação não confirmada')
+    await checked(db.from('frete_consultas').update({ia_pausada:true,status:'revisao'}).eq('id',consulta.id).eq('completa',false).neq('status','encerrada'))
+    return true
+   }
+  }
+ }
+}
 
 export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete } = {}) {
   if (!installed || instanceName !== FRETE_INSTANCE) return false
@@ -37,6 +65,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   }
   const old = await checked(db.from('frete_mensagens').select('id').eq('evolution_id', evolutionId).limit(1))
   if (old?.length) {
+    if(!fromMe&&!mediaTipo&&!pedidoHumanoExplicitoFrete(texto)&&assistantEnabled&&matches.length===1&&await capturarPropostaTextual(db,matches[0],texto))return true
     const respostas=await checked(db.from('frete_envios').select('id').eq('mensagem_id',old[0].id).limit(1))
     let eco=false
     if(fromMe){const enviados=await checked(db.from('frete_envios').select('provider_id,texto').in('consulta_id',matches.map(c=>c.id)).limit(100));const normalizar=v=>String(v||'').replace(/\s+/gu,' ').trim();eco=enviados?.some(e=>e.provider_id===evolutionId||normalizar(e.texto)===normalizar(texto))}
@@ -70,6 +99,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     await pause(); return true
   }
   if (!single || mediaTipo || pedidoHumanoExplicitoFrete(texto)) { await pause(); return true }
+  if(assistantEnabled&&await capturarPropostaTextual(db,single,texto))return true
   if (single.ia_pausada || single.completa || !assistantEnabled) return true
   const cotacao = await checked(db.from('frete_cotacoes').select('*').eq('id', single.cotacao_id).single())
   if (cotacao.status !== 'aberta') return true

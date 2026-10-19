@@ -95,6 +95,16 @@ O teto transacional de seis respostas, DNC, consentimento, pausa humana e
 cadência independente de 60s continuam vigentes. Nunca contratar, agendar
 coleta, pagar, abrir links ou inventar dados para concluir uma cotação.
 
+### Captura textual de propostas de frete
+
+Preço/protocolo explícitos de frete podem preencher campos vazios usando a RPC
+existente e CAS por versão, inclusive se a consulta foi pausada automaticamente.
+Nunca sobrescrever preço/protocolo já gravados nem marcar completa sem confirmação.
+Preservar observações, prazo e validade. Valor da mercadoria, preço unitário,
+seguro, acréscimos e texto ambíguo não autorizam preencher o total do frete.
+Falha persistente de gravação pausa para revisão e deixa alerta sanitizado no log.
+Anexos não são interpretados pelo extrator textual; não converter '[mídia]' em valor.
+
 ## Fila de revisão cadastral
 
 Tela `/revisao-contatos` (Financeiro) + `GET /api/collection-contact-review`

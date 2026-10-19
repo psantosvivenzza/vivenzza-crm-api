@@ -72,6 +72,12 @@ function fixture() {
       return Promise.resolve({ data: single ? rows[0] : rows, error: null }).then(resolve)
     } }; return q
   }, async rpc(name, params) {
+    if(name==='frete_salvar_proposta'){
+      const row=tables.frete_consultas.find(c=>c.id===params.p_consulta_id)
+      if(row.updated_at!==params.p_campos.versao)return {error:{message:'versao'}}
+      Object.assign(row,params.p_campos,{status:'revisao',atualizado_por:params.p_actor})
+      return {data:row}
+    }
     if (name === 'frete_enfileirar_resposta') {
       const consulta = tables.frete_consultas.find(c => c.id === params.p_consulta_id)
       const mensagem = tables.frete_mensagens.find(m => m.id === params.p_mensagem_id)
@@ -86,6 +92,35 @@ test('not installed touches no database and makes no send', async () => {
   const db = { from() { throw Error('unexpected') } }
   assert.equal((await runFreteQueue({ db, installed: false })).status, 'nao_instalado')
   assert.equal(await handleFreteInbound({ instanceName: 'vivenzza-financeiro' }, { db, installed: false }), false)
+})
+test('proposta textual preenche preco/protocolo mesmo apos pausa, preserva pendencias e nao sobrescreve humano',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ Object.assign(q,{status:'revisao',ia_pausada:true,updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,observacoes:'Nota humana preservada'})
+ const input={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Cotação de frete gravada: 12345678 R$ 365,00',evolutionId:'proposal-new'}
+ const opts={db:f.db,installed:true,assistantEnabled:true}
+ await handleFreteInbound(input,opts)
+ assert.equal(q.valor_total,365);assert.equal(q.protocolo,'12345678');assert.equal(q.completa,false);assert.equal(q.ia_pausada,true);assert.equal(q.observacoes,'Nota humana preservada')
+ await handleFreteInbound({...input,evolutionId:'proposal-other',texto:'Valor total do frete: R$ 999,00'},opts)
+ assert.equal(q.valor_total,365);assert.equal(q.protocolo,'12345678')
+ assert.equal(f.tables.frete_envios.length,1)
+})
+test('captura reconsulta uma vez no conflito, sinaliza falha persistente e respeita encerramento/flags/midia/fromMe',async()=>{
+ const input={instanceName:'vivenzza-financeiro',texto:'Valor total do frete: R$ 365,00',evolutionId:'price-cas'}
+ for(const failure of [false,true]){
+  const f=fixture(),q=f.tables.frete_consultas[0],rpc=f.db.rpc
+  Object.assign(q,{updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,prazo_dias:3,validade:'2099-01-01T00:00:00+00:00',observacoes:'  '+ 'x'.repeat(1100)+'  '})
+  let calls=0
+  f.db.rpc=async(name,p)=>{if(name==='frete_salvar_proposta'&&(++calls===1||failure)){q.updated_at='2026-10-19T12:00:01Z';return {error:{message:'conflito'}}}return rpc(name,p)}
+  await handleFreteInbound({...input,telefone:f.phone},{db:f.db,installed:true,assistantEnabled:true})
+  assert.equal(calls,2);assert.equal(q.ia_pausada,true);assert.equal(q.status,'revisao');assert.equal(q.valor_total,failure?null:365)
+  assert.equal(q.observacoes,'  '+'x'.repeat(1100)+'  ');assert.equal(q.prazo_dias,3);assert.equal(q.validade,'2099-01-01T00:00:00+00:00')
+ }
+ for(const mode of ['encerrada','ia-off','midia','fromMe']){
+  const f=fixture(),q=f.tables.frete_consultas[0];Object.assign(q,{updated_at:'2026-10-19T12:00:00Z',valor_total:null})
+  if(mode==='encerrada')f.tables.frete_cotacoes[0].status='encerrada'
+  await handleFreteInbound({...input,telefone:f.phone,mediaTipo:mode==='midia'?'document':undefined,fromMe:mode==='fromMe'},{db:f.db,installed:true,assistantEnabled:mode!=='ia-off'})
+  assert.equal(q.valor_total,null,mode)
+ }
 })
 
 test('Evolution open from the healthcheck is connected; unavailable states never contact provider', async () => {
