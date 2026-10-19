@@ -36,7 +36,7 @@ export function validarCotacao(body) {
   if(body.pedido_origem && (typeof body.pedido_origem!=='object'||!UUID.test(body.pedido_origem.id??'')||!/^\d{1,3}-\d{1,10}$/.test(body.pedido_origem.referencia??'')))falhar('Pedido de origem inválido.')
   if(body.pedido_origem && body.dados_importados_conferidos!==true)falhar('Confira os dados importados, as unidades kg/m³, a carga embalada e o valor da mercadoria antes de salvar.')
   const ids = body.transportadora_ids
-  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 30 || ids.some(id => typeof id !== 'string' || !UUID.test(id)) || new Set(ids).size !== ids.length) falhar('Selecione de 1 a 30 transportadoras distintas.')
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some(id => typeof id !== 'string' || !UUID.test(id)) || new Set(ids).size !== ids.length) falhar('Selecione de 1 a 50 transportadoras distintas.')
   return {
     descricao: texto(body.descricao, 'Mercadoria', 300),
     valor_mercadoria: Math.round(numero(body.valor_mercadoria, 'Valor da mercadoria', 1e9) * 100) / 100,
