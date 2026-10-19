@@ -157,10 +157,11 @@ function instanciaApta(instancia, enviosReaisHoje) {
 // Ordena por prioridade (menor = preferida) entre as aptas; instâncias excluídas
 // (ex: já tentadas neste dispatch) nunca voltam a ser escolhidas no mesmo ciclo de
 // tentativas — evita re-tentar a mesma instância que acabou de falhar.
-export async function selecionarProximaInstancia({ excluirIds = [] } = {}) {
+export async function selecionarProximaInstancia({ excluirIds = [], nomesPermitidos = null } = {}) {
   const [instancias, enviosReaisHoje] = await Promise.all([listarInstancias(), contarEnviosReaisHojePorInstancia()])
   const candidatas = instancias
     .filter((i) => !excluirIds.includes(i.id))
+    .filter((i) => nomesPermitidos === null || (Array.isArray(nomesPermitidos) && nomesPermitidos.includes(i.instance_name)))
     .filter((i) => instanciaApta(i, enviosReaisHoje))
     .sort((a, b) => a.priority - b.priority)
   return candidatas[0] ?? null

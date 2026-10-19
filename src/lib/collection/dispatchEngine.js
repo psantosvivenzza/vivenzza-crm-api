@@ -99,7 +99,12 @@ async function atualizarTentativa(id, campos) {
 
 // Ponto de entrada único usado pelo job da régua (v2) e pelo disparo manual v2.
 // Retorna { status, motivo?, dispatchId?, tentativas? }.
-export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null, beforeAttempt, correcaoDestinatario = false }) {
+export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null, beforeAttempt, correcaoDestinatario = false, financeiroAlternativoAutorizado = false }) {
+  // Opt-in da carteira humana aprovada, não alteração de flag global. Exige
+  // revalidação por tentativa e fica limitado aos dois números financeiros.
+  const alternateApproved = financeiroAlternativoAutorizado === true && origem === 'manual' && typeof beforeAttempt === 'function'
+  const approvedNames = alternateApproved ? ['vivenzza-financeiro', 'vivenzza-financeiro-reserva-01'] : null
+  const maxTentativas = alternateApproved ? 2 : MAX_TENTATIVAS
   const statusQuitacao = await statusQuitacaoTitulo(contasFinanceirasId)
   if (statusQuitacao.quitado) {
     return { status: 'skipped', motivo: statusQuitacao.motivo }
@@ -126,7 +131,7 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
   const tentadas = []
   let ultimoErro = null
 
-  for (let numero = 1; numero <= MAX_TENTATIVAS; numero++) {
+  for (let numero = 1; numero <= maxTentativas; numero++) {
     // CORREÇÃO 2026-09-03 (auditoria da régua) — revalidação ANTES DE CADA
     // tentativa real ao provider, não só uma vez na entrada. O guard de
     // pagamento/promessa/DNC (estaEmDoNotContact) já era checado em
@@ -171,7 +176,7 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
     // inclusive em eventual tentativa subsequente. Exceção nunca libera envio.
     if (beforeAttempt) {
       let check
-      try { check = await beforeAttempt() } catch { check = { allowed: false, reason: 'revalidacao_falhou' } }
+      try { check = await beforeAttempt({ attemptNumber: numero }) } catch { check = { allowed: false, reason: 'revalidacao_falhou' } }
       if (check?.allowed !== true) {
         await atualizarDispatch(dispatch.id, { status: 'cancelled' })
         return { status: 'blocked', motivo: check?.reason || 'revalidacao_bloqueada', dispatchId: dispatch.id }
@@ -182,9 +187,9 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
     // comportamento em produção enquanto a flag estiver desligada.
     const instancia = instanciaUnicaLegado
       ? (numero === 1 ? instanciaUnicaLegado : null)
-      : await selecionarProximaInstancia({ excluirIds: tentadas })
+      : await selecionarProximaInstancia({ excluirIds: tentadas, nomesPermitidos: alternateApproved ? [approvedNames[numero - 1]] : null })
 
-    if (!instancia) {
+    if (!instancia || (alternateApproved && instancia.instance_name !== approvedNames[numero - 1])) {
       await atualizarDispatch(dispatch.id, { status: 'failed' })
       await registrarEvento({
         contasFinanceirasId, clienteTelefone, tipo: 'MENSAGEM_FALHOU', origem: ORIGEM.SYSTEM,
@@ -235,7 +240,12 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
       // resolve esses casos, e insistir pode mascarar um bloqueio deliberado
       // do provedor (pedido explícito de não construir isso pra burlar
       // limitação/bloqueio).
-      const podeTentarOutra = classificado.failoverEligible && !instanciaUnicaLegado && config.whatsapp_failover === true && numero < MAX_TENTATIVAS
+      // Timeout/reset/5xx podem ocorrer DEPOIS do aceite: não provam falha de
+      // entrega. No opt-in financeiro, somente falha antes da conexão autoriza
+      // a troca. O fluxo global preexistente não é habilitado por este opt-in.
+      const alternateSafe = alternateApproved && ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH'].includes(err.code) && !err.response
+      const failoverEnabled = alternateApproved ? alternateSafe : config.whatsapp_failover === true
+      const podeTentarOutra = classificado.failoverEligible && !instanciaUnicaLegado && failoverEnabled && numero < maxTentativas
       if (!podeTentarOutra) {
         // CORREÇÃO DE SEGURANÇA 2026-08-18 — só PERMANENT_RECIPIENT (número
         // não registrado no WhatsApp) bloqueia o telefone pelo resto do dia.

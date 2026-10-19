@@ -5,6 +5,7 @@ on:
       - 'src/lib/collection/approvedPortfolio.js'
       - 'src/lib/collection/collectionRouting.js'
       - 'src/lib/collection/dispatchEngine.js'
+      - 'src/lib/collection/whatsappInstances.js'
       - 'scripts/*approved-portfolio.mjs'
       - 'scripts/correct-approved-recipient.mjs'
       - 'scripts/tests/unit/approved-portfolio*.test.mjs'

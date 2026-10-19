@@ -2,6 +2,8 @@ import test, {mock} from 'node:test'
 import assert from 'node:assert/strict'
 let sends=0, selections=0, attemptWrites=0
 let existingDispatch=null,previousAttempts=[]
+let sendErrors=[],selectionArgs=[]
+let primaryUnavailable=false,globalFailover=false
 const updates=[]
 mock.module('../../../src/lib/supabase-admin.server.js',{namedExports:{supabase:{from(table){
  let operation=null,payload,key=null
@@ -12,10 +14,10 @@ mock.module('../../../src/lib/supabase-admin.server.js',{namedExports:{supabase:
  },then(resolve,reject){return Promise.resolve({data:table==='collection_dispatch_attempts'&&operation===null?previousAttempts:null,error:null}).then(resolve,reject)}}
  return q
 }}}})
-mock.module('../../../src/lib/collection/featureFlags.js',{namedExports:{obterConfigCobranca:async()=>({whatsapp_failover:false})}})
+mock.module('../../../src/lib/collection/featureFlags.js',{namedExports:{obterConfigCobranca:async()=>({whatsapp_failover:globalFailover})}})
 mock.module('../../../src/lib/collection/idempotency.js',{namedExports:{idempotencyKeyDispatch:()=> 'synthetic',idempotencyKeyInternalTest:()=> 'test',registrarEventoExterno:async()=>({novo:true})}})
-mock.module('../../../src/lib/collection/whatsappInstances.js',{namedExports:{selecionarProximaInstancia:async()=>{selections++;return{id:'instance',name:'synthetic'}},registrarSucessoEnvio:async()=>{},registrarFalhaEnvio:async()=>{}}})
-mock.module('../../../src/lib/collection/evolutionAdapter.js',{namedExports:{enviarTexto:async()=>{sends++;return{providerMessageId:'fake'}},classifyEvolutionFailure:()=>({}),normalizarStatusAck:()=>null}})
+mock.module('../../../src/lib/collection/whatsappInstances.js',{namedExports:{selecionarProximaInstancia:async(options={})=>{selections++;selectionArgs.push(options);const candidates=[{id:'instance',name:'synthetic',instance_name:'vivenzza-financeiro'},{id:'reserve',name:'synthetic-reserve',instance_name:'vivenzza-financeiro-reserva-01'}];return candidates.find(i=>!(primaryUnavailable&&i.id==='instance')&&!options.excluirIds?.includes(i.id)&&(!options.nomesPermitidos||options.nomesPermitidos.includes(i.instance_name)))??null},registrarSucessoEnvio:async()=>{},registrarFalhaEnvio:async()=>{}}})
+mock.module('../../../src/lib/collection/evolutionAdapter.js',{namedExports:{enviarTexto:async()=>{sends++;const e=sendErrors.shift();if(e)throw e;return{providerMessageId:'fake'}},classifyEvolutionFailure:e=>e.taxonomy||{},normalizarStatusAck:()=>null}})
 mock.module('../../../src/lib/collection/paymentGuard.js',{namedExports:{statusQuitacaoTitulo:async()=>({quitado:false})}})
 mock.module('../../../src/lib/collection/promises.js',{namedExports:{promessaAtivaPara:async()=>null}})
 mock.module('../../../src/lib/collection/doNotContactGuard.js',{namedExports:{estaEmDoNotContact:async()=>({blocked:false}),registrarBloqueioOptOutSeNecessario:async()=>{},registrarBloqueioNumeroInvalidoHoje:async()=>{}}})
@@ -58,4 +60,59 @@ test('correção nunca repete resultado incerto, enviado, mesmo telefone ou sem 
  assert.equal((await enviarComFailover({...base,origem:'cron'})).motivo,'idempotencia_existente')
  existingDispatch.status='delivered';assert.equal((await enviarComFailover(base)).motivo,'idempotencia_existente')
  assert.equal(sends,2)
+})
+test('reserva financeira somente em falha técnica confirmada, com revalidação em cada tentativa',async()=>{
+ existingDispatch=null;selectionArgs=[]
+ const start=sends,checked=[]
+ sendErrors=[{code:'ECONNREFUSED',taxonomy:{category:'TECHNICAL_RETRYABLE',failoverEligible:true,affectsInstanceHealth:true,failureKind:'technical_retryable',mensagem:'synthetic'}}]
+ const r=await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async({attemptNumber})=>{checked.push(attemptNumber);return{allowed:true}}})
+ assert.equal(r.status,'sent');assert.equal(sends-start,2);assert.deepEqual(checked,[1,2])
+ assert.deepEqual(selectionArgs[0].nomesPermitidos,['vivenzza-financeiro'])
+ assert.deepEqual(selectionArgs[1].nomesPermitidos,['vivenzza-financeiro-reserva-01'])
+ assert.ok(selectionArgs[1].excluirIds.includes('instance'))
+})
+test('aceite sem entrega, número inválido, rate limit, restrição ou resultado incerto não provocam troca',async()=>{
+ for(const category of [null,'PERMANENT_RECIPIENT','RATE_LIMIT','PLATFORM_RESTRICTION','TECHNICAL_UNCERTAIN']){
+  const start=sends
+  sendErrors=category?[{taxonomy:{category,failoverEligible:false,affectsInstanceHealth:false,failureKind:'synthetic',mensagem:'synthetic'}}]:[]
+  await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async()=>({allowed:true})})
+  assert.equal(sends-start,1)
+ }
+})
+test('pagamento/limite ou resposta entre tentativas impede o segundo envio',async()=>{
+ const start=sends
+ sendErrors=[{code:'ECONNREFUSED',taxonomy:{category:'TECHNICAL_RETRYABLE',failoverEligible:true,affectsInstanceHealth:true,failureKind:'technical_retryable',mensagem:'synthetic'}}]
+ const r=await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async({attemptNumber})=>({allowed:attemptNumber===1,reason:'limite_ou_resposta_nova'})})
+ assert.equal(r.status,'blocked');assert.equal(sends-start,1)
+})
+test('timeout/reset e HTTP 5xx não provam ausência de aceite e não trocam número',async()=>{
+ for(const detail of [{code:'ETIMEDOUT'},{code:'ECONNABORTED'},{code:'ECONNRESET'},{response:{status:500}}]){
+  const start=sends
+  sendErrors=[{...detail,taxonomy:{category:'TECHNICAL_RETRYABLE',failoverEligible:true,affectsInstanceHealth:true,failureKind:'instance_unavailable',mensagem:'synthetic'}}]
+  await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async()=>({allowed:true})})
+  assert.equal(sends-start,1)
+ }
+})
+
+test('principal indisponivel nao autoriza primeira tentativa pela reserva',async()=>{
+ const start=sends
+ primaryUnavailable=true
+ try {
+  const r=await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async()=>({allowed:true})})
+  assert.notEqual(r.status,'sent');assert.equal(sends,start)
+ } finally { primaryUnavailable=false }
+})
+
+test('opt-in tem somente duas revalidacoes quando os dois provedores recusam conexao',async()=>{
+ const checked=[]
+ sendErrors=Array.from({length:2},()=>({code:'ECONNREFUSED',taxonomy:{category:'TECHNICAL_RETRYABLE',failoverEligible:true,affectsInstanceHealth:true,failureKind:'technical_retryable',mensagem:'synthetic'}}))
+ await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async({attemptNumber})=>{checked.push(attemptNumber);return {allowed:true}}})
+ assert.deepEqual(checked,[1,2])
+})
+
+test('flag global ligada nao permite troca opt-in apos timeout',async()=>{
+ const start=sends
+ globalFailover=true
+ sendErrors=[{code:'ETIMEDOUT',taxonomy:{category:'TECHNICAL_RETRYABLE',failoverEligible:true,affectsInstanceHealth:true,failureKind:'technical_retryable',mensagem:'synthetic'}}]
+ try {await enviarComFailover({...args,financeiroAlternativoAutorizado:true,beforeAttempt:async()=>({allowed:true})});assert.equal(sends-start,1)} finally {globalFailover=false}
 })

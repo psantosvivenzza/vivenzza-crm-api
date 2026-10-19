@@ -83,12 +83,13 @@ try {
   record({code:entry.code,name:entry.name,status:'reserved',message,totalCents:check.plan.totalCents,accountIds:check.plan.accountIds,started})
   // Dispatch recém-criado ainda não é contato: a consulta do revalidator só
   // considera sending/sent. Ignora apenas o dispatch desta mesma tentativa.
-  const beforeAttempt=async()=>{
+  const beforeAttempt=async({attemptNumber=1}={})=>{
+   if(attemptNumber>1)await sleep(45000+Math.floor(Math.random()*45000))
    const own=await value(crm.from('collection_dispatches').select('id').eq('contas_financeiras_id',check.plan.representative).eq('etapa',8).gte('criado_em',since).eq('status','sending'))
    if(own.length===1)currentDispatchId=own[0].id
    return revalidate()
   }
-  const result=await enviarCobrancaComRoteamento({contasFinanceirasId:check.plan.representative,etapa:8,clienteNome:entry.name,clienteTelefone:check.plan.phone,valor:check.plan.totalCents/100,mensagem:message,origem:'manual',beforeAttempt,correcaoDestinatario:corrected})
+  const result=await enviarCobrancaComRoteamento({contasFinanceirasId:check.plan.representative,etapa:8,clienteNome:entry.name,clienteTelefone:check.plan.phone,valor:check.plan.totalCents/100,mensagem:message,origem:'manual',beforeAttempt,correcaoDestinatario:corrected,financeiroAlternativoAutorizado:true})
   const status=result.motivo==='idempotencia_existente'?'skipped':result.status
   record({code:entry.code,name:entry.name,status,reason:result.reason||result.motivo||null,dispatchId:result.dispatchId||null,totalCents:check.plan.totalCents})
   // Só libera nossa reserva quando há prova de zero tentativas reais.
