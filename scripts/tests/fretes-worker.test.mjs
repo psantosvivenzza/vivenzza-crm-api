@@ -28,6 +28,15 @@ test('menu inicial de atendimento pode avancar ate menu de cotacao',async()=>{
  await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:menus[1],evolutionId:'menu-1'},opts)
  assert.equal(f.tables.frete_envios.filter(e=>e.mensagem_id).length,2)
 })
+test('preambulo separado nao pausa antes do menu e transferencia do fornecedor aguarda',async()=>{
+ const f=fixture(),opts={db:f.db,installed:true,assistantEnabled:true},base={instanceName:'vivenzza-financeiro',telefone:f.phone}
+ for(const [i,texto] of ['Escolha uma das opções.',"We're transferring you to an agent.",'Estamos transferindo o seu atendimento, por favor, aguarde.'].entries())await handleFreteInbound({...base,evolutionId:'notice-'+i,texto},opts)
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+ assert.equal(f.tables.frete_envios.length,1)
+ await handleFreteInbound({...base,evolutionId:'menu-after-notice',texto:'1 - Coleta\n2 - Cotação\n3 - Financeiro'},opts)
+ assert.equal(f.tables.frete_envios.at(-1).texto,'2')
+ assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+})
 
 test('orientacao informativa da TW aguarda proximo evento e nome nao fica bloqueado',async()=>{
  const f=fixture(),opts={db:f.db,installed:true,assistantEnabled:true}

@@ -35,6 +35,9 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  if(guard(texto)==='opt_out')return {tipo:'opt_out'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
  if(/https?:\/\//.test(t)&&/cotac|orcamento/.test(t)&&/site|acesse|link|digital|cadastro/.test(t))return {tipo:'revisao'}
+ // Preambulo e transferencia da TRANSPORTADORA não são handoff da Vivenzza.
+ // São eventos separados do menu/pergunta; não responder nem pausar aqui.
+ if(!guard(texto)&&/^(?:(?:por favor,?\s*)?escolha uma das opcoes|estamos transferindo o seu atendimento,?\s*(?:por favor,?\s*)?aguarde|we['’]re transferring you to an agent)[.!\s]*$/.test(t))return {tipo:'aguardar'}
  // Alguns bots enviam orientações e só depois a pergunta em outro evento.
  // Aguardar não significa aceitar regras, confirmar enquadramento ou contratar.
  if(!guard(texto)&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}
