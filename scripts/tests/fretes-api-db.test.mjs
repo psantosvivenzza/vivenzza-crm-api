@@ -34,6 +34,13 @@ test.before(async () => {
  await sql.query(`do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon nologin; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role nologin bypassrls; end if; end $$`)
  await sql.query(`create table if not exists public.fornecedores(id uuid primary key default gen_random_uuid(),cnpj text not null unique,razao_social text not null,nome_fantasia text,ie text,endereco jsonb,contatos jsonb,ativo boolean not null default true,origem text not null default 'manual',criado_por uuid,criado_em timestamptz not null default now(),atualizado_em timestamptz not null default now())`)
  if (!(await sql.query("select to_regclass('public.frete_cotacoes') present")).rows[0].present) await sql.query(await readFile(new URL('../../supabase/migrations/20261014140810_cotacoes_frete_fornecedores.sql', import.meta.url), 'utf8'))
+ await sql.query('begin')
+ try {
+  const limite50=await readFile(new URL('../../supabase/migrations/20261019145723_frete_limite_50_transportadoras.sql', import.meta.url),'utf8')
+  await sql.query(limite50)
+  await sql.query(limite50) // Reaplicação não muda o corpo novamente.
+  await sql.query('commit')
+ } catch(error) { await sql.query('rollback'); throw error }
  await sql.query(`create table if not exists clientes_erp(id uuid primary key default gen_random_uuid(),razao_social text,cnpj_cpf text,endereco jsonb)`)
  await sql.query(`create table if not exists pedidos(id uuid primary key default gen_random_uuid(),legacy_id text,sistema_origem text,status text,total numeric,peso_bruto numeric,qtde_volumes integer,cliente_erp_id uuid,cliente_nome_origem text,cliente_documento_origem text,sincronizado_em timestamptz,status_importacao_pendente boolean,erro_sincronizacao text,conflito_sincronizacao boolean,campos_com_override_local jsonb)`)
  await sql.query(await readFile(new URL('../../supabase/migrations/20261015155158_frete_logistica_pedido.sql',import.meta.url),'utf8'))
@@ -69,6 +76,22 @@ test('API restringe vendedores e exige autenticação antes de ler fornecedor', 
  assert.equal((await request('/transportadoras', 'GET', undefined, 'vendedor')).status, 403)
  assert.equal((await fetch(`${base}/transportadoras`)).status, 401)
  assert.equal((await request('/transportadoras')).status, 200)
+})
+
+test('RPC aceita 50 participantes, rejeita 51 e preserva permissao de servico', async () => {
+ const fornecedores=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) select 'TEST-LIMIT50-'||md5(random()::text||n::text),'Transportadora sintetica limite 50',true,'555198765'||lpad(n::text,4,'0'),true from generate_series(1,51) n returning id`)).rows.map(r=>r.id)
+ let criada
+ try {
+  const result=await sql.query('select frete_criar_cotacao($1::jsonb,$2::uuid[],$3) as cotacao',[JSON.stringify(payload()),fornecedores.slice(0,50),'test-limit-50'])
+  criada=result.rows[0].cotacao.id
+  assert.equal((await sql.query('select count(*)::int n from frete_consultas where cotacao_id=$1',[criada])).rows[0].n,50)
+  await assert.rejects(sql.query('select frete_criar_cotacao($1::jsonb,$2::uuid[],$3)',[JSON.stringify(payload()),fornecedores,'test-limit-50']),/Selecione transportadoras/)
+  const proof=(await sql.query("select position('cardinality(p_ids) not between 1 and 30' in prosrc)=0 as antigo_removido,has_function_privilege('service_role',oid,'EXECUTE') as servico from pg_proc where oid='public.frete_criar_cotacao(jsonb,uuid[],text)'::regprocedure")).rows[0]
+  assert.deepEqual(proof,{antigo_removido:true,servico:true})
+ } finally {
+  if(criada){await sql.query('delete from frete_consultas where cotacao_id=$1',[criada]);await sql.query('delete from frete_cotacoes where id=$1',[criada])}
+  await sql.query('delete from fornecedores where id=any($1::uuid[])',[fornecedores])
+ }
 })
 test('cotação mantém FK fornecedor e rejeita contato já ocupado sem deixar cotação parcial', async () => {
  const result = await request('/', 'POST', payload()); assert.equal(result.status, 201); cotacao = result.data

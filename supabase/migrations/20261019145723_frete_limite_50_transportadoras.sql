@@ -1,7 +1,6 @@
+-- Versão gerada pelo aplicador Supabase em produção: 20261019145723.
 -- Autorização humana: até 50 transportadoras por cotação, não 50 envios simultâneos.
--- Aplicar como migration pelo Supabase. Não altera dados, fila ou cotas WhatsApp.
--- A CLI local foi consultada, mas não está instalada nem em cache; não instalar
--- dependências para contornar isso. O aplicador remoto registra a versão.
+-- Não altera dados, fila ou cotas WhatsApp. Executar em transação única.
 SET LOCAL lock_timeout = '2s';
 SET LOCAL statement_timeout = '15s';
 DO $patch$
