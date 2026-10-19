@@ -10,9 +10,9 @@ import { registerHooks } from 'node:module';
 registerHooks({ resolve(specifier, context, next) {
   if (specifier === 'dotenv/config') return {shortCircuit:true,url:'data:text/javascript,export {}'};
   if (specifier.endsWith('/jobs/sync-pedidos-legado.js')) return {shortCircuit:true,url:
-    'data:text/javascript,'+encodeURIComponent('export async function executarSincronizacaoPedidos(){ if(process.env.VIVENZZA_PEDIDOS_CASE==="throw") throw Error("synthetic failure"); return JSON.parse(process.env.VIVENZZA_PEDIDOS_REPORT); }')};
-  if (specifier === 'pg' || specifier.includes('supabase')) throw Error('Real database forbidden');
-  return next(specifier, context);
+    'data:text/javascript,'+encodeURIComponent('export async function executarSincronizacaoPedidos(){ if(process.env.VIVENZZA_PEDIDOS_CASE==="import_extra") await import("node:fs"); if(process.env.VIVENZZA_PEDIDOS_CASE==="throw") throw Error("synthetic failure"); return JSON.parse(process.env.VIVENZZA_PEDIDOS_REPORT); }')};
+  if (specifier === ${JSON.stringify(new URL('../../sync-pedidos-legado.mjs', import.meta.url).href)}) return next(specifier, context);
+  throw Error('Import não permitido na fixture');
 } });`
 const entry = fileURLToPath(new URL('../../sync-pedidos-legado.mjs', import.meta.url))
 
@@ -56,4 +56,11 @@ test('job rejection remains nonzero', () => {
   const result = run(null, 'throw')
   assert.equal(result.status, 1)
   assert.match(result.stderr, /synthetic failure/)
+})
+
+test('harness rejeita import extra antes de carregar dependência real', () => {
+  const result = run(null, 'import_extra')
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /Import não permitido na fixture/)
+  assert.doesNotMatch(result.stdout, /\[sync-pedidos-legado\]/)
 })
