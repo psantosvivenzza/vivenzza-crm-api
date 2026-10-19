@@ -1,0 +1,37 @@
+name: Approved portfolio offline guards
+on:
+  pull_request:
+    paths:
+      - 'src/lib/collection/approvedPortfolio.js'
+      - 'src/lib/collection/collectionRouting.js'
+      - 'src/lib/collection/dispatchEngine.js'
+      - 'scripts/*approved-portfolio.mjs'
+      - 'scripts/correct-approved-recipient.mjs'
+      - 'scripts/tests/unit/approved-portfolio*.test.mjs'
+      - '.github/workflows/approved-portfolio.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Pure rules and real engine with external boundaries mocked
+        run: node --experimental-test-module-mocks --test scripts/tests/unit/approved-portfolio.test.mjs scripts/tests/unit/approved-portfolio-dispatch.test.mjs
+      - name: Syntax only - never execute operational scripts
+        run: |
+          node --check scripts/audit-approved-portfolio.mjs
+          node --check scripts/send-approved-portfolio.mjs
+          node --check scripts/report-approved-portfolio.mjs
+          node --check scripts/correct-approved-recipient.mjs

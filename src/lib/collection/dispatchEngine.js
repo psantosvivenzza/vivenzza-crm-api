@@ -24,21 +24,37 @@ import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqu
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
 import { telefonesEquivalentes, mascararTelefone } from '../telefone.js'
+import { createHash } from 'node:crypto'
 
 const MAX_TENTATIVAS = 3
 
 // Retorna o dispatch existente (idempotência) OU cria um novo em 'queued'.
 // `criarNovo=false` faz retornar null em vez de criar, útil pra checagem sem
 // efeito colateral (ex: UI perguntando "já foi enviado hoje?").
-async function obterOuCriarDispatch({ contasFinanceirasId, etapa, canal, origem, mensagem, clienteNome, clienteTelefone, valor }) {
-  const idempotencyKey = idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt: hojeBrtISO() })
+async function obterOuCriarDispatch({ contasFinanceirasId, etapa, canal, origem, mensagem, clienteNome, clienteTelefone, valor, correcaoDestinatario = false }) {
+  let idempotencyKey = idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt: hojeBrtISO() })
 
   const { data: existente } = await supabase
     .from('collection_dispatches')
     .select('*')
     .eq('idempotency_key', idempotencyKey)
     .maybeSingle()
-  if (existente) return { dispatch: existente, novo: false }
+  if (existente) {
+    // Nova ação humana após correção cadastral comprovada. Nunca retenta timeout,
+    // envio incerto, entregue/lido ou o mesmo telefone; preserva toda auditoria.
+    if (!correcaoDestinatario || origem !== 'manual' || existente.status !== 'failed' ||
+        telefonesEquivalentes(existente.cliente_telefone, clienteTelefone)) return { dispatch: existente, novo: false }
+    const {data: attempts,error: attemptsError}=await supabase.from('collection_dispatch_attempts')
+      .select('status,failure_kind,provider_message_id,enviado_em').eq('dispatch_id',existente.id)
+    if(attemptsError)throw attemptsError
+    if(!attempts?.length||attempts.some(a=>a.status!=='failed'||a.failure_kind!=='permanent_recipient'||a.provider_message_id||a.enviado_em))return {dispatch:existente,novo:false}
+    const phone=String(clienteTelefone||'').replace(/\D/g,'')
+    if(!/^55\d{10,11}$/.test(phone))throw new Error('correcao_telefone_invalido')
+    idempotencyKey += ':recipient:' + createHash('sha256').update(phone).digest('hex').slice(0,20)
+    const corrected=await supabase.from('collection_dispatches').select('*').eq('idempotency_key',idempotencyKey).maybeSingle()
+    if(corrected.error)throw corrected.error
+    if(corrected.data)return {dispatch:corrected.data,novo:false}
+  }
 
   const { data: criado, error } = await supabase
     .from('collection_dispatches')
@@ -83,7 +99,7 @@ async function atualizarTentativa(id, campos) {
 
 // Ponto de entrada único usado pelo job da régua (v2) e pelo disparo manual v2.
 // Retorna { status, motivo?, dispatchId?, tentativas? }.
-export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null }) {
+export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null, beforeAttempt, correcaoDestinatario = false }) {
   const statusQuitacao = await statusQuitacaoTitulo(contasFinanceirasId)
   if (statusQuitacao.quitado) {
     return { status: 'skipped', motivo: statusQuitacao.motivo }
@@ -95,7 +111,7 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
 
   const config = await obterConfigCobranca()
   const { dispatch, novo } = await obterOuCriarDispatch({
-    contasFinanceirasId, etapa, canal: 'whatsapp', origem, mensagem, clienteNome, clienteTelefone, valor,
+    contasFinanceirasId, etapa, canal: 'whatsapp', origem, mensagem, clienteNome, clienteTelefone, valor, correcaoDestinatario,
   })
   if (!novo) {
     return { status: dispatch.status, motivo: 'idempotencia_existente', dispatchId: dispatch.id }
@@ -149,6 +165,17 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
         await registrarBloqueioOptOutSeNecessario({ contasFinanceirasId, clienteTelefone, reason: dncRetry.reason })
       }
       return { status: 'blocked', motivo: dncRetry.reason, dispatchId: dispatch.id }
+    }
+
+    // Lote autorizado: revalida TODOS os boletos, saldo na origem e respostas,
+    // inclusive em eventual tentativa subsequente. Exceção nunca libera envio.
+    if (beforeAttempt) {
+      let check
+      try { check = await beforeAttempt() } catch { check = { allowed: false, reason: 'revalidacao_falhou' } }
+      if (check?.allowed !== true) {
+        await atualizarDispatch(dispatch.id, { status: 'cancelled' })
+        return { status: 'blocked', motivo: check?.reason || 'revalidacao_bloqueada', dispatchId: dispatch.id }
+      }
     }
 
     // Instância única legado: usada quando multi_whatsapp=false, para não mudar
