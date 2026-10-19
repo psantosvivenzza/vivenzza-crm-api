@@ -29,6 +29,15 @@ test('orientação de abertura não responde comprimento/entrega antes da pergun
  assert.notEqual((await interpretarPerguntaFrete(intro.replace('Tudo certo?','Você aceita as condições?'),payload())).tipo,'aguardar')
 })
 
+test('terceiro pagador usa somente menu que orienta explicitamente a opção, sem presumir CIF/FOB',async()=>{
+ const {decidirInteracaoAutomaticaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const text='O frete será pago pelo remetente (CIF) ou pelo destinatário (FOB)?\\n\\nEm caso de um terceiro pagador, considere a opção 2\\n\\n1 - CIF - Remetente\\n2 - FOB - Destinatário'
+ assert.deepEqual(decidirInteracaoAutomaticaFrete(text,payload()),{tipo:'resposta',texto:'2'})
+ for(const d of [{},{...payload(),pagador:payload().retirada},{...payload(),pagador:{cnpj:'incorreto'}}])assert.equal(decidirInteracaoAutomaticaFrete(text,d).tipo,'revisao')
+ assert.equal(decidirInteracaoAutomaticaFrete(text.replace('Em caso de um terceiro pagador, considere a opção 2','Escolha o tipo de frete'),payload()).tipo,'revisao')
+ assert.notEqual(decidirInteracaoAutomaticaFrete(text.replace('opção 2','opção 1'),payload()).tipo,'resposta')
+})
+
 test('cotação aceita até 50 transportadoras distintas sem ampliar volumes ou permitir duplicatas', () => {
  const ids = Array.from({length:51}, (_, i) => `11111111-1111-4111-8111-${String(i+1).padStart(12,'0')}`)
  for(const n of [1,30,31,45,50])assert.deepEqual(validarCotacao({...payload(),transportadora_ids:ids.slice(0,n)}).transportadora_ids,ids.slice(0,n))

@@ -69,6 +69,10 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  const options=lines.map(line=>line.trim().match(menuLine)).filter(Boolean)
  if(options.length>=2){
   const prose=lines.filter(l=>!menuLine.test(l.trim())).join(' ')
+  // Este menu do fornecedor documenta expressamente o terceiro pagador.
+  // A opção só encaminha a cotação; não presume CIF/FOB fiscal nem contratação.
+  const docs=[dados.retirada?.cnpj,dados.entrega?.cnpj,dados.pagador?.cnpj]
+  if(/^o frete sera pago pelo remetente \(cif\) ou pelo destinatario \(fob\)\?\s*em caso de um terceiro pagador, considere a opcao 2$/.test(prose.trim())&&options.length===2&&options[0][1]==='1'&&options[0][2]==='cif - remetente'&&options[1][1]==='2'&&options[1][2]==='fob - destinatario'&&docs.every(v=>/^\d{14}$/.test(v||''))&&docs[2]!==docs[0]&&docs[2]!==docs[1])return {tipo:'resposta',texto:'2'}
   if(guard(prose)||options.some(o=>o[2].length>80||/[?]/.test(o[2])))return {tipo:'revisao'}
   const ids=options.map(o=>o[1])
   const safe=options.filter(o=>!/cancel|coleta|contrat|pagamento|financeiro|rastrea|status/.test(o[2]))
