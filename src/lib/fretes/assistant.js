@@ -19,13 +19,14 @@ export function pedidoHumanoExplicitoFrete(texto){
  const prose=menu?lines.filter(l=>!menuLine.test(l.trim())).join(' '):t
  return /(?:quero|preciso|prefiro|desejo).*\b(?:humano|atendente)\b|falar com (?:um |o |uma |a )?(?:humano|atendente|financeiro)/.test(prose)
 }
-function guard(texto) {
+export function guardFrete(texto) {
  const t = normalizar(texto)
  if (/^(stop|sair|parar|descadastrar|unsubscribe)[.!]?$/.test(t) || /nao (envie|mande) (mais )?(mensagens|cotacoes)|nao quero mais(?:[.!]|$)|nao quero mais (receber|mensagens|cotacoes)|nao (quero|desejo).*(receber|mensagens|contato)|pare de (me contatar|me chamar|enviar mensagens|mandar mensagens)|descadastre|(remov(a|er)|retire|exclua).*(numero|contato|cadastro|lista)|nao me (contate|chame)|prefiro.*nao.*(contat|mensag)|nao tenho interesse.*(mensagens|contato)/.test(t)) return 'opt_out'
  if (/peso.*(cubad|unitari|liquid)|fator.*cub|cubagem.*fator|coletar|agendar|contratar|pagar|pix|confirma.*coleta|aceita|fechar|credencia|senha|token|ignore.*instruc|dados fiscais|cfop|remov(a|er)|pare de|cancelar|nao tenho interesse/.test(t)) return 'revisao'
  if (/r\$|frete.*\d|valor.*\d|prazo.*\d/.test(t)) return 'proposta'
  return null
 }
+const guard=guardFrete
 // Menus são dados não confiáveis: só uma opção explícita de cotação pode
 // virar resposta numérica. Nunca executar texto, acessar links ou contratar.
 export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
@@ -33,6 +34,8 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  if(!t||t.length>2000)return null
  if(guard(texto)==='opt_out')return {tipo:'opt_out'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
+ if(/^(?:por (?:favor|gentileza)[, ]*)?(?:informe|digite|qual(?: e)?|como (?:voce )?(?:gostaria de ser chamado|se chama)).{0,35}(?:seu nome|nome por gentileza)|^informe seu nome[.!]?$|^como voce gostaria de ser chamado\?$/.test(t))return {tipo:'resposta',texto:'Assistente de cotações da Vivenzza Professional'}
+ if(/^(?:ola[,! ]*)?(?:boa tarde|bom dia|boa noite)(?:[,! .]*(?:tudo bem\??))?[!. ]*$/.test(t))return {tipo:'resposta',texto:'Olá! Sou o assistente de cotações da Vivenzza. Buscamos o valor total do frete com todas as taxas, prazo em dias úteis e validade. Posso esclarecer os dados da solicitação já enviada.'}
  const lines=t.split(/\r?\n/)
  const options=lines.map(line=>line.trim().match(menuLine)).filter(Boolean)
  if(options.length>=2){

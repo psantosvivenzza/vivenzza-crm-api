@@ -91,7 +91,7 @@ atendimento ao cliente. Menus ambíguos e listas de perguntas não autorizam
 seleção. Avisos automáticos de ausência aguardam; recusa, mídia, encerramento,
 proposta e pedido humano explícito exigem revisão. Não retomar menus expirados.
 Pares repetidos de menu/resposta pausam para impedir loops entre bots.
-O teto transacional de seis respostas, DNC, consentimento, pausa humana e
+O teto transacional de 24 respostas por conversa, DNC, consentimento, pausa humana e
 cadência independente de 60s continuam vigentes. Nunca contratar, agendar
 coleta, pagar, abrir links ou inventar dados para concluir uma cotação.
 
@@ -104,6 +104,26 @@ Preservar observações, prazo e validade. Valor da mercadoria, preço unitário
 seguro, acréscimos e texto ambíguo não autorizam preencher o total do frete.
 Falha persistente de gravação pausa para revisão e deixa alerta sanitizado no log.
 Anexos não são interpretados pelo extrator textual; não converter '[mídia]' em valor.
+
+### Continuidade e anexos — autorização humana de 19/10/2026
+
+Propostas em andamento guardam preço, prazo em dias úteis e validade explícita
+em mensagens separadas, com versão e referência à mensagem fonte por campo.
+A IA pede somente pendências; proposta parcial não exige pausa humana. Completar
+exige os três campos e confirmação textual de todas as taxas, validade futura,
+e nenhum campo pendente de confirmação de OCR. Nunca contratar ou agendar.
+Recusas, opt-out, ambiguidade contratual, intervenção humana e loops continuam
+parando o fluxo; não despausar a carteira automaticamente.
+
+PDF até8MB e PNG/JPEG até5MB são preservados em frete_anexos (RLS e acesso
+somente service_role). API de download exige admin/financeiro, no-store e attachment.
+Não há URL pública ou navegação por links de transportadora. Download usa apenas
+chave de mensagem na instância Evolution financeira; nunca URL/mediaKey recebida.
+OCR não executa ferramentas nem fornece resposta livre: campos são parciais e
+precisam de confirmação textual. Arquivo ilegível pede os dados em texto.
+Áudio/vídeo e formatos desconhecidos não são baixados para extração documental.
+Menus listMessage/buttonsMessage são conteúdo visível, não anexos; IDs não são
+executados. Nome solicitado recebe identidade verdadeira de assistente Vivenzza.
 
 ## Fila de revisão cadastral
 

@@ -106,7 +106,15 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
     const consultas = check(await db.from('frete_consultas').select('*').eq('cotacao_id', row.id).order('nome_transportadora')) ?? []
     const envios = check(await db.from('frete_envios').select('id,consulta_id,status,error_code,created_at,attempted_at').in('consulta_id', consultas.map(c => c.id)).order('created_at', { ascending: false }).limit(200)) ?? []
     const mensagens = check(await db.from('frete_mensagens').select('*').eq('cotacao_id', row.id).order('created_at', { ascending: false }).limit(500)) ?? []
-    res.json({ cotacao: row, consultas: consultas.map(c => ({ ...c, envios: envios.filter(e => e.consulta_id === c.id), mensagens: mensagens.filter(m => m.consulta_id === c.id).reverse() })), comparativo: compararPropostas(consultas, row.dados), config: CONFIG() })
+    const anexos=check(await db.from('frete_anexos').select('mensagem_id,status,mimetype').eq('cotacao_id',row.id))??[]
+    res.json({ cotacao: row, consultas: consultas.map(c => ({ ...c, envios: envios.filter(e => e.consulta_id === c.id), mensagens: mensagens.filter(m => m.consulta_id === c.id).reverse().map(m=>({...m,anexo:anexos.find(a=>a.mensagem_id===m.id)||null})) })), comparativo: compararPropostas(consultas, row.dados), config: CONFIG() })
+  }))
+  router.get('/:id/anexos/:mensagemId',handler(async(req,res)=>{
+    const m=check(await db.from('frete_mensagens').select('id').eq('id',id(req.params.mensagemId)).eq('cotacao_id',id(req.params.id)).maybeSingle())
+    if(!m)throw new FreteError('Anexo não encontrado.',404)
+    const a=check(await db.from('frete_anexos').select('mimetype,conteudo_base64').eq('mensagem_id',m.id).maybeSingle())
+    if(!a?.conteudo_base64)throw new FreteError('Anexo indisponível.',404)
+    res.set({'Content-Type':a.mimetype,'Content-Disposition':'attachment; filename="proposta-frete"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).send(Buffer.from(a.conteudo_base64,'base64'))
   }))
   router.post('/:id/enviar', handler(async (req, res) => {
     if (!CONFIG().envio_ativo) throw new FreteError('Envio Evolution ainda não habilitado para este módulo. A cotação pode ser preenchida e comparada.', 409)

@@ -95,7 +95,7 @@ test('not installed touches no database and makes no send', async () => {
 })
 test('proposta textual preenche preco/protocolo mesmo apos pausa, preserva pendencias e nao sobrescreve humano',async()=>{
  const f=fixture(),q=f.tables.frete_consultas[0]
- Object.assign(q,{status:'revisao',ia_pausada:true,updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,observacoes:'Nota humana preservada'})
+ Object.assign(q,{status:'revisao',ia_pausada:true,atualizado_por:'assistente_frete_proposta_textual',updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,observacoes:'Nota humana preservada'})
  const input={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Cotação de frete gravada: 12345678 R$ 365,00',evolutionId:'proposal-new'}
  const opts={db:f.db,installed:true,assistantEnabled:true}
  await handleFreteInbound(input,opts)
@@ -108,7 +108,7 @@ test('captura reconsulta uma vez no conflito, sinaliza falha persistente e respe
  const input={instanceName:'vivenzza-financeiro',texto:'Valor total do frete: R$ 365,00',evolutionId:'price-cas'}
  for(const failure of [false,true]){
   const f=fixture(),q=f.tables.frete_consultas[0],rpc=f.db.rpc
-  Object.assign(q,{updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,prazo_dias:3,validade:'2099-01-01T00:00:00+00:00',observacoes:'  '+ 'x'.repeat(1100)+'  '})
+  Object.assign(q,{ia_pausada:true,atualizado_por:'assistente_frete_proposta_textual',updated_at:'2026-10-19T12:00:00Z',valor_total:null,protocolo:null,prazo_dias:3,validade:'2099-01-01T00:00:00+00:00',observacoes:'  '+ 'x'.repeat(1100)+'  '})
   let calls=0
   f.db.rpc=async(name,p)=>{if(name==='frete_salvar_proposta'&&(++calls===1||failure)){q.updated_at='2026-10-19T12:00:01Z';return {error:{message:'conflito'}}}return rpc(name,p)}
   await handleFreteInbound({...input,telefone:f.phone},{db:f.db,installed:true,assistantEnabled:true})
@@ -176,7 +176,8 @@ test('inbound FAQ deduplicates, proposal pauses without guessed price, opt out r
   await handleFreteInbound({ ...base, texto: 'Qual peso?', evolutionId: 'in1' }, opts)
   assert.equal(f.tables.frete_mensagens.length, 1); assert.equal(f.tables.frete_envios.length, 2)
   await handleFreteInbound({ ...base, texto: 'Frete R$ 500 prazo 3 dias', evolutionId: 'in2' }, opts)
-  assert.equal(f.tables.frete_consultas[0].status, 'revisao'); assert.equal(f.tables.frete_consultas[0].valor_total, undefined)
+  assert.notEqual(f.tables.frete_consultas[0].ia_pausada, true); assert.equal(f.tables.frete_consultas[0].valor_total, undefined)
+  assert.match(f.tables.frete_envios.at(-1).texto,/valor TOTAL/)
   await handleFreteInbound({ ...base, texto: 'Não mande mais mensagens', evolutionId: 'in3' }, opts)
   assert.equal(f.tables.fornecedores[0].cotacao_frete_consentimento, false)
 })

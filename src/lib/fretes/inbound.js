@@ -1,11 +1,14 @@
 import { supabase } from '../supabase-admin.server.js'
 import { candidatosTelefone, telefonesEquivalentes } from '../telefone.js'
 import { checked, FRETE_INSTANCE } from './worker.js'
-import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete } from './assistant.js'
+import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomaticaFrete, pedidoHumanoExplicitoFrete,guardFrete } from './assistant.js'
 import { extrairPropostaTextualFrete } from './proposal.js'
 import { validarProposta } from './domain.js'
+import {extrairProgressoFrete,solicitarPendenciasFrete} from './progress.js'
+import {preservarAnexoFrete} from './attachments.js'
 
 async function capturarPropostaTextual(db,consulta,texto){
+ if(consulta.ia_pausada&&!String(consulta.atualizado_por||'').startsWith('assistente_frete_'))return false
  const proposta=extrairPropostaTextualFrete(texto)
  if(!proposta)return false
  const actor=consulta.atualizado_por
@@ -31,7 +34,7 @@ async function capturarPropostaTextual(db,consulta,texto){
  }
 }
 
-export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete } = {}) {
+export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo,mediaMessage }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete,attachment=preservarAnexoFrete } = {}) {
   if (!installed || instanceName !== FRETE_INSTANCE) return false
   if (typeof telefone !== 'string' || !telefone) return false
   const candidatos = candidatosTelefone(telefone)
@@ -98,13 +101,49 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
     await pause(); return true
   }
-  if (!single || mediaTipo || pedidoHumanoExplicitoFrete(texto)) { await pause(); return true }
-  if(assistantEnabled&&await capturarPropostaTextual(db,single,texto))return true
+  if (!single || pedidoHumanoExplicitoFrete(texto)) { await pause(); return true }
+  if(mediaTipo){
+    if(!mediaMessage){await pause();return true}
+    const extraido=await attachment(db,mensagemId,mediaMessage,{readEnabled:assistantEnabled&&!single.ia_pausada&&!single.completa})
+    if(!assistantEnabled||single.ia_pausada||single.completa)return true
+    if(!extraido){
+      await checked(db.rpc('frete_enfileirar_resposta',{p_consulta_id:single.id,p_mensagem_id:mensagemId,p_texto:'Recebi o arquivo, mas não consegui ler os dados com segurança. Pode informar em texto o valor total do frete com todas as taxas, prazo em dias úteis e validade com data? Não estamos confirmando contratação ou coleta.'}));return true
+    }
+    // OCR é evidência auxiliar, nunca autoriza contratar ou marcar completa.
+    texto=extraido
+  }
+  if(guardFrete(texto)==='revisao'&&decidirInteracaoAutomaticaFrete(texto)?.tipo!=='resposta'){await pause();return true}
+  if(!single.ia_pausada&&!single.completa&&assistantEnabled){
+    const campos=extrairProgressoFrete(texto)
+    if(Object.keys(campos).length){
+      if(mediaTipo){delete campos.taxas_inclusas;campos.origem_anexo=true}
+      let snapshot=single,atual=null
+      for(let tentativa=0;tentativa<2;tentativa++){
+        atual=await checked(db.rpc('frete_registrar_progresso',{p_consulta_id:single.id,p_mensagem_id:mensagemId,p_versao:snapshot.updated_at,p_campos:campos}))
+        if(atual)break
+        snapshot=await checked(db.from('frete_consultas').select('*').eq('id',single.id).single())
+        if(snapshot.ia_pausada||snapshot.completa||![single.atualizado_por,'assistente_frete_progresso'].includes(snapshot.atualizado_por))return true
+      }
+      if(!atual)return true // CAS/handoff concorrente: não continuar com snapshot antigo.
+      const pendencias=solicitarPendenciasFrete(atual)
+      if(!atual.completa&&!atual.ia_pausada&&pendencias)await checked(db.rpc('frete_enfileirar_resposta',{p_consulta_id:single.id,p_mensagem_id:mensagemId,p_texto:pendencias}))
+      return true
+    }
+  }
+  if(mediaTipo){
+    await checked(db.rpc('frete_enfileirar_resposta',{p_consulta_id:single.id,p_mensagem_id:mensagemId,p_texto:'O arquivo foi preservado, mas preciso confirmar os dados em texto: valor TOTAL do frete com todas as taxas, prazo em dias úteis e validade (dd/mm/aaaa). Pode informar? Sem contratação ou agendamento de coleta.'}));return true
+  }
+  if(!mediaTipo&&assistantEnabled&&single.ia_pausada&&await capturarPropostaTextual(db,single,texto))return true
   if (single.ia_pausada || single.completa || !assistantEnabled) return true
   const cotacao = await checked(db.from('frete_cotacoes').select('*').eq('id', single.cotacao_id).single())
   if (cotacao.status !== 'aberta') return true
   const resposta = await interpret(texto, cotacao.dados)
   if(resposta.tipo==='aguardar')return true
+  if(resposta.tipo==='proposta'){
+    const pendencias=solicitarPendenciasFrete(single)
+    if(pendencias)await checked(db.rpc('frete_enfileirar_resposta',{p_consulta_id:single.id,p_mensagem_id:mensagemId,p_texto:pendencias}))
+    return true
+  }
   if (resposta.tipo === 'opt_out') {
     for (const s of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', s.id))
   }
