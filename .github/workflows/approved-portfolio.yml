@@ -39,6 +39,7 @@ jobs:
       - name: Offline tests (portfolio and voice, external boundaries mocked)
         run: node --experimental-test-module-mocks --test scripts/tests/unit/approved-portfolio.test.mjs scripts/tests/unit/approved-portfolio-dispatch.test.mjs scripts/tests/unit/approved-voice-scope.test.mjs scripts/tests/unit/approved-voice-adapter.test.mjs scripts/tests/unit/approved-voice-dispatcher.test.mjs
       - name: Syntax only - never execute operational scripts
+        shell: bash
         run: |
           node --check scripts/audit-approved-portfolio.mjs
           node --check scripts/send-approved-portfolio.mjs
