@@ -69,6 +69,7 @@ test.before(async () => {
  catch(error){await sql.query('rollback');throw error}
  await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
  await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261020154037_frete_fila_por_transportadora.sql',import.meta.url),'utf8'))
  await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
@@ -76,6 +77,88 @@ test.before(async () => {
  app.use('/api/produtos',auth,produtosRouter)
  server = app.listen(0, '127.0.0.1'); await new Promise(r => server.once('listening', r)); base = `http://127.0.0.1:${server.address().port}/api/fretes`
  }catch(e){await sql.query('rollback');console.error('SETUP LOCAL',e.message);throw e}
+})
+let phoneSequence=100
+test.beforeEach(async t=>{
+ // Cenários de uma conversa usam contatos independentes. Reutilização é
+ // exercitada explicitamente no teste da fila, sem esconder histórico real.
+ const compartilhados=['API restringe','RPC aceita','cotação mantém','fila desligada','tentativas de frete','proposta conferida']
+ if(supplier&&!compartilhados.some(prefix=>t.name.startsWith(prefix)))await sql.query('update fornecedores set telefone_cotacao_frete=$1 where id=$2',[`555199998${String(++phoneSequence).padStart(4,'0')}`,supplier])
+})
+
+test('fila por contato: A e B abertas, outro contato avança, liberação CAS e preço tardio não cruza cotações',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const {runFreteQueue}=await import('../../src/lib/fretes/worker.js')
+ const second=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Outro contato sintético',true,'5551988877777',true) returning id`,['FILA-'+Date.now()])).rows[0].id
+ const ids=[];let pendingId,mediaPending,interruptedPending
+ const create=async suppliers=>{const r=await request('/','POST',{...payload(),transportadora_ids:suppliers});assert.equal(r.status,201);ids.push(r.data.id);return r.data.id}
+ const getQ=async c=>(await sql.query('select * from frete_consultas where cotacao_id=$1',[c])).rows[0]
+ const enqueue=c=>db.rpc('frete_enfileirar_cotacao',{p_cotacao_id:c,p_texto:'Solicitação sintética FRETE-'+c,p_actor:'test-fila'})
+ const cool=()=>sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where attempted_at is not null")
+ const sent=[];const options={db,installed:true,enabled:true,assistantEnabled:true,dnc:async()=>({blocked:false}),recordSuccess:async()=>{},recordFailure:async()=>{},send:async(_i,_t,text)=>{sent.push(text);return {ok:true,providerMessageId:'fake-fila-'+sent.length}}}
+ try{
+  const a=await create([supplier]),b=await create([supplier]),other=await create([second])
+  for(const c of [a,b,other])assert.equal((await enqueue(c)).error,null)
+  assert.equal((await getQ(b)).aguarda_contato,true)
+  await cool();assert.equal((await runFreteQueue(options)).status,'enviado');assert.ok(sent[0].includes(a))
+  const qa=await getQ(a)
+  await sql.query('update frete_consultas set ia_pausada=true where id=$1',[qa.id])
+  await cool();assert.equal((await runFreteQueue(options)).status,'enviado');assert.ok(sent[1].includes(other))
+  assert.equal((await getQ(b)).aguarda_contato,true)
+  const paused=await getQ(a)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/liberar-contato`,'POST',{versao:qa.updated_at})).status,409)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/liberar-contato`,'POST',{versao:paused.updated_at})).status,200)
+  assert.equal((await sql.query('select status from frete_cotacoes where id=$1',[a])).rows[0].status,'aberta')
+  const fourth=await create([supplier]);await enqueue(fourth)
+  assert.equal((await getQ(fourth)).aguarda_contato,true,'nova solicitação não ultrapassa B já em espera')
+  await db.rpc('frete_proximo_envio')
+  const beforeTick=(await getQ(b)).updated_at
+  await db.rpc('frete_proximo_envio')
+  assert.equal((await getQ(b)).updated_at,beforeTick,'tick sem mudança não invalida CAS')
+  await cool()
+  const race=await Promise.all([runFreteQueue(options),runFreteQueue(options)])
+  assert.equal(race.filter(r=>r.status==='enviado').length,1);assert.equal(sent.length,3);assert.ok(sent[2].includes(b))
+  const qb=await getQ(b);assert.equal(qb.exige_referencia,true);assert.equal(qb.aguarda_contato,false)
+  const event={instanceName:'vivenzza-financeiro',telefone:qb.telefone,texto:'Total do frete: R$ 777,00',evolutionId:'late-fila-'+b,fromMe:false}
+  const opts={db,installed:true,assistantEnabled:true}
+  await handleFreteInbound(event,opts);await handleFreteInbound(event,opts)
+  assert.equal((await getQ(b)).valor_total,null);assert.equal((await getQ(b)).ia_pausada,true)
+  assert.equal((await sql.query('select count(*)::int n from frete_mensagens where evolution_id=$1',[event.evolutionId])).rows[0].n,0)
+  pendingId=(await sql.query('select id from frete_respostas_pendentes where evolution_id=$1',[event.evolutionId])).rows[0].id
+  const detail=(await request('/'+b)).data;assert.equal(detail.consultas[0].respostas_pendentes.length,1)
+  const old=await getQ(a)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${pendingId}/associar`,'POST',{versao:old.updated_at})).status,200)
+  assert.equal((await sql.query('select consulta_id from frete_mensagens where evolution_id=$1',[event.evolutionId])).rows[0].consulta_id,qa.id)
+  assert.equal((await getQ(b)).valor_total,null)
+  assert.equal((await request(`/${b}/consultas/${qb.id}/respostas/${pendingId}/associar`,'POST',{versao:(await getQ(b)).updated_at})).status,409)
+  const {preservarAnexoPendenteFrete}=await import('../../src/lib/fretes/attachments.js')
+  let downloads=0
+  const media={...event,evolutionId:'media-fila-'+b,texto:'PDF sintético',mediaTipo:'document',mediaMessage:{key:{id:'media-fila-'+b}}}
+  const pdf=Buffer.from('%PDF-1.4\nSINTETICO').toString('base64')
+  const mediaOpts={...opts,pendingAttachment:(database,rid,msg)=>preservarAnexoPendenteFrete(database,rid,msg,{download:async()=>{downloads++;return {mimetype:'application/pdf',conteudo_base64:pdf,sha256:'sintetico'}}})}
+  await handleFreteInbound(media,mediaOpts);await handleFreteInbound(media,mediaOpts)
+  mediaPending=(await sql.query('select id,conteudo_base64 from frete_respostas_pendentes where evolution_id=$1',[media.evolutionId])).rows[0]
+  assert.equal(downloads,1);assert.equal(mediaPending.conteudo_base64,pdf)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${mediaPending.id}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,200)
+  assert.equal((await sql.query('select a.conteudo_base64 from frete_anexos a join frete_mensagens m on m.id=a.mensagem_id where m.evolution_id=$1',[media.evolutionId])).rows[0].conteudo_base64,pdf)
+  interruptedPending=(await sql.query("insert into frete_respostas_pendentes(instance_name,telefone,evolution_id,texto,anexo_status)values('vivenzza-financeiro',$1,$2,'PDF interrompido','processando')returning id",[qb.telefone,'interrupted-'+b])).rows[0].id
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${interruptedPending}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,409)
+  await sql.query("update frete_respostas_pendentes set created_at=now()-interval '3 minutes' where id=$1",[interruptedPending])
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${interruptedPending}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,200)
+  assert.equal((await sql.query('select anexo_status from frete_respostas_pendentes where id=$1',[interruptedPending])).rows[0].anexo_status,'revisao')
+  await sql.query("update frete_envios set status='revisao',provider_id=null where consulta_id=$1",[qb.id])
+  assert.equal((await request(`/${b}/consultas/${qb.id}/liberar-contato`,'POST',{versao:(await getQ(b)).updated_at})).status,409,'resultado incerto não libera próximo envio')
+  await sql.query("update frete_consultas set status='encerrada' where id=$1",[qb.id])
+  assert.equal(check(await db.rpc('frete_proximo_envio')).length,0,'fechar consulta com envio incerto não libera o contato')
+  assert.equal((await sql.query("select has_table_privilege('anon','frete_respostas_pendentes','select') a,has_table_privilege('authenticated','frete_respostas_pendentes','insert') b,has_function_privilege('anon','frete_liberar_contato(uuid,uuid,timestamptz,text)','execute') c")).rows[0].a,false)
+ }finally{
+  if(pendingId)await sql.query('delete from frete_respostas_pendentes where id=$1',[pendingId])
+  if(mediaPending)await sql.query('delete from frete_respostas_pendentes where id=$1',[mediaPending.id])
+  if(interruptedPending)await sql.query('delete from frete_respostas_pendentes where id=$1',[interruptedPending])
+  await sql.query('delete from frete_envios where consulta_id in(select id from frete_consultas where cotacao_id=any($1::uuid[]))',[ids])
+  await sql.query('delete from frete_mensagens where cotacao_id=any($1::uuid[])',[ids])
+  await sql.query('delete from frete_consultas where cotacao_id=any($1::uuid[])',[ids]);await sql.query('delete from frete_cotacoes where id=any($1::uuid[])',[ids]);await sql.query('delete from fornecedores where id=$1',[second])
+ }
 })
 test.after(async () => {
  if (supplier) {
@@ -108,16 +191,17 @@ test('RPC aceita 50 participantes, rejeita 51 e preserva permissao de servico', 
   await sql.query('delete from fornecedores where id=any($1::uuid[])',[fornecedores])
  }
 })
-test('cotação mantém FK fornecedor e rejeita contato já ocupado sem deixar cotação parcial', async () => {
+test('cotação mantém FK e permite novos rascunhos com contato ocupado e variante do telefone', async () => {
  const result = await request('/', 'POST', payload()); assert.equal(result.status, 201); cotacao = result.data
  assert.ok(cotacao.id)
  const row = (await sql.query('select fornecedor_id,telefone from frete_consultas where cotacao_id=$1', [cotacao.id])).rows[0]
  assert.equal(row.fornecedor_id, supplier)
- assert.equal((await request('/', 'POST', payload())).status, 409)
+ const segunda=await request('/', 'POST', payload());assert.equal(segunda.status,201)
+ await sql.query('delete from frete_consultas where cotacao_id=$1',[segunda.data.id]);await sql.query('delete from frete_cotacoes where id=$1',[segunda.data.id])
  const original = '5551999990001'
  const variante = original.slice(0, 4) + original.slice(5)
  const outro = (await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete) values($1,'Outra filial teste',true,$2) returning id`, [`VAR-${Date.now()}`, variante])).rows[0].id
- try { assert.equal((await request('/', 'POST', { ...payload(), transportadora_ids: [outro] })).status, 409) } finally { await sql.query('delete from fornecedores where id=$1', [outro]) }
+ try { const outra=await request('/', 'POST', { ...payload(), transportadora_ids: [outro] });assert.equal(outra.status,201);await sql.query('delete from frete_consultas where cotacao_id=$1',[outra.data.id]);await sql.query('delete from frete_cotacoes where id=$1',[outra.data.id]) } finally { await sql.query('delete from fornecedores where id=$1', [outro]) }
  assert.equal((await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1', ['test-actor'])).rows[0].n, 1)
 })
 test('fila desligada não envia, dupla solicitação é idempotente e claim concorrente é único', async () => {

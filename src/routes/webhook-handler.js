@@ -291,7 +291,7 @@ export async function processWhatsappEvent(payload) {
     let freteInbound = false
     try {
       const envelope=lerEnvelopeFrete(msg)
-      freteInbound = await handleFreteInbound({ instanceName, telefone, texto:envelope.texto??texto, evolutionId: msg.key?.id ?? null, fromMe, mediaTipo:envelope.mediaTipo??mediaTipo,mediaMessage:envelope.mediaMessage })
+      freteInbound = await handleFreteInbound({ instanceName, telefone, texto:envelope.texto??texto, evolutionId: msg.key?.id ?? null, fromMe, mediaTipo:envelope.mediaTipo??mediaTipo,mediaMessage:envelope.mediaMessage,referencedEvolutionId:envelope.referencedEvolutionId })
     } catch (err) {
       console.error('[webhook fretes] classificação indisponível', err.code ?? 'falha')
       freteInbound = err.freteTransportadora ? { semCotacao: true } : false

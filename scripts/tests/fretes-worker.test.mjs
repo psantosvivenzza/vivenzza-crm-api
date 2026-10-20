@@ -15,6 +15,62 @@ test('intervencao humana identifica pausa e impede importar preco de outra cotac
  assert.equal(q.valor_total,null)
 })
 
+test('contato reutilizado preserva preço sem referência fora da cotação nova',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ q.exige_referencia=true;q.cotacao_id='00000000-0000-4000-8000-000000000123'
+ f.tables.frete_respostas_pendentes=[]
+ const input={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Total do frete: R$ 500,00',evolutionId:'late-price',fromMe:false}
+ await handleFreteInbound(input,{db:f.db,installed:true,assistantEnabled:true})
+ await handleFreteInbound(input,{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_respostas_pendentes.length,1)
+ assert.equal(f.tables.frete_mensagens.length,0)
+ assert.equal(q.valor_total,undefined);assert.equal(q.ia_pausada,true)
+})
+
+test('consulta em espera não intercepta menu da sessão ativa',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ f.tables.frete_consultas.push({...q,id:'waiting',cotacao_id:'other',aguarda_contato:true})
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Qual peso?',evolutionId:'active-only'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_mensagens.length,1)
+ assert.equal(f.tables.frete_mensagens[0].consulta_id,q.id)
+ assert.equal(f.tables.frete_consultas[1].ia_pausada,false)
+})
+
+test('resposta na janela entre liberar e promover fica pendente, sem cotação inferida',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ q.contato_liberado=true;f.tables.frete_respostas_pendentes=[]
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Prazo: 4 dias úteis',evolutionId:'between-sessions'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_respostas_pendentes.length,1);assert.equal(f.tables.frete_mensagens.length,0)
+})
+
+test('reply-to antigo não é atribuído a sessão reutilizada',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ q.exige_referencia=true;q.cotacao_id='00000000-0000-4000-8000-000000000123'
+ f.tables.frete_respostas_pendentes=[]
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Qual peso?',evolutionId:'reply-old',referencedEvolutionId:'old-session-send'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(f.tables.frete_mensagens.length,0)
+ assert.equal(f.tables.frete_respostas_pendentes.length,1)
+})
+
+test('ambiguidade em contato reutilizado preserva proposta completa e seu status',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ Object.assign(q,{exige_referencia:true,completa:true,status:'recebida',valor_total:300,cotacao_id:'00000000-0000-4000-8000-000000000123'})
+ f.tables.frete_respostas_pendentes=[]
+ await handleFreteInbound({instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Bom dia',evolutionId:'complete-ambiguous'},{db:f.db,installed:true,assistantEnabled:true})
+ assert.equal(q.completa,true);assert.equal(q.status,'recebida');assert.equal(q.valor_total,300);assert.equal(q.ia_pausada,true)
+})
+
+test('eco atrasado e reentrega de outra cotação não pausam nem entram na sessão atual',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ q.exige_referencia=true
+ f.tables.frete_envios.push({id:'old-send',consulta_id:'old-q',provider_id:'old-provider',texto:'Outra solicitação'})
+ f.tables.frete_mensagens.push({id:'old-in',consulta_id:'old-q',evolution_id:'old-event',texto:'Resposta antiga'})
+ const opts={db:f.db,installed:true,assistantEnabled:true},base={instanceName:'vivenzza-financeiro',telefone:f.phone}
+ await handleFreteInbound({...base,texto:'Outra solicitação',evolutionId:'old-provider',fromMe:true},opts)
+ await handleFreteInbound({...base,texto:'Resposta antiga',evolutionId:'old-event',fromMe:false},opts)
+ assert.equal(q.ia_pausada,false);assert.equal(f.tables.frete_mensagens.length,1)
+})
+
 test('eco da resposta 24 continua automatico, nao vira intervencao humana',async()=>{
  const f=fixture(),q=f.tables.frete_consultas[0]
  for(let i=0;i<24;i++)f.tables.frete_envios.push({consulta_id:q.id,texto:'Resposta '+i,provider_id:'own-'+i})
@@ -139,6 +195,7 @@ function fixture() {
       return Promise.resolve({ data: single ? rows[0] : rows, error: null }).then(resolve)
     } }; return q
   }, async rpc(name, params) {
+    if(name==='frete_proximo_envio')return {data:tables.frete_envios.filter(e=>e.status==='fila').slice(0,1)}
     if(name==='frete_salvar_proposta'){
       const row=tables.frete_consultas.find(c=>c.id===params.p_consulta_id)
       if(row.updated_at!==params.p_campos.versao)return {error:{message:'versao'}}

@@ -5,7 +5,7 @@ import { decidirRespostaFrete, interpretarPerguntaFrete, decidirInteracaoAutomat
 import { extrairPropostaTextualFrete } from './proposal.js'
 import { validarProposta } from './domain.js'
 import {extrairProgressoFrete,solicitarPendenciasFrete,confirmouTaxasFrete} from './progress.js'
-import {preservarAnexoFrete} from './attachments.js'
+import {preservarAnexoFrete,preservarAnexoPendenteFrete} from './attachments.js'
 import {completarLocalFormularioFrete} from './form.js'
 
 async function capturarPropostaTextual(db,consulta,texto){
@@ -35,7 +35,7 @@ async function capturarPropostaTextual(db,consulta,texto){
  }
 }
 
-export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo,mediaMessage }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete,attachment=preservarAnexoFrete } = {}) {
+export async function handleFreteInbound({ instanceName, telefone, texto, evolutionId, fromMe, mediaTipo,mediaMessage,referencedEvolutionId }, { db = supabase, installed = process.env.FRETE_MODULO_INSTALADO === 'true', assistantEnabled = process.env.FRETE_IA_ATIVA === 'true', interpret = interpretarPerguntaFrete,attachment=preservarAnexoFrete,pendingAttachment=preservarAnexoPendenteFrete } = {}) {
   if (!installed || instanceName !== FRETE_INSTANCE) return false
   if (typeof telefone !== 'string' || !telefone) return false
   const candidatos = candidatosTelefone(telefone)
@@ -44,7 +44,7 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   let matches = []
   try {
   const consultas = await checked(db.from('frete_consultas').select('*').eq('instance_name', FRETE_INSTANCE).in('status', ['fila', 'enviando', 'aguardando', 'recebida', 'revisao', 'falha']).in('telefone', candidatos))
-  matches = (consultas ?? []).filter(c => telefonesEquivalentes(c.telefone, telefone))
+  matches = (consultas ?? []).filter(c => telefonesEquivalentes(c.telefone, telefone) && !c.aguarda_contato && !c.contato_liberado)
   // Opt-out explícito é respeitado mesmo depois de encerrar a cotação.
   if (!fromMe && decidirRespostaFrete(texto).tipo === 'opt_out') {
     for (const supplier of supplierMatches) await checked(db.from('fornecedores').update({ cotacao_frete_consentimento: false, cotacao_frete_atualizada_por:'opt_out_inbound' }).eq('id', supplier.id))
@@ -53,7 +53,17 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
   }
   // Sem solicitação aberta, manter a mensagem no histórico financeiro genérico,
   // sem marcar resposta a cobrança nem acionar assistente de frete.
-  if (!matches.length) return supplierMatches.length ? { semCotacao: true } : false
+  if (!matches.length) {
+    if(!fromMe&&evolutionId&&(consultas??[]).some(c=>telefonesEquivalentes(c.telefone,telefone)&&(c.aguarda_contato||c.contato_liberado))){
+      const oldEvent=await checked(db.from('frete_mensagens').select('id').eq('evolution_id',evolutionId).limit(1))
+      if(oldEvent?.length)return true
+      const saved=await db.from('frete_respostas_pendentes').insert({instance_name:instanceName,telefone,texto:String(texto||(mediaTipo?`[Mídia: ${mediaTipo}]`:'')).slice(0,10000),evolution_id:evolutionId,...(mediaTipo?{anexo_status:mediaMessage?'processando':'revisao'}:{})}).select('id').single()
+      if(saved.error&&saved.error.code!=='23505')throw saved.error
+      if(!saved.error&&mediaTipo&&mediaMessage)await pendingAttachment(db,saved.data.id,mediaMessage)
+      return true
+    }
+    return supplierMatches.length ? { semCotacao: true } : false
+  }
   if (!evolutionId) { // No stable event identity: retain human review without automatic replies.
     for (const c of matches) {
       await checked(db.from('frete_consultas').update({ ia_pausada: true }).eq('id', c.id).neq('status', 'encerrada'))
@@ -61,13 +71,36 @@ export async function handleFreteInbound({ instanceName, telefone, texto, evolut
     }
     return { semCotacao: true }
   }
+  const old = await checked(db.from('frete_mensagens').select('id,consulta_id').eq('evolution_id', evolutionId).limit(1))
+  if(old?.[0]?.consulta_id&&!matches.some(c=>c.id===old[0].consulta_id))return true
+  if(fromMe){
+    const own=await checked(db.from('frete_envios').select('consulta_id').eq('provider_id',evolutionId).limit(1))
+    if(own?.length&&!matches.some(c=>c.id===own[0].consulta_id))return true
+  }
+  // Contato reutilizado exige referência inequívoca: não importar preço tardio.
+  if (!fromMe && matches.some(c => c.exige_referencia)) {
+    const explicit=matches.filter(c=>String(texto||'').toLowerCase().includes(c.cotacao_id.toLowerCase()))
+    const sends=referencedEvolutionId?await checked(db.from('frete_envios').select('consulta_id').eq('provider_id',referencedEvolutionId).in('consulta_id',matches.map(c=>c.id))):[]
+    const replies=matches.filter(c=>sends?.some(s=>s.consulta_id===c.id))
+    const referenced=explicit.length?explicit:replies
+    if(referenced.length!==1||(explicit.length&&referencedEvolutionId&&!replies.some(c=>c.id===explicit[0].id))){
+      const saved=await db.from('frete_respostas_pendentes').insert({instance_name:instanceName,telefone,texto:String(texto||(mediaTipo?`[Mídia: ${mediaTipo}]`:'')).slice(0,10000),evolution_id:evolutionId,...(mediaTipo?{anexo_status:mediaMessage?'processando':'revisao'}:{})}).select('id').single()
+      if(saved.error&&saved.error.code!=='23505')throw saved.error
+      for(const c of matches){
+        await checked(db.from('frete_consultas').update({ia_pausada:true}).eq('id',c.id).eq('ia_pausada',false).neq('status','encerrada'))
+        await checked(db.from('frete_consultas').update({status:'revisao'}).eq('id',c.id).eq('completa',false).neq('status','revisao').neq('status','encerrada'))
+      }
+      if(!saved.error&&mediaTipo&&mediaMessage)await pendingAttachment(db,saved.data.id,mediaMessage)
+      return true
+    }
+    matches=referenced
+  }
   const pause = async (actor) => {
     for (const c of matches) {
       await checked(db.from('frete_consultas').update({ ia_pausada: true,...(actor?{atualizado_por:actor}:{}) }).eq('id', c.id).neq('status', 'encerrada'))
       await checked(db.from('frete_consultas').update({ status: 'revisao' }).eq('id', c.id).eq('completa', false).neq('status', 'encerrada'))
     }
   }
-  const old = await checked(db.from('frete_mensagens').select('id').eq('evolution_id', evolutionId).limit(1))
   if (old?.length) {
     if(!fromMe&&!mediaTipo&&!pedidoHumanoExplicitoFrete(texto)&&assistantEnabled&&matches.length===1&&await capturarPropostaTextual(db,matches[0],texto))return true
     const respostas=await checked(db.from('frete_envios').select('id').eq('mensagem_id',old[0].id).limit(1))

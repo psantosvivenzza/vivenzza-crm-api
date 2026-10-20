@@ -21,7 +21,9 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
     await checked(db.from('frete_consultas').update({ status: 'revisao' }).eq('id', envio.consulta_id).eq('completa', false).neq('status', 'encerrada'))
   }
   if (!enabled) return { status: 'desativado' }
-  const rows = await checked(db.from('frete_envios').select('*').eq('status', 'fila').order('created_at').limit(1))
+  let rows
+  try { rows = await checked(db.rpc('frete_proximo_envio')) }
+  catch(error){console.error('[fretes] seletor de fila indisponível',error?.code||'falha');return {status:error?.message==='limite_frete_cadencia'?'aguardando_cadencia':'aguardando_banco'}}
   if (!rows?.length) return { status: 'vazio' }
   let envio = rows[0]
   let reservadoParaEnvio = false
@@ -36,6 +38,7 @@ export async function runFreteQueue({ db = supabase, send = enviarTexto, now = n
     const consulta = await checked(db.from('frete_consultas').select('*').eq('id', envio.consulta_id).single())
     const cotacao = await checked(db.from('frete_cotacoes').select('*').eq('id', consulta.cotacao_id).single())
     const fornecedor = await checked(db.from('fornecedores').select('*').eq('id', consulta.fornecedor_id).single())
+    if (consulta.aguarda_contato || consulta.contato_liberado) return { status: 'aguardando_contato' }
     if (envio.mensagem_id && !assistantEnabled) return finish('bloqueado', 'ASSISTENTE_DESATIVADO')
     if (envio.instance_name !== FRETE_INSTANCE || consulta.instance_name !== FRETE_INSTANCE || cotacao.status !== 'aberta' || consulta.status === 'encerrada' || consulta.ia_pausada || fornecedor.ativo !== true || fornecedor.participa_cotacao_frete !== true || fornecedor.cotacao_frete_consentimento !== true || !telefonesEquivalentes(envio.telefone, fornecedor.telefone_cotacao_frete) || !telefonesEquivalentes(envio.telefone, consulta.telefone)) return finish('bloqueado', 'CADASTRO_OU_COTACAO_BLOQUEADA')
     const instancia = await checked(db.from('whatsapp_instances').select('*').eq('instance_name', FRETE_INSTANCE).single())

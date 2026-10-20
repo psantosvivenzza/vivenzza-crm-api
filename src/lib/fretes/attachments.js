@@ -2,6 +2,17 @@ import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
 import {createHash} from 'node:crypto'
 const MAX=8*1024*1024
+// Reserva já criada pelo inbound. Sem OCR e sem associar documento a uma cotação.
+export async function preservarAnexoPendenteFrete(db,respostaId,message,{download=baixarAnexoFrete}={}){
+ try{
+  const file=await download(message)
+  const r=await db.from('frete_respostas_pendentes').update({...file,anexo_status:'preservado'}).eq('id',respostaId)
+  if(r.error)throw r.error
+ }catch{
+  const r=await db.from('frete_respostas_pendentes').update({anexo_status:'revisao'}).eq('id',respostaId)
+  if(r.error)throw r.error
+ }
+}
 export async function baixarAnexoFrete(message,{post}={}){
  if(!message?.key?.id||message.key.fromMe)throw Error('anexo_invalido')
  const media=Object.values(message.message||{})[0]
