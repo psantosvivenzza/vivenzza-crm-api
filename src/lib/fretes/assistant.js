@@ -51,6 +51,8 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  if(/consignatario|troca (?:de )?(?:nota|nf)|\bcfop\b|dados fiscais/.test(t))return {tipo:'revisao'}
  if(/\b(?:senha|token)\b|ignore.*instruc|nao (?:atend|trabalh|temos|fazemos)|infelizmente|atendimento.*(?:encerrad|finalizad)/.test(t)||pedidoHumanoExplicitoFrete(texto))return {tipo:'revisao'}
  if(/https?:\/\//.test(t)&&/cotac|orcamento/.test(t)&&/site|acesse|link|digital|cadastro/.test(t))return {tipo:'revisao'}
+ // Saudacao isolada nao e pergunta nem aceite; texto adicional fica fora desta regra.
+ if(!guard(texto)&&/^seja bem vindo\(a\) a [a-z][a-z .&-]{1,79}![\s😃😊🙂👋🚚]*$/u.test(t))return {tipo:'aguardar'}
  const form=responderFormularioFrete(t,dados);if(form)return form
  // Preambulo e transferencia da TRANSPORTADORA não são handoff da Vivenzza.
  // São eventos separados do menu/pergunta; não responder nem pausar aqui.
@@ -77,7 +79,7 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
   // A opção só encaminha a cotação; não presume CIF/FOB fiscal nem contratação.
   const docs=[dados.retirada?.cnpj,dados.entrega?.cnpj,dados.pagador?.cnpj]
   if(/^o frete sera pago pelo remetente \(cif\) ou pelo destinatario \(fob\)\?\s*em caso de um terceiro pagador, considere a opcao 2$/.test(prose.trim())&&options.length===2&&options[0][1]==='1'&&options[0][2]==='cif - remetente'&&options[1][1]==='2'&&options[1][2]==='fob - destinatario'&&docs.every(v=>/^\d{14}$/.test(v||''))&&docs[2]!==docs[0]&&docs[2]!==docs[1])return {tipo:'resposta',texto:'2'}
-  if(guard(prose)||options.some(o=>o[2].length>80||/[?]/.test(o[2])))return {tipo:'revisao'}
+  if(guard(prose)||/\b(?:confirm[ae].*coleta|aceite|concord\w*|de acordo|ciente|termos|privacidade)\b/.test(prose)||options.some(o=>o[2].length>80||/[?]/.test(o[2])))return {tipo:'revisao'}
   // Categoria generica da carga declarada, nao certificacao ONU/periculosidade.
   // Nao seguir links do menu nem classificar cosmeticos/quimicos por palpite.
   if(options.length===3&&options.every((o,i)=>o[1]===String(i+1)&&o[2]===['diversos','metais','quimico'][i])){
@@ -86,7 +88,7 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
   }
   const ids=options.map(o=>o[1])
   const safe=options.filter(o=>!/cancel|coleta|contrat|pagamento|financeiro|rastrea|status/.test(o[2]))
-  const quote=safe.filter(o=>/^(?:cotac(?:ao|oes)|orcamentos?)(?: de (?:frete|transporte))?$|^comercial\s*\/\s*cotac(?:ao|oes)$/.test(o[2]))
+  const quote=safe.filter(o=>/^(?:cotac(?:ao|oes)|orcamentos?)(?: de (?:fretes?|transporte))?$|^comercial\s*\/\s*cotac(?:ao|oes)$/.test(o[2]))
   const commercial=safe.filter(o=>/^comercial$|^setor comercial$/.test(o[2]))
   const customer=safe.filter(o=>/^atendimento ao cliente$/.test(o[2]))
   const candidates=quote.length?quote:commercial.length?commercial:customer

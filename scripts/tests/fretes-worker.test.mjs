@@ -5,6 +5,30 @@ process.env.LOCAL_PG_URL = 'postgresql://test:test@127.0.0.1:1/test'
 const { runFreteQueue } = await import('../../src/lib/fretes/worker.js')
 const { handleFreteInbound } = await import('../../src/lib/fretes/inbound.js')
 const { decidirRespostaFrete } = await import('../../src/lib/fretes/assistant.js')
+
+test('boas vindas separada do menu preserva sessao e reserva somente cotacao uma vez',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0],opts={db:f.db,installed:true,assistantEnabled:true}
+ const base={instanceName:'vivenzza-financeiro',telefone:f.phone,fromMe:false}
+ const greeting={...base,texto:'Seja bem vindo(a) à Transportadora Exemplo! 😃',evolutionId:'synthetic-welcome'}
+ await handleFreteInbound(greeting,opts);await handleFreteInbound(greeting,opts)
+ await handleFreteInbound({...greeting,evolutionId:'synthetic-welcome-second'},opts)
+ assert.equal(q.ia_pausada,false);assert.equal(f.tables.frete_envios.length,1)
+ const menu={...base,texto:'Em que podemos lhe ajudar?\n1 - SAC\n2 - Cotação de fretes\n3 - Solicitar Coleta',evolutionId:'synthetic-menu'}
+ await handleFreteInbound(menu,opts);await handleFreteInbound(menu,opts)
+ assert.equal(q.ia_pausada,false);assert.equal(f.tables.frete_envios.length,2)
+ assert.equal(f.tables.frete_envios.at(-1).texto,'2')
+ assert.equal(f.tables.frete_envios.at(-1).mensagem_id,f.tables.frete_mensagens.at(-1).id)
+ assert.equal(f.tables.frete_mensagens.length,3)
+})
+
+test('saudacao conhecida nao despausa humano nem responde a menu posterior',async()=>{
+ const f=fixture(),q=f.tables.frete_consultas[0]
+ Object.assign(q,{ia_pausada:true,status:'revisao',atualizado_por:'humano_whatsapp'})
+ const opts={db:f.db,installed:true,assistantEnabled:true},base={instanceName:'vivenzza-financeiro',telefone:f.phone,fromMe:false}
+ await handleFreteInbound({...base,texto:'Seja bem vindo(a) à Transportadora Exemplo! 😃',evolutionId:'paused-greeting'},opts)
+ await handleFreteInbound({...base,texto:'1 - SAC\n2 - Cotação de fretes\n3 - Coleta',evolutionId:'paused-menu'},opts)
+ assert.equal(q.ia_pausada,true);assert.equal(q.atualizado_por,'humano_whatsapp');assert.equal(f.tables.frete_envios.length,1)
+})
 test('intervencao humana identifica pausa e impede importar preco de outra cotacao',async()=>{
  const f=fixture(),q=f.tables.frete_consultas[0]
  Object.assign(q,{atualizado_por:'assistente_frete_proposta_textual',valor_total:null,protocolo:null,updated_at:'2026-10-19T12:00:00Z'})

@@ -4,6 +4,23 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('menu cotacao reconhece fretes no plural sem escolher coleta ou opcao ambigua',async()=>{
+ const {decidirInteracaoAutomaticaFrete:d}=await import('../../src/lib/fretes/assistant.js')
+ const menu='Olá! Estou aqui para te ajudar!\n1 - Rastreamento de NF\n2 - Agendamento de coleta\n3 - Cotação de fretes\n4 - Financeiro / Boletos\n5 - Recursos humanos\n6 - Pendências\n7 - Cidades Atendidas'
+ for(const text of [menu,menu.replaceAll('\n','\\n')])assert.deepEqual(d(text),{tipo:'resposta',texto:'3'})
+ for(const text of [menu+'\n8 - Cotação de frete',menu+'\nConfirme a coleta',menu+'\nAceite os termos',menu+'\nConcorde com a política',menu+'\nDe acordo com as condições?',menu+'\nEstou ciente',menu+'\nPolítica de privacidade',menu+'\nNão atendemos essa rota',menu+'\nPare de enviar mensagens',menu+'\nTem troca de NF?',menu.replace('Cotação de fretes','Cotação de fretes e coleta')])assert.notEqual(d(text)?.tipo,'resposta',text)
+})
+
+test('saudacao informativa isolada aguarda sem modelo nem engolir menu ou termos',async()=>{
+ const {interpretarPerguntaFrete,decidirInteracaoAutomaticaFrete:d}=await import('../../src/lib/fretes/assistant.js')
+ const greeting='Seja bem vindo(a) à Transportadora Exemplo! 😃'
+ let calls=0
+ assert.deepEqual(await interpretarPerguntaFrete(greeting,{}, {classify:async()=>{calls++;throw Error('nao consultar modelo')}}),{tipo:'aguardar'})
+ assert.equal(calls,0)
+ assert.deepEqual(d(greeting+'\n1 - SAC\n2 - Cotação\n3 - Solicitar Coleta'),{tipo:'resposta',texto:'2'})
+ for(const suffix of [' Aceite os termos',' Confirme coleta',' Não atendemos essa rota',' Pare de enviar mensagens',' Qual peso?',' Falar com atendente',' https://example.invalid'])assert.notEqual(d(greeting+suffix)?.tipo,'aguardar')
+})
+
 test('menu mercadoria classifica somente embalagem declarada e nao executa links ou certifica quimicos',async()=>{
  const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
  const menu='Tipo de mercadoria\\nConsulte as mercadorias não transportadas em: https://example.invalid/restricoes\\nMaterial longo, somente até 3 metros.\\n1 - Diversos\\n2 - Metais\\n3 - Químico'
