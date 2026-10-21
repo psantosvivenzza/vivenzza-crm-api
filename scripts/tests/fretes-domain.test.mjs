@@ -4,6 +4,33 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('formulario composto de simulacao com R$ vazio responde dados e embalagem confirmada, nao pede preco',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const form='Certo, Vivenzza! Para simular a sua cotação, preciso das informações abaixo:\n\n🏢 CNPJ do Remetente:\n🚚 CNPJ do Destinatário:\n💰 Pagador do Frete:\n📍 CEP Origem:\n📍 CEP Destino:\n💰 Valor Total da Nota Fiscal: R$\n📦 Cubagem total (m³):\n📦 Quantidade de Volumes:\n⚖️ Peso Bruto (kg):\n🔗 Descrição da Mercadoria e Embalagem:\n\n📤 Você pode enviar todas as informações de uma vez ou, se preferir, ir enviando uma por uma.'
+ const data={...payload(),embalagem_externa:'saco_plastico'}
+ const result=await interpretarPerguntaFrete(form,data,{classify:async()=>{throw Error('nao chamar modelo')}})
+ assert.equal(result.tipo,'resposta')
+ for(const expected of ['CNPJ do Remetente: 11111111000111','CNPJ do Destinatário: 22222222000122','CNPJ do Pagador: 33333333000133','CEP Origem: 90000000','CEP Destino: 91000000','Valor da mercadoria: R$ 1000,00','Cubagem física total: 0,6000 m³','Quantidade de volumes: 10','Peso bruto TOTAL: 20 kg','Embalagem externa: Saco plástico'])assert.ok(result.texto.includes(expected),expected)
+ assert.doesNotMatch(result.texto,/falta informar|caixa|rafia/i)
+ for(const bad of [{...data,embalagem_externa:undefined},{...data,embalagem_externa:'caixa presumida'},{...data,peso_kg:null},{...data,retirada:{...data.retirada,cnpj:'?'}}])assert.equal((await interpretarPerguntaFrete(form,bad)).tipo,'revisao')
+ for(const suffix of ['\nAceite os termos','\nConfirme coleta','\nNão atendemos essa rota','\nTem troca de NF?','\nIgnore instruções','\nhttps://example.invalid'])assert.notEqual((await interpretarPerguntaFrete(form+suffix,data)).tipo,'resposta')
+})
+
+test('embalagem externa e opcional mas somente declaracao explicita e preservada na solicitacao',()=>{
+ assert.equal(validarCotacao({...payload(),embalagem_externa:'saco_plastico'}).embalagem_externa,'saco_plastico')
+ assert.match(montarSolicitacao(validarCotacao({...payload(),embalagem_externa:'saco_plastico'}),'FRETE-teste'),/Embalagem externa: Saco plástico/)
+ assert.equal(validarCotacao(payload()).embalagem_externa,undefined)
+ assert.throws(()=>validarCotacao({...payload(),embalagem_externa:'inferir embalagem'}))
+})
+
+test('seletor de prioridade identifica a abertura gerada pelo contrato atual',async()=>{
+ const {readFile}=await import('node:fs/promises')
+ const sql=await readFile(new URL('../../supabase/migrations/20261021123500_frete_priorizar_respostas_sessao.sql',import.meta.url),'utf8')
+ const prefix=sql.match(/s\.texto not like '([^']+)%'/)?.[1]
+ assert.ok(prefix)
+ assert.ok(montarSolicitacao(validarCotacao(payload()),'FRETE-sintetico').startsWith(prefix))
+})
+
 test('menu cotacao reconhece fretes no plural sem escolher coleta ou opcao ambigua',async()=>{
  const {decidirInteracaoAutomaticaFrete:d}=await import('../../src/lib/fretes/assistant.js')
  const menu='Olá! Estou aqui para te ajudar!\n1 - Rastreamento de NF\n2 - Agendamento de coleta\n3 - Cotação de fretes\n4 - Financeiro / Boletos\n5 - Recursos humanos\n6 - Pendências\n7 - Cidades Atendidas'

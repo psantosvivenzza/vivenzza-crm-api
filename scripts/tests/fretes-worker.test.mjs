@@ -6,6 +6,21 @@ const { runFreteQueue } = await import('../../src/lib/fretes/worker.js')
 const { handleFreteInbound } = await import('../../src/lib/fretes/inbound.js')
 const { decidirRespostaFrete } = await import('../../src/lib/fretes/assistant.js')
 
+test('formulario composto vazio percorre inbound reserva worker com embalagem e sem duplicar',async()=>{
+ const f=fixture();f.tables.frete_envios=[]
+ f.tables.frete_cotacoes[0].dados={descricao:'Embalagens sintéticas',embalagem_externa:'saco_plastico',peso_kg:20,valor_mercadoria:1000,volumes:[{quantidade:2,comprimento_cm:50,largura_cm:40,altura_cm:30}],retirada:{cnpj:'11111111000111',cep:'90000000'},entrega:{cnpj:'22222222000122',cep:'91000000'},pagador:{cnpj:'33333333000133'}}
+ const texto='Certo, Vivenzza! Para simular a sua cotação, preciso das informações abaixo:\n\n🏢 CNPJ do Remetente:\n🚚 CNPJ do Destinatário:\n💰 Pagador do Frete:\n📍 CEP Origem:\n📍 CEP Destino:\n💰 Valor Total da Nota Fiscal: R$\n📦 Cubagem total (m³):\n📦 Quantidade de Volumes:\n⚖️ Peso Bruto (kg):\n🔗 Descrição da Mercadoria e Embalagem:\n\n📤 Você pode enviar todas as informações de uma vez ou, se preferir, ir enviando uma por uma.'
+ const event={instanceName:'vivenzza-financeiro',telefone:f.phone,texto,evolutionId:'form-composite-id'}
+ const opts={db:f.db,installed:true,assistantEnabled:true}
+ await handleFreteInbound(event,opts);await handleFreteInbound(event,opts)
+ assert.equal(f.tables.frete_envios.length,1);assert.equal(f.tables.frete_consultas[0].completa,false)
+ assert.match(f.tables.frete_envios[0].texto,/Embalagem externa: Saco plástico/)
+ assert.doesNotMatch(f.tables.frete_envios[0].texto,/falta informar/)
+ let sent=0
+ assert.equal((await runFreteQueue({...f.opts,assistantEnabled:true,send:async(_i,_p,body)=>{sent++;assert.match(body,/CNPJ do Pagador: 33333333000133/);return{ok:true,providerMessageId:'synthetic-composite-sent'}}})).status,'enviado')
+ assert.equal(sent,1);assert.equal(f.tables.frete_consultas[0].ia_pausada,false)
+})
+
 test('boas vindas separada do menu preserva sessao e reserva somente cotacao uma vez',async()=>{
  const f=fixture(),q=f.tables.frete_consultas[0],opts={db:f.db,installed:true,assistantEnabled:true}
  const base={instanceName:'vivenzza-financeiro',telefone:f.phone,fromMe:false}

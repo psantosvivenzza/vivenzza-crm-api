@@ -70,6 +70,8 @@ test.before(async () => {
  await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
  await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
  await sql.query(await readFile(new URL('../../supabase/migrations/20261020154037_frete_fila_por_transportadora.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261021123500_frete_priorizar_respostas_sessao.sql',import.meta.url),'utf8'))
+ await sql.query("alter table whatsapp_instances add column if not exists connection_status text default 'connected', add column if not exists health_status text default 'healthy', add column if not exists cooldown_until timestamptz")
  await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
@@ -79,6 +81,29 @@ test.before(async () => {
  }catch(e){await sql.query('rollback');console.error('SETUP LOCAL',e.message);throw e}
 })
 let phoneSequence=100
+
+test('prioridade de sessao: pergunta atual precede abertura, preserva FIFO da consulta e cadencia',async()=>{
+ await sql.query('begin')
+ try{
+  await sql.query('update frete_consultas set ia_pausada=true')
+  await sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where attempted_at is not null")
+  const fs=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values('PRIOR-A','Contato sintetico A',true,'5551999901001',true),('PRIOR-B','Contato sintetico B',true,'5551999901002',true) returning id,telefone_cotacao_frete`)).rows
+  const cs=(await sql.query("insert into frete_cotacoes(dados,criado_por) values('{}','test-priority'),('{}','test-priority') returning id")).rows
+  const qs=[]
+  for(let i=0;i<2;i++)qs.push((await sql.query("insert into frete_consultas(cotacao_id,fornecedor_id,nome_transportadora,telefone,status,ia_pausada) values($1,$2,'Sintetica',$3,'aguardando',false) returning id",[cs[i].id,fs[i].id,fs[i].telefone_cotacao_frete])).rows[0].id)
+  const initial=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key,created_at) values($1,$2,'Abertura sintetica','prioridade-abertura',now()-interval '2 minutes') returning id",[qs[0],fs[0].telefone_cotacao_frete])).rows[0].id
+  const m=(await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto,evolution_id,created_at) values($1,$2,'entrada','1 - Coleta; 3 - Cotacao','prioridade-menu',now()-interval '1 minute') returning id",[cs[1].id,qs[1]])).rows[0].id
+  const answer=(await sql.query("insert into frete_envios(consulta_id,mensagem_id,telefone,texto,idempotency_key,created_at) values($1,$2,$3,'3','prioridade-resposta',now()-interval '50 seconds') returning id",[qs[1],m,fs[1].telefone_cotacao_frete])).rows[0].id
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,answer,'menu atual nao deve esperar abertura de outro contato')
+  const earlier=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key,created_at) values($1,$2,'Mensagem anterior da mesma consulta','prioridade-fifo',now()-interval '3 minutes') returning id",[qs[1],fs[1].telefone_cotacao_frete])).rows[0].id
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,earlier,'prioridade nao ultrapassa mensagem anterior da mesma consulta')
+  await sql.query('update frete_consultas set ia_pausada=true where id=$1',[qs[1]])
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,initial,'pausa preservada')
+  assert.ok((await sql.query('select frete_claim_envio($1) result',[initial])).rows[0].result)
+  await sql.query('update frete_consultas set ia_pausada=false where id=$1',[qs[1]])
+  assert.equal((await sql.query('select frete_claim_envio($1) result',[earlier])).rows[0].result,null,'cadencia continua bloqueando segunda tentativa imediata')
+ }finally{await sql.query('rollback')}
+})
 test.beforeEach(async t=>{
  // Cenários de uma conversa usam contatos independentes. Reutilização é
  // exercitada explicitamente no teste da fila, sem esconder histórico real.
@@ -170,6 +195,17 @@ test.after(async () => {
  await sql.query('update frete_orcamento_controle set ativo=false where id=1')
  if (server) await new Promise(r => server.close(r)); await db._pool.end(); await sql.end()
 })
+test('API preserva embalagem declarada no JSON e rejeita embalagem inferida ou malformada',async()=>{
+ const isolated=(await sql.query("insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Embalagem sintetica',true,'5551999876001',true) returning id",['EMBALAGEM-'+Date.now()])).rows[0].id
+ const created=await request('/','POST',{...payload(),transportadora_ids:[isolated],embalagem_externa:'saco_plastico'})
+ assert.equal(created.status,201)
+ try{
+  const detail=await request(`/${created.data.id}`)
+  assert.equal(detail.data.cotacao.dados.embalagem_externa,'saco_plastico')
+  for(const embalagem_externa of ['inferir embalagem',['pallet']])assert.equal((await request('/','POST',{...payload(),embalagem_externa})).status,400)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:created.data.id,p_actor:'test'})}
+})
+
 test('API restringe vendedores e exige autenticação antes de ler fornecedor', async () => {
  assert.equal((await request('/transportadoras', 'GET', undefined, 'vendedor')).status, 403)
  assert.equal((await fetch(`${base}/transportadoras`)).status, 401)
@@ -192,6 +228,7 @@ test('RPC aceita 50 participantes, rejeita 51 e preserva permissao de servico', 
  }
 })
 test('cotação mantém FK e permite novos rascunhos com contato ocupado e variante do telefone', async () => {
+ const before=(await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1',['test-actor'])).rows[0].n
  const result = await request('/', 'POST', payload()); assert.equal(result.status, 201); cotacao = result.data
  assert.ok(cotacao.id)
  const row = (await sql.query('select fornecedor_id,telefone from frete_consultas where cotacao_id=$1', [cotacao.id])).rows[0]
@@ -202,7 +239,7 @@ test('cotação mantém FK e permite novos rascunhos com contato ocupado e varia
  const variante = original.slice(0, 4) + original.slice(5)
  const outro = (await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete) values($1,'Outra filial teste',true,$2) returning id`, [`VAR-${Date.now()}`, variante])).rows[0].id
  try { const outra=await request('/', 'POST', { ...payload(), transportadora_ids: [outro] });assert.equal(outra.status,201);await sql.query('delete from frete_consultas where cotacao_id=$1',[outra.data.id]);await sql.query('delete from frete_cotacoes where id=$1',[outra.data.id]) } finally { await sql.query('delete from fornecedores where id=$1', [outro]) }
- assert.equal((await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1', ['test-actor'])).rows[0].n, 1)
+ assert.equal((await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1', ['test-actor'])).rows[0].n, before+1)
 })
 test('fila desligada não envia, dupla solicitação é idempotente e claim concorrente é único', async () => {
  assert.equal((await request(`/${cotacao.id}/enviar`, 'POST', {})).status, 409)

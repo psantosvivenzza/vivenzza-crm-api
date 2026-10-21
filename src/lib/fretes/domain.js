@@ -29,16 +29,20 @@ function parte(v, nome, local = true, aceitarCpf = false) {
   }
   return p
 }
+const EMBALAGENS_FRETE=Object.freeze({saco_plastico:'Saco plástico',caixa_papelao:'Caixa de papelão',saco_rafia:'Saco de ráfia',pallet:'Pallet'})
+export function rotuloEmbalagemFrete(value){return typeof value==='string'&&Object.hasOwn(EMBALAGENS_FRETE,value)?EMBALAGENS_FRETE[value]:null}
 export function validarCotacao(body) {
   if(!body) falhar('Informe os dados da cotação.')
   const agregado=body.modo_volumes==='cubagem_total'
   if(!agregado && (!Array.isArray(body.volumes)||body.volumes.length<1||body.volumes.length>30))falhar('Informe de 1 a 30 grupos de volumes.')
   if(body.pedido_origem && (typeof body.pedido_origem!=='object'||!UUID.test(body.pedido_origem.id??'')||!/^\d{1,3}-\d{1,10}$/.test(body.pedido_origem.referencia??'')))falhar('Pedido de origem inválido.')
   if(body.pedido_origem && body.dados_importados_conferidos!==true)falhar('Confira os dados importados, as unidades kg/m³, a carga embalada e o valor da mercadoria antes de salvar.')
+  if(body.embalagem_externa!=null&&body.embalagem_externa!==''&&!rotuloEmbalagemFrete(body.embalagem_externa))falhar('Informe a embalagem externa confirmada, sem inferir equivalentes.')
   const ids = body.transportadora_ids
   if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some(id => typeof id !== 'string' || !UUID.test(id)) || new Set(ids).size !== ids.length) falhar('Selecione de 1 a 50 transportadoras distintas.')
   return {
     descricao: texto(body.descricao, 'Mercadoria', 300),
+    ...(rotuloEmbalagemFrete(body.embalagem_externa)?{embalagem_externa:body.embalagem_externa}:{}),
     valor_mercadoria: Math.round(numero(body.valor_mercadoria, 'Valor da mercadoria', 1e9) * 100) / 100,
     peso_kg: numero(body.peso_kg, 'Peso bruto total', 1e6),
     modo_volumes:agregado?'cubagem_total':'medidas',
@@ -78,6 +82,7 @@ export function montarSolicitacao(d, referencia) {
   return [
     `Olá! Sou o assistente de cotações da Vivenzza. Solicitação de frete ${referencia}.`,
     `Mercadoria: ${d.descricao}. Valor transportado: ${dinheiro}. Peso bruto TOTAL: ${d.peso_kg} kg.`,
+    rotuloEmbalagemFrete(d.embalagem_externa)?`Embalagem externa: ${rotuloEmbalagemFrete(d.embalagem_externa)}.`:null,
     ...(d.modo_volumes==='cubagem_total'?[`${d.quantidade_volumes} volume(s); cubagem física total informada: ${d.cubagem_m3} m³. Medidas individuais não informadas.`]:d.volumes.map(v => `${v.quantidade} volume(s) de ${v.comprimento_cm} × ${v.largura_cm} × ${v.altura_cm} cm.`)),
     d.modo_volumes==='cubagem_total'?null:`Cubagem física total: ${cubagemM3(d.volumes).toFixed(4)} m³.`,
     `Retirada: ${d.retirada.nome}, CNPJ ${d.retirada.cnpj}, CEP ${d.retirada.cep}, ${d.retirada.endereco}.`,
