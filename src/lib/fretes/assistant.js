@@ -70,7 +70,9 @@ export function decidirInteracaoAutomaticaFrete(texto,dados={}) {
  if(!guard(texto)&&!t.split(/\r?\n/).some(l=>menuLine.test(l.trim()))&&!/[?]|\b(?:aceite|aceitar|concord\w*|confirme|confirmar|senha|token)\b/.test(t)&&(/por gentileza, informe os dados a seguir para o calculo do frete:\s*$/.test(t)||t.includes('antes de iniciarmos sua cotacao')||t.includes('mercadorias nao transportadas')))return {tipo:'aguardar'}
  if(guard(texto)!=='revisao'&&!/destinat|remet|transportador|motorista|filial/.test(t)&&/\b(?:informe|digite)\s+(?:o\s+)?seu\s+cnpj(?:\s*(?:ou|\/)\s*cpf)?[:.!?\s]*$/.test(t)&&/^\d{14}$/.test(dados.pagador?.cnpj||''))return {tipo:'resposta',texto:dados.pagador.cnpj}
  if(/^(?:por (?:favor|gentileza)[, ]*)?(?:informe|digite|qual(?: e)?|como (?:voce )?(?:gostaria de ser chamado|se chama)).{0,35}(?:seu nome|nome por gentileza)|^informe seu nome[.!]?$|^como voce gostaria de ser chamado\?$/.test(t))return {tipo:'resposta',texto:'Assistente de cotações da Vivenzza Professional'}
- if(/^(?:ola[,! ]*)?(?:boa tarde|bom dia|boa noite)(?:[,! .]*(?:tudo bem\??))?[!. ]*$/.test(t))return {tipo:'resposta',texto:'Olá! Sou o assistente de cotações da Vivenzza. Buscamos o valor total do frete com todas as taxas, prazo em dias úteis e validade. Posso esclarecer os dados da solicitação já enviada.'}
+ // Saudações equivalentes usam a mesma identidade limitada, sem modelo ou dados da carga.
+ // Âncoras fechadas: prosa adicional, preço, recusa, termos e menus não entram aqui.
+ if(!guard(texto)&&/^(?:(?:ola|oi)(?:[,! .]+(?:boa tarde|bom dia|boa noite))?|boa tarde|bom dia|boa noite)(?:[,! .]*(?:tudo bem\??))?[!. ]*$/.test(t.replace(/\s+/g,' ')))return {tipo:'resposta',texto:'Olá! Sou o assistente de cotações da Vivenzza. Buscamos o valor total do frete com todas as taxas, prazo em dias úteis e validade. Posso esclarecer os dados da solicitação já enviada.'}
  const lines=t.split(/\r?\n/)
  const options=lines.map(line=>line.trim().match(menuLine)).filter(Boolean)
  if(options.length>=2){

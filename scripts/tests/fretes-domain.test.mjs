@@ -4,6 +4,21 @@ import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSo
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
 
+test('saudacoes equivalentes recebem identidade limitada sem modelo nem pausa',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ let called=0,identity
+ for(const text of ['Bom dia','Boa tarde!','Boa noite.','Olá!','Oi','Oi, tudo bem?','Bom dia\nTudo bem?']) {
+  const result=await interpretarPerguntaFrete(text,payload(),{classify:async()=>{called++;return{acao:'desconhecido'}}})
+  assert.equal(result.tipo,'resposta',text);assert.match(result.texto,/assistente de cotações da Vivenzza/)
+  identity??=result.texto;assert.equal(result.texto,identity)
+ }
+ assert.equal(called,0)
+ for(const [text,tipo] of [['Bom dia, não atendemos essa rota','revisao'],['Olá, pare de me contatar','opt_out'],['Oi, aceite os termos','revisao'],['Bom dia, confirme coleta','revisao'],['Bom dia, CNPJ do remetente?','resposta'],['Bom dia, total R$ 100','proposta'],['Bom dia https://example.invalid','revisao'],['Boa tarde, quero falar com atendente','revisao'],['Tudo bem','revisao'],['Tudo bem!','revisao'],['Tudo bem?','revisao']]){
+  const result=await interpretarPerguntaFrete(text,payload(),{classify:async()=>({acao:'desconhecido'})})
+  assert.equal(result.tipo,tipo,text);assert.notEqual(result.texto,identity,text)
+ }
+})
+
 test('formulario composto de simulacao com R$ vazio responde dados e embalagem confirmada, nao pede preco',async()=>{
  const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
  const form='Certo, Vivenzza! Para simular a sua cotação, preciso das informações abaixo:\n\n🏢 CNPJ do Remetente:\n🚚 CNPJ do Destinatário:\n💰 Pagador do Frete:\n📍 CEP Origem:\n📍 CEP Destino:\n💰 Valor Total da Nota Fiscal: R$\n📦 Cubagem total (m³):\n📦 Quantidade de Volumes:\n⚖️ Peso Bruto (kg):\n🔗 Descrição da Mercadoria e Embalagem:\n\n📤 Você pode enviar todas as informações de uma vez ou, se preferir, ir enviando uma por uma.'

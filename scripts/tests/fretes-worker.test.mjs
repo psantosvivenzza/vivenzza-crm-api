@@ -6,6 +6,23 @@ const { runFreteQueue } = await import('../../src/lib/fretes/worker.js')
 const { handleFreteInbound } = await import('../../src/lib/fretes/inbound.js')
 const { decidirRespostaFrete } = await import('../../src/lib/fretes/assistant.js')
 
+test('oi isolado recebe identidade uma vez e proximo menu atual segue sem pausa',async()=>{
+ const {interpretarPerguntaFrete}=await import('../../src/lib/fretes/assistant.js')
+ const f=fixture(),q=f.tables.frete_consultas[0],initial=f.tables.frete_envios.length
+ const opts={db:f.db,installed:true,assistantEnabled:true,interpret:(text,data)=>interpretarPerguntaFrete(text,data,{classify:async()=>{throw Error('nao chamar modelo')}})}
+ const event={instanceName:'vivenzza-financeiro',telefone:f.phone,texto:'Oi',evolutionId:'basic-greeting'}
+ await handleFreteInbound(event,opts);await handleFreteInbound(event,opts)
+ assert.equal(q.ia_pausada,false);assert.equal(f.tables.frete_envios.length,initial+1)
+ assert.match(f.tables.frete_envios.at(-1).texto,/assistente de cotações da Vivenzza/)
+ const menu={...event,texto:'1 - SAC\n2 - Cotação de frete\n3 - Coleta',evolutionId:'basic-next-menu'}
+ await handleFreteInbound(menu,opts);await handleFreteInbound(menu,opts)
+ assert.equal(q.ia_pausada,false);assert.equal(f.tables.frete_envios.length,initial+2)
+ assert.equal(f.tables.frete_envios.at(-1).texto,'2')
+ await handleFreteInbound({...event,evolutionId:'basic-greeting-new-id'},opts)
+ assert.equal(q.ia_pausada,true,'Par idêntico com ID novo preserva proteção de loop existente')
+ assert.equal(f.tables.frete_envios.length,initial+2)
+})
+
 test('formulario composto vazio percorre inbound reserva worker com embalagem e sem duplicar',async()=>{
  const f=fixture();f.tables.frete_envios=[]
  f.tables.frete_cotacoes[0].dados={descricao:'Embalagens sintéticas',embalagem_externa:'saco_plastico',peso_kg:20,valor_mercadoria:1000,volumes:[{quantidade:2,comprimento_cm:50,largura_cm:40,altura_cm:30}],retirada:{cnpj:'11111111000111',cep:'90000000'},entrega:{cnpj:'22222222000122',cep:'91000000'},pagador:{cnpj:'33333333000133'}}

@@ -105,11 +105,16 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
   router.get('/:id', handler(async (req, res) => {
     const row = await cotacao(req.params.id)
     const consultas = check(await db.from('frete_consultas').select('*').eq('cotacao_id', row.id).order('nome_transportadora')) ?? []
-    const envios = check(await db.from('frete_envios').select('id,consulta_id,status,error_code,created_at,attempted_at').in('consulta_id', consultas.map(c => c.id)).order('created_at', { ascending: false }).limit(200)) ?? []
-    const mensagens = check(await db.from('frete_mensagens').select('*').eq('cotacao_id', row.id).order('created_at', { ascending: false }).limit(500)) ?? []
-    const anexos=check(await db.from('frete_anexos').select('mensagem_id,status,mimetype').eq('cotacao_id',row.id))??[]
     const telefones=[...new Set(consultas.flatMap(c=>c.telefone?candidatosTelefone(c.telefone):[]))]
-    const pendentes=telefones.length?check(await db.from('frete_respostas_pendentes').select('id,telefone,texto,created_at,anexo_status,mimetype').is('consulta_id',null).eq('instance_name','vivenzza-financeiro').in('telefone',telefones).order('created_at').limit(100))??[]:[]
+    // All four reads depend only on the quote/consultations already loaded.
+    // Do not make the screen wait for four consecutive database round trips.
+    // Validate every result before returning any part of the detail.
+    const [envios, mensagens, anexos, pendentes] = (await Promise.all([
+      db.from('frete_envios').select('id,consulta_id,status,error_code,created_at,attempted_at').in('consulta_id', consultas.map(c => c.id)).order('created_at', { ascending: false }).limit(200),
+      db.from('frete_mensagens').select('*').eq('cotacao_id', row.id).order('created_at', { ascending: false }).limit(500),
+      db.from('frete_anexos').select('mensagem_id,status,mimetype').eq('cotacao_id',row.id),
+      telefones.length ? db.from('frete_respostas_pendentes').select('id,telefone,texto,created_at,anexo_status,mimetype').is('consulta_id',null).eq('instance_name','vivenzza-financeiro').in('telefone',telefones).order('created_at').limit(100) : Promise.resolve({data:[],error:null})
+    ])).map(result=>check(result)??[])
     for(const consulta of consultas)consulta.respostas_pendentes=pendentes.filter(p=>telefonesEquivalentes(p.telefone,consulta.telefone))
     res.json({ cotacao: row, consultas: consultas.map(c => ({ ...c, envios: envios.filter(e => e.consulta_id === c.id), mensagens: mensagens.filter(m => m.consulta_id === c.id).reverse().map(m=>({...m,anexo:anexos.find(a=>a.mensagem_id===m.id)||null})) })), comparativo: compararPropostas(consultas, row.dados), config: CONFIG() })
   }))

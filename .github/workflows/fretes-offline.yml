@@ -33,7 +33,7 @@ jobs:
       - name: Offline freight domain, conversations, menus and attachments
         # Explicit set excludes database integration and operational scripts.
         # Add new offline files here deliberately; never auto-include DB tests.
-        run: node --test scripts/tests/fretes-domain.test.mjs scripts/tests/fretes-worker.test.mjs scripts/tests/fretes-proposal.test.mjs scripts/tests/fretes-envelope.test.mjs scripts/tests/fretes-progress.test.mjs scripts/tests/fretes-attachments.test.mjs
+        run: node --test scripts/tests/fretes-domain.test.mjs scripts/tests/fretes-worker.test.mjs scripts/tests/fretes-proposal.test.mjs scripts/tests/fretes-envelope.test.mjs scripts/tests/fretes-progress.test.mjs scripts/tests/fretes-attachments.test.mjs scripts/tests/fretes-detail-read.test.mjs
       - name: Syntax only (no worker, migration or sending)
         shell: bash
         run: |
