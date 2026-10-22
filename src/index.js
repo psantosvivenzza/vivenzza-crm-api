@@ -54,6 +54,7 @@ import { runBackup } from './jobs/backup.js'
 import { runMetaReport } from './jobs/meta-report.js'
 import { runMetaBudgetGuard } from './jobs/meta-budget-guard.js'
 import { runHandoffAlerta } from './jobs/handoff-alerta.js'
+import { runLeadsParadosAlerta } from './jobs/leads-parados-alerta.js'
 import { runEvolutionHealthCheck } from './jobs/evolution-health.js'
 import { executarReguaCobranca } from './jobs/cobranca-whatsapp.js'
 import { runMonitoramentoResposta } from './jobs/monitoramento-resposta.js'
@@ -321,6 +322,16 @@ cron.schedule('0 * * * *', async () => {
     await runHandoffAlerta()
   } catch (err) {
     console.error('[cron handoff-alerta] Erro:', err.message)
+  }
+})
+
+// Alerta de leads parados em "Novo" — seg-sex 09h, 13h e 17h (Brasília = 12/16/20 UTC).
+// No máximo 2 mensagens por rodada (comercial + cópia gestão).
+cron.schedule('0 12,16,20 * * 1-5', async () => {
+  try {
+    await runLeadsParadosAlerta()
+  } catch (err) {
+    console.error('[cron leads-parados] Erro:', err.message)
   }
 })
 
