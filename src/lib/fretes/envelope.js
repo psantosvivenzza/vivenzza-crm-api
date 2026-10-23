@@ -10,8 +10,8 @@ export function lerEnvelopeFrete(msg) {
  const reference=typeof context?.stanzaId==='string'?{referencedEvolutionId:context.stanzaId}:{}
  const menu=c.listMessage||c.buttonsMessage
  if(menu){
-  const rows=c.listMessage?(menu.sections||[]).flatMap(s=>s.rows||[]):menu.buttons||[]
-  const labels=rows.slice(0,30).map((r,i)=>`${i+1} - ${String(r.title||r.buttonText?.displayText||'').replace(/[\r\n]/g,' ').slice(0,100)}`)
+  const rows=c.listMessage?(Array.isArray(menu.sections)?menu.sections:[]).flatMap(s=>Array.isArray(s?.rows)?s.rows:[]):Array.isArray(menu.buttons)?menu.buttons:[]
+  const labels=rows.slice(0,30).map((r,i)=>`${i+1} - ${String(r?.title||r?.buttonText?.displayText||'').replace(/[\r\n]/g,' ').slice(0,100)}`)
   return {texto:[menu.contentText||menu.description||'',...labels].join('\n').slice(0,5000),mediaTipo:null,mediaMessage:null,interativo:true,...reference}
  }
  for(const [key,tipo] of [['documentMessage','document'],['imageMessage','image'],['audioMessage','audio'],['videoMessage','video']])if(c[key]){
