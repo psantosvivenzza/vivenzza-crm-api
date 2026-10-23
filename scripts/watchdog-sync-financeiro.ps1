@@ -231,7 +231,7 @@ while ($true) {
     # confirmada, o Handle preenchido no resultado precisa ser preservado.
     $resultadoPartida = Invoke-SyncFinanceiroWatchdogPartidaTransacional -Raiz $raiz -GeracaoId $geracaoIdAtual `
       -IniciarProcesso {
-      $h = Start-SyncFinanceiroWorkerProcesso -FileName 'node.exe' -Argumentos "$nomeScriptWorker --watch" -WorkingDirectory $raiz -LogPath $logWorkerPath
+      $h = Start-SyncFinanceiroWorkerProcesso -FileName 'node.exe' -Argumentos "$nomeScriptWorker --watch --sem-alertas" -WorkingDirectory $raiz -LogPath $logWorkerPath
       Log "worker iniciado (PID $($h.Processo.Id), StartTime=$($h.Processo.StartTime.ToString('o')), node.exe direto - sem cmd.exe intermediario)"
       $h
     } `
