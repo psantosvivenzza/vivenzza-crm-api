@@ -44,8 +44,11 @@ export async function verificarStatusSyncFiscal({ clienteSupabase = supabase } =
     if (!data) return resultado({ disponivel: false, reason: 'nunca_sincronizou', maxAgeMinutes: maxAtrasoMin })
     if (data.status === 'falhou') return resultado({ disponivel: false, reason: 'ultimo_sync_falhou', lastSyncAt: data.concluido_em ?? data.iniciado_em, maxAgeMinutes: maxAtrasoMin })
     if (data.status === 'executando') return resultado({ disponivel: false, reason: 'ultimo_sync_em_andamento', maxAgeMinutes: maxAtrasoMin })
-    if (Number(data.total_com_erro || 0) > 0) {
+    if (data.status === 'concluido_com_erros' || Number(data.total_com_erro || 0) > 0) {
       return resultado({ disponivel: false, reason: 'ultimo_sync_com_erros', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
+    }
+    if (data.status !== 'concluido') {
+      return resultado({ disponivel: false, reason: 'ultimo_sync_status_invalido', lastSyncAt: data.concluido_em ?? data.iniciado_em, maxAgeMinutes: maxAtrasoMin })
     }
     if (!data.concluido_em) return resultado({ disponivel: false, reason: 'ultimo_sync_sem_timestamp_conclusao', maxAgeMinutes: maxAtrasoMin })
 
@@ -54,7 +57,11 @@ export async function verificarStatusSyncFiscal({ clienteSupabase = supabase } =
       return resultado({ disponivel: false, reason: 'timestamp_invalido', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
     }
 
-    const ageMinutes = Math.round((Date.now() - concluidoEm.getTime()) / 60000)
+    const agoraMs = Date.now()
+    if (concluidoEm.getTime() > agoraMs) {
+      return resultado({ disponivel: false, reason: 'timestamp_futuro', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
+    }
+    const ageMinutes = Math.round((agoraMs - concluidoEm.getTime()) / 60000)
     if (ageMinutes > maxAtrasoMin) {
       return resultado({ disponivel: false, reason: 'sync_desatualizado', lastSyncAt: data.concluido_em, ageMinutes, maxAgeMinutes: maxAtrasoMin })
     }
