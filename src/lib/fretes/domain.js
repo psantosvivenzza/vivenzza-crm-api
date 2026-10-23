@@ -102,7 +102,10 @@ export function validarProposta(body) {
   return { valor_total, prazo_dias, validade, completa: body.completa, protocolo: texto(body.protocolo ?? '', 'Protocolo', 100, false), observacoes: texto(body.observacoes ?? '', 'Observações', 1000, false), ia_pausada: body.completa ? true : (body.ia_pausada ?? true) }
 }
 export function compararPropostas(propostas, { max_prazo_dias = null } = {}, now = new Date()) {
-  const validas = propostas.filter(p => p.completa === true && ['recebida', 'encerrada'].includes(p.status) && Number(p.valor_total) > 0 && p.prazo_dias != null && Number.isInteger(Number(p.prazo_dias)) && Number(p.prazo_dias) >= 0 && p.validade && Date.parse(p.validade) > +now)
+  // Numeric do banco pode vir como string; não converter booleanos/arrays
+  // nem aceitar Infinity, que corromperia o ranking e a média.
+  const numericoFinito = v => ['number', 'string'].includes(typeof v) && String(v).trim() !== '' && Number.isFinite(Number(v))
+  const validas = propostas.filter(p => p.completa === true && ['recebida', 'encerrada'].includes(p.status) && numericoFinito(p.valor_total) && Number(p.valor_total) > 0 && Number(p.valor_total) <= 1e9 && numericoFinito(p.prazo_dias) && Number.isInteger(Number(p.prazo_dias)) && Number(p.prazo_dias) >= 0 && p.validade && Date.parse(p.validade) > +now)
     .map(p => ({ ...p, valor_total: Number(p.valor_total), prazo_dias: Number(p.prazo_dias) }))
   const preco = [...validas].sort((a, b) => a.valor_total - b.valor_total || a.prazo_dias - b.prazo_dias || a.id.localeCompare(b.id))
   const prazo = [...validas].sort((a, b) => a.prazo_dias - b.prazo_dias || a.valor_total - b.valor_total || a.id.localeCompare(b.id))

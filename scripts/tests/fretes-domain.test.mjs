@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { validarCotacao, validarProposta, compararPropostas, cubagemM3, montarSolicitacao, validarConfigTransportadora } from '../../src/lib/fretes/domain.js'
 const payload = () => ({ descricao: 'Embalagens', valor_mercadoria: 1000, peso_kg: 20, volumes: [{ quantidade: 10, comprimento_cm: 50, largura_cm: 40, altura_cm: 30 }], retirada: { nome: 'Indústria A', cnpj: '11111111000111', cep: '90000000', endereco: 'Rua A' }, entrega: { nome: 'Indústria B', cnpj: '22222222000122', cep: '91000000', endereco: 'Rua B' }, pagador: { nome: 'Vivenzza', cnpj: '33333333000133' }, transportadora_ids: ['11111111-1111-4111-8111-111111111111'], max_prazo_dias: 3 })
 const proposta = (id, valor_total, prazo_dias, extra = {}) => ({ id, valor_total, prazo_dias, completa: true, status: 'recebida', validade: '2030-01-01T00:00:00Z', ...extra })
+
 test('entrega entre indústrias preserva pagador terceiro, peso total e cubagem independente', () => {
  const d = validarCotacao(payload())
  assert.equal(cubagemM3(d.volumes), .6)
