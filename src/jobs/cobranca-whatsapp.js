@@ -11,7 +11,7 @@ import { contarTentativasReaisDesde } from '../lib/collection/providerAttemptCou
 // financeiro que a instância está estável.
 const LIMITE_DIARIO = 30
 const LIMITE_POR_HORA = 10
-const HORA_INICIO_BRT = 8
+const HORA_INICIO_BRT = 9
 const HORA_FIM_BRT = 17 // exclusivo — não dispara mais a partir das 17h
 
 // Kill-switch — ao contrário de automacoes_config.reativacao_ativa (que é opt-out,
@@ -41,7 +41,8 @@ function horaBrtAgora() {
 // abaixo) muda.
 export function dentroDoHorarioPermitido() {
   const hora = horaBrtAgora()
-  return hora >= HORA_INICIO_BRT && hora < HORA_FIM_BRT
+  const diaBrt = new Date(Date.now() - 3 * 60 * 60 * 1000).getUTCDay()
+  return diaBrt >= 1 && diaBrt <= 5 && hora >= HORA_INICIO_BRT && hora < HORA_FIM_BRT
 }
 
 // Meia-noite BRT = 03:00 UTC do mesmo dia (BRT = UTC-3).
@@ -115,7 +116,7 @@ function resumoVazio(paradoPor = null) {
 // rajada que causou a suspensão).
 let emExecucao = false
 
-// Núcleo da régua — usado tanto pelo cron (a cada 15 min, 08h-17h BRT, seg-sex)
+// Núcleo da régua — usado tanto pelo cron (a cada 15 min, 09h-17h BRT, seg-sex)
 // quanto por POST /api/cobrancas/disparar. `origem` sempre 'cron' aqui: disparo
 // manual em massa usa a mesma função porque é o mesmo conceito de "rodar a régua
 // agora" — e por isso também respeita os mesmos limites/intervalos abaixo.
@@ -131,7 +132,7 @@ export async function executarReguaCobranca() {
   }
 
   if (!dentroDoHorarioPermitido()) {
-    console.log('[cobranca-whatsapp] fora do horário permitido (08h-17h BRT) — nada enviado, aguardando próximo ciclo')
+    console.log('[cobranca-whatsapp] fora do horário permitido (09h-17h BRT) — nada enviado, aguardando próximo ciclo')
     return resumoVazio('fora_do_horario')
   }
 
@@ -219,7 +220,7 @@ export async function executarReguaCobranca() {
       // verdade, então uma execução longa pode cruzar a virada da hora ou o
       // fim da janela no meio do caminho.
       if (!dentroDoHorarioPermitido()) {
-        console.log('[cobranca-whatsapp] saiu da janela de 08h-17h BRT no meio da execução — parando, aguarda próximo ciclo')
+        console.log('[cobranca-whatsapp] saiu da janela de 09h-17h BRT no meio da execução — parando, aguarda próximo ciclo')
         resumo.paradoPor = 'fora_do_horario'
         break
       }
@@ -280,6 +281,12 @@ export async function executarReguaCobranca() {
       // dispara duas mensagens em sequência imediata.
       await aguardarIntervaloAleatorio()
 
+      // A espera pode atravessar 17h: revalidar imediatamente antes do envio.
+      if (!dentroDoHorarioPermitido()) {
+        resumo.paradoPor = 'fora_do_horario'
+        break
+      }
+
       const timestamp = new Date().toISOString()
       try {
         const resultadoEnvio = await enviarCobrancaComRoteamento({
@@ -307,7 +314,15 @@ export async function executarReguaCobranca() {
           break
         }
         if (resultadoEnvio.status !== 'sent') {
-          throw new Error(`motor de envio não concluiu: ${resultadoEnvio.motivo || resultadoEnvio.status}`)
+          // Bloqueios de negocio e idempotencia nao autorizam uma nova tentativa.
+          const motivosDeNegocio = ['opt_out', 'numero_invalido_hoje', 'OPT_OUT', 'NUMERO_INVALIDO_HOJE', 'quitado', 'cancelado', 'em_revisao_financeira', 'titulo_inexistente', 'promessa_ativa']
+          if ((['blocked', 'skipped'].includes(resultadoEnvio.status) && motivosDeNegocio.includes(resultadoEnvio.reason || resultadoEnvio.motivo)) || resultadoEnvio.motivo === 'idempotencia_existente') continue
+          resumo.erros++
+          // Destinatario comprovadamente invalido nao derruba os demais clientes.
+          if (resultadoEnvio.categoria === 'PERMANENT_RECIPIENT') continue
+          resumo.paradoPor = 'falha_tecnica_ou_incerta'
+          console.warn('[cobranca-whatsapp] lote interrompido: falha tecnica ou resultado incerto do motor; consultar tentativa auditada')
+          break
         }
         const { error: erroInsert } = await supabase.from('cobrancas_whatsapp').insert({
           contas_financeiras_id: conta.id,
@@ -337,7 +352,11 @@ export async function executarReguaCobranca() {
         }
       } catch (err) {
         resumo.erros++
-        console.error(`[cobranca-whatsapp] ${timestamp} | ${conta.telefone_cobranca} | etapa ${etapa} | ERRO: ${err.message}`)
+        console.error('[cobranca-whatsapp] falha de envio; consultar tentativa auditada', { etapa, numeroInvalido: err.numeroInvalido === true })
+        if (!err.numeroInvalido) {
+          resumo.paradoPor = 'falha_tecnica_ou_incerta'
+          break
+        }
       }
     }
 

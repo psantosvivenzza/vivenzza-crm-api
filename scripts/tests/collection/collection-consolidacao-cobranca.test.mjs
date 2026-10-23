@@ -30,6 +30,72 @@ before(async () => {
 })
 after(async () => { await pararAmbienteDeTeste() })
 
+test('regua interrompe lote em falha tecnica sem tentar o segundo cliente', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-06-15T15:00:00Z') })
+  const idsSuprimidos = await suprimirOutrasContasElegiveis()
+  const idsMeus = []
+  const { data: config } = await supabase.from('automacoes_config').select('multi_whatsapp').eq('id', 1).single()
+  try {
+    await ligarCobrancaComSyncFresco()
+    await supabase.from('automacoes_config').update({ multi_whatsapp: false }).eq('id', 1)
+    const { invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
+    invalidarCacheFlags()
+    fakeEvolution.controlarInstancia('teste-financeiro-01', { comportamento: 'unavailable' })
+    for (let i = 0; i < 2; i++) {
+      const conta = await criarContaDeTeste(supabase, { vencimento: vencimentoHoje(), valor: 100 })
+      idsMeus.push(conta.id)
+    }
+    const resumo = await executarReguaCobranca()
+    assert.equal(resumo.paradoPor, 'falha_tecnica_ou_incerta')
+    assert.equal(resumo.elegiveis, 1, 'segundo cliente nao pode ser tentado apos falha tecnica')
+    assert.equal(resumo.erros, 1)
+    assert.equal(resumo.enviadas, 0)
+  } finally {
+    await supabase.from('automacoes_config').update({ multi_whatsapp: config.multi_whatsapp }).eq('id', 1)
+    const { invalidarCacheFlags } = await import('../../../src/lib/collection/featureFlags.js')
+    invalidarCacheFlags()
+    fakeEvolution.resetar()
+    if (idsMeus.length) await supabase.from('contas_financeiras').delete().in('id', idsMeus)
+    await restaurarContas(idsSuprimidos)
+  }
+})
+
+test('regua para sem reservar nem enviar quando a espera atravessa 17h BRT', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-06-15T19:59:59Z') })
+  const idsSuprimidos = await suprimirOutrasContasElegiveis()
+  let conta
+  try {
+    await ligarCobrancaComSyncFresco()
+    conta = await criarContaDeTeste(supabase, {
+      codigo_cliente: `JANELA-${randomUUID()}`,
+      telefone_cobranca: telefoneDeTeste(), vencimento: vencimentoHoje(), valor: 100,
+    })
+    const setTimeoutReal = globalThis.setTimeout
+    let esperas = 0
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms === 10) { // bypass de teste usado apenas pelo intervalo da regua
+        esperas++
+        t.mock.timers.tick(2000)
+      }
+      return setTimeoutReal(callback, ms, ...args)
+    })
+    const resumo = await executarReguaCobranca()
+    assert.equal(esperas, 1, 'precisa alcancar a espera antes de sair')
+    assert.equal(resumo.paradoPor, 'fora_do_horario')
+    assert.equal(resumo.enviadas, 0)
+    const { data: dispatches, error: erroDispatch } = await supabase.from('collection_dispatches').select('id').eq('contas_financeiras_id', conta.id)
+    assert.equal(erroDispatch, null)
+    assert.equal(dispatches.length, 0, 'nenhuma reserva de envio antes da checagem final')
+    const { data: cobrancas, error: erroCobranca } = await supabase.from('cobrancas_whatsapp').select('id').eq('contas_financeiras_id', conta.id)
+    assert.equal(erroCobranca, null)
+    assert.equal(cobrancas.length, 0)
+  } finally {
+    t.mock.restoreAll()
+    if (conta) await supabase.from('contas_financeiras').delete().eq('id', conta.id)
+    await restaurarContas(idsSuprimidos)
+  }
+})
+
 // 12:00 BRT — meio da janela operacional 08h-17h, longe de qualquer
 // fronteira. Congelado só durante o teste principal (t.mock.timers, escopo
 // automático do TestContext — nenhuma limpeza manual necessária).

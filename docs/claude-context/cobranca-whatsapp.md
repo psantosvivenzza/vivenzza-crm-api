@@ -2,7 +2,7 @@
 
 ## Estado atual (confirmar contra `automacoes_config` real antes de agir)
 
-- `cobranca_whatsapp_ativa=true`
+- Em 23/10/2026 a leitura real confirmou `cobranca_whatsapp_ativa=false`; reativacao autorizada para toda carteira elegivel apos publicacao e validacao operacional. Nao inferir ativacao por este documento.
 - `multi_whatsapp=true`
 - `whatsapp_failover=false` — **nunca ativar sem autorização explícita**.
 - Limites de cobrança autorizados em 19/10/2026: **10/hora**, **50/dia**.
@@ -12,7 +12,7 @@
   Saúde da instância, DNC, consentimento e restrições do provedor permanecem.
 - Cadência entre mensagens: 45–90s (aleatório).
 - No máximo 1 mensagem por telefone por dia.
-- Janela permitida: 08h–17h, dias úteis.
+- Janela autorizada: 09h–17h BRT, dias úteis, inicio inclusivo e fim exclusivo. O job revalida a janela depois da espera antes de enviar; disparos manuais tambem respeitam dias uteis. Implementacao local nao equivale a publicacao.
 
 ## Instâncias financeiras
 
