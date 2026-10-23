@@ -3,6 +3,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import pg from 'pg'
+// PostgREST preserva microssegundos; Date do node-postgres os truncaria e
+// criaria falso conflito de CAS somente no compat client do teste.
+pg.types.setTypeParser(1184,value=>value)
 import express from 'express'
 import jwt from 'jsonwebtoken'
 const database = process.env.FRETE_TEST_DATABASE ?? 'vivenzza_fretes_test_v5'
@@ -21,6 +24,7 @@ const { auth } = await import('../../src/middleware/auth.js')
 const {default:produtosRouter}=await import('../../src/routes/produtos.js')
 const db = createLocalPgClient(url)
 const sql = new pg.Client({ connectionString: url })
+const check=r=>{if(r.error)throw r.error;return r.data}
  let server, base, supplier, cotacao, logisticaDireta, falharDireta=false
 const token = role => jwt.sign({ id: 'test-actor', role }, process.env.JWT_SECRET)
 async function request(path, method = 'GET', body, role = 'financeiro') {
@@ -34,6 +38,13 @@ test.before(async () => {
  await sql.query(`do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon nologin; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role nologin bypassrls; end if; end $$`)
  await sql.query(`create table if not exists public.fornecedores(id uuid primary key default gen_random_uuid(),cnpj text not null unique,razao_social text not null,nome_fantasia text,ie text,endereco jsonb,contatos jsonb,ativo boolean not null default true,origem text not null default 'manual',criado_por uuid,criado_em timestamptz not null default now(),atualizado_em timestamptz not null default now())`)
  if (!(await sql.query("select to_regclass('public.frete_cotacoes') present")).rows[0].present) await sql.query(await readFile(new URL('../../supabase/migrations/20261014140810_cotacoes_frete_fornecedores.sql', import.meta.url), 'utf8'))
+ await sql.query('begin')
+ try {
+  const limite50=await readFile(new URL('../../supabase/migrations/20261019145723_frete_limite_50_transportadoras.sql', import.meta.url),'utf8')
+  await sql.query(limite50)
+  await sql.query(limite50) // Reaplicação não muda o corpo novamente.
+  await sql.query('commit')
+ } catch(error) { await sql.query('rollback'); throw error }
  await sql.query(`create table if not exists clientes_erp(id uuid primary key default gen_random_uuid(),razao_social text,cnpj_cpf text,endereco jsonb)`)
  await sql.query(`create table if not exists pedidos(id uuid primary key default gen_random_uuid(),legacy_id text,sistema_origem text,status text,total numeric,peso_bruto numeric,qtde_volumes integer,cliente_erp_id uuid,cliente_nome_origem text,cliente_documento_origem text,sincronizado_em timestamptz,status_importacao_pendente boolean,erro_sincronizacao text,conflito_sincronizacao boolean,campos_com_override_local jsonb)`)
  await sql.query(await readFile(new URL('../../supabase/migrations/20261015155158_frete_logistica_pedido.sql',import.meta.url),'utf8'))
@@ -47,6 +58,20 @@ test.before(async () => {
  const novaMigration=await readFile(new URL('../../supabase/migrations/20261015194843_frete_concorrencia_orcamento.sql',import.meta.url),'utf8')
  for(const fn of novaMigration.match(/create (?:or replace )?function[\s\S]*?\$\$;/g)??[])await sql.query(fn.replace(/^create (?:or replace )?function/,'create or replace function'))
  for(const nome of ['frete_consulta_versao','frete_orcamento_insercao'])if(!(await sql.query('select 1 from pg_trigger where tgname=$1',[nome])).rows.length)await sql.query(novaMigration.match(new RegExp('create trigger '+nome+'[^;]+;'))[0])
+ await sql.query('begin')
+ try {
+  const budgetSql=await readFile(new URL('../../supabase/migrations/20261019153929_frete_orcamentos_distintos.sql',import.meta.url),'utf8')
+  const definitions=()=>sql.query("select proname,pg_get_functiondef(oid) definition from pg_proc where oid in ('public.frete_contar_orcamento(timestamptz,text)'::regprocedure,'public.frete_guardar_orcamento()'::regprocedure,'public.frete_claim_envio(uuid)'::regprocedure) order by proname")
+  await sql.query(budgetSql);const first=(await definitions()).rows
+  await sql.query(budgetSql);assert.deepEqual((await definitions()).rows,first)
+  await sql.query('commit')
+ }
+ catch(error){await sql.query('rollback');throw error}
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261019182949_frete_anexos_continuidade.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261020154037_frete_fila_por_transportadora.sql',import.meta.url),'utf8'))
+ await sql.query(await readFile(new URL('../../supabase/migrations/20261021123500_frete_priorizar_respostas_sessao.sql',import.meta.url),'utf8'))
+ await sql.query("alter table whatsapp_instances add column if not exists connection_status text default 'connected', add column if not exists health_status text default 'healthy', add column if not exists cooldown_until timestamptz")
  await sql.query("insert into whatsapp_instances(instance_name)values('vivenzza-financeiro')on conflict do nothing;select frete_ativar_orcamento();")
  const { rows } = await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Transportadora teste',true,'5551999990001',true) returning id`, [`TEST-${Date.now()}`])
  supplier = rows[0].id
@@ -54,6 +79,111 @@ test.before(async () => {
  app.use('/api/produtos',auth,produtosRouter)
  server = app.listen(0, '127.0.0.1'); await new Promise(r => server.once('listening', r)); base = `http://127.0.0.1:${server.address().port}/api/fretes`
  }catch(e){await sql.query('rollback');console.error('SETUP LOCAL',e.message);throw e}
+})
+let phoneSequence=100
+
+test('prioridade de sessao: pergunta atual precede abertura, preserva FIFO da consulta e cadencia',async()=>{
+ await sql.query('begin')
+ try{
+  await sql.query('update frete_consultas set ia_pausada=true')
+  await sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where attempted_at is not null")
+  const fs=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values('PRIOR-A','Contato sintetico A',true,'5551999901001',true),('PRIOR-B','Contato sintetico B',true,'5551999901002',true) returning id,telefone_cotacao_frete`)).rows
+  const cs=(await sql.query("insert into frete_cotacoes(dados,criado_por) values('{}','test-priority'),('{}','test-priority') returning id")).rows
+  const qs=[]
+  for(let i=0;i<2;i++)qs.push((await sql.query("insert into frete_consultas(cotacao_id,fornecedor_id,nome_transportadora,telefone,status,ia_pausada) values($1,$2,'Sintetica',$3,'aguardando',false) returning id",[cs[i].id,fs[i].id,fs[i].telefone_cotacao_frete])).rows[0].id)
+  const initial=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key,created_at) values($1,$2,'Abertura sintetica','prioridade-abertura',now()-interval '2 minutes') returning id",[qs[0],fs[0].telefone_cotacao_frete])).rows[0].id
+  const m=(await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto,evolution_id,created_at) values($1,$2,'entrada','1 - Coleta; 3 - Cotacao','prioridade-menu',now()-interval '1 minute') returning id",[cs[1].id,qs[1]])).rows[0].id
+  const answer=(await sql.query("insert into frete_envios(consulta_id,mensagem_id,telefone,texto,idempotency_key,created_at) values($1,$2,$3,'3','prioridade-resposta',now()-interval '50 seconds') returning id",[qs[1],m,fs[1].telefone_cotacao_frete])).rows[0].id
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,answer,'menu atual nao deve esperar abertura de outro contato')
+  const earlier=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key,created_at) values($1,$2,'Mensagem anterior da mesma consulta','prioridade-fifo',now()-interval '3 minutes') returning id",[qs[1],fs[1].telefone_cotacao_frete])).rows[0].id
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,earlier,'prioridade nao ultrapassa mensagem anterior da mesma consulta')
+  await sql.query('update frete_consultas set ia_pausada=true where id=$1',[qs[1]])
+  assert.equal((await sql.query('select id from frete_proximo_envio()')).rows[0].id,initial,'pausa preservada')
+  assert.ok((await sql.query('select frete_claim_envio($1) result',[initial])).rows[0].result)
+  await sql.query('update frete_consultas set ia_pausada=false where id=$1',[qs[1]])
+  assert.equal((await sql.query('select frete_claim_envio($1) result',[earlier])).rows[0].result,null,'cadencia continua bloqueando segunda tentativa imediata')
+ }finally{await sql.query('rollback')}
+})
+test.beforeEach(async t=>{
+ // Cenários de uma conversa usam contatos independentes. Reutilização é
+ // exercitada explicitamente no teste da fila, sem esconder histórico real.
+ const compartilhados=['API restringe','RPC aceita','cotação mantém','fila desligada','tentativas de frete','proposta conferida']
+ if(supplier&&!compartilhados.some(prefix=>t.name.startsWith(prefix)))await sql.query('update fornecedores set telefone_cotacao_frete=$1 where id=$2',[`555199998${String(++phoneSequence).padStart(4,'0')}`,supplier])
+})
+
+test('fila por contato: A e B abertas, outro contato avança, liberação CAS e preço tardio não cruza cotações',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const {runFreteQueue}=await import('../../src/lib/fretes/worker.js')
+ const second=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Outro contato sintético',true,'5551988877777',true) returning id`,['FILA-'+Date.now()])).rows[0].id
+ const ids=[];let pendingId,mediaPending,interruptedPending
+ const create=async suppliers=>{const r=await request('/','POST',{...payload(),transportadora_ids:suppliers});assert.equal(r.status,201);ids.push(r.data.id);return r.data.id}
+ const getQ=async c=>(await sql.query('select * from frete_consultas where cotacao_id=$1',[c])).rows[0]
+ const enqueue=c=>db.rpc('frete_enfileirar_cotacao',{p_cotacao_id:c,p_texto:'Solicitação sintética FRETE-'+c,p_actor:'test-fila'})
+ const cool=()=>sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where attempted_at is not null")
+ const sent=[];const options={db,installed:true,enabled:true,assistantEnabled:true,dnc:async()=>({blocked:false}),recordSuccess:async()=>{},recordFailure:async()=>{},send:async(_i,_t,text)=>{sent.push(text);return {ok:true,providerMessageId:'fake-fila-'+sent.length}}}
+ try{
+  const a=await create([supplier]),b=await create([supplier]),other=await create([second])
+  for(const c of [a,b,other])assert.equal((await enqueue(c)).error,null)
+  assert.equal((await getQ(b)).aguarda_contato,true)
+  await cool();assert.equal((await runFreteQueue(options)).status,'enviado');assert.ok(sent[0].includes(a))
+  const qa=await getQ(a)
+  await sql.query('update frete_consultas set ia_pausada=true where id=$1',[qa.id])
+  await cool();assert.equal((await runFreteQueue(options)).status,'enviado');assert.ok(sent[1].includes(other))
+  assert.equal((await getQ(b)).aguarda_contato,true)
+  const paused=await getQ(a)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/liberar-contato`,'POST',{versao:qa.updated_at})).status,409)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/liberar-contato`,'POST',{versao:paused.updated_at})).status,200)
+  assert.equal((await sql.query('select status from frete_cotacoes where id=$1',[a])).rows[0].status,'aberta')
+  const fourth=await create([supplier]);await enqueue(fourth)
+  assert.equal((await getQ(fourth)).aguarda_contato,true,'nova solicitação não ultrapassa B já em espera')
+  await db.rpc('frete_proximo_envio')
+  const beforeTick=(await getQ(b)).updated_at
+  await db.rpc('frete_proximo_envio')
+  assert.equal((await getQ(b)).updated_at,beforeTick,'tick sem mudança não invalida CAS')
+  await cool()
+  const race=await Promise.all([runFreteQueue(options),runFreteQueue(options)])
+  assert.equal(race.filter(r=>r.status==='enviado').length,1);assert.equal(sent.length,3);assert.ok(sent[2].includes(b))
+  const qb=await getQ(b);assert.equal(qb.exige_referencia,true);assert.equal(qb.aguarda_contato,false)
+  const event={instanceName:'vivenzza-financeiro',telefone:qb.telefone,texto:'Total do frete: R$ 777,00',evolutionId:'late-fila-'+b,fromMe:false}
+  const opts={db,installed:true,assistantEnabled:true}
+  await handleFreteInbound(event,opts);await handleFreteInbound(event,opts)
+  assert.equal((await getQ(b)).valor_total,null);assert.equal((await getQ(b)).ia_pausada,true)
+  assert.equal((await sql.query('select count(*)::int n from frete_mensagens where evolution_id=$1',[event.evolutionId])).rows[0].n,0)
+  pendingId=(await sql.query('select id from frete_respostas_pendentes where evolution_id=$1',[event.evolutionId])).rows[0].id
+  const detail=(await request('/'+b)).data;assert.equal(detail.consultas[0].respostas_pendentes.length,1)
+  const old=await getQ(a)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${pendingId}/associar`,'POST',{versao:old.updated_at})).status,200)
+  assert.equal((await sql.query('select consulta_id from frete_mensagens where evolution_id=$1',[event.evolutionId])).rows[0].consulta_id,qa.id)
+  assert.equal((await getQ(b)).valor_total,null)
+  assert.equal((await request(`/${b}/consultas/${qb.id}/respostas/${pendingId}/associar`,'POST',{versao:(await getQ(b)).updated_at})).status,409)
+  const {preservarAnexoPendenteFrete}=await import('../../src/lib/fretes/attachments.js')
+  let downloads=0
+  const media={...event,evolutionId:'media-fila-'+b,texto:'PDF sintético',mediaTipo:'document',mediaMessage:{key:{id:'media-fila-'+b}}}
+  const pdf=Buffer.from('%PDF-1.4\nSINTETICO').toString('base64')
+  const mediaOpts={...opts,pendingAttachment:(database,rid,msg)=>preservarAnexoPendenteFrete(database,rid,msg,{download:async()=>{downloads++;return {mimetype:'application/pdf',conteudo_base64:pdf,sha256:'sintetico'}}})}
+  await handleFreteInbound(media,mediaOpts);await handleFreteInbound(media,mediaOpts)
+  mediaPending=(await sql.query('select id,conteudo_base64 from frete_respostas_pendentes where evolution_id=$1',[media.evolutionId])).rows[0]
+  assert.equal(downloads,1);assert.equal(mediaPending.conteudo_base64,pdf)
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${mediaPending.id}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,200)
+  assert.equal((await sql.query('select a.conteudo_base64 from frete_anexos a join frete_mensagens m on m.id=a.mensagem_id where m.evolution_id=$1',[media.evolutionId])).rows[0].conteudo_base64,pdf)
+  interruptedPending=(await sql.query("insert into frete_respostas_pendentes(instance_name,telefone,evolution_id,texto,anexo_status)values('vivenzza-financeiro',$1,$2,'PDF interrompido','processando')returning id",[qb.telefone,'interrupted-'+b])).rows[0].id
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${interruptedPending}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,409)
+  await sql.query("update frete_respostas_pendentes set created_at=now()-interval '3 minutes' where id=$1",[interruptedPending])
+  assert.equal((await request(`/${a}/consultas/${qa.id}/respostas/${interruptedPending}/associar`,'POST',{versao:(await getQ(a)).updated_at})).status,200)
+  assert.equal((await sql.query('select anexo_status from frete_respostas_pendentes where id=$1',[interruptedPending])).rows[0].anexo_status,'revisao')
+  await sql.query("update frete_envios set status='revisao',provider_id=null where consulta_id=$1",[qb.id])
+  assert.equal((await request(`/${b}/consultas/${qb.id}/liberar-contato`,'POST',{versao:(await getQ(b)).updated_at})).status,409,'resultado incerto não libera próximo envio')
+  await sql.query("update frete_consultas set status='encerrada' where id=$1",[qb.id])
+  assert.equal(check(await db.rpc('frete_proximo_envio')).length,0,'fechar consulta com envio incerto não libera o contato')
+  assert.equal((await sql.query("select has_table_privilege('anon','frete_respostas_pendentes','select') a,has_table_privilege('authenticated','frete_respostas_pendentes','insert') b,has_function_privilege('anon','frete_liberar_contato(uuid,uuid,timestamptz,text)','execute') c")).rows[0].a,false)
+ }finally{
+  if(pendingId)await sql.query('delete from frete_respostas_pendentes where id=$1',[pendingId])
+  if(mediaPending)await sql.query('delete from frete_respostas_pendentes where id=$1',[mediaPending.id])
+  if(interruptedPending)await sql.query('delete from frete_respostas_pendentes where id=$1',[interruptedPending])
+  await sql.query('delete from frete_envios where consulta_id in(select id from frete_consultas where cotacao_id=any($1::uuid[]))',[ids])
+  await sql.query('delete from frete_mensagens where cotacao_id=any($1::uuid[])',[ids])
+  await sql.query('delete from frete_consultas where cotacao_id=any($1::uuid[])',[ids]);await sql.query('delete from frete_cotacoes where id=any($1::uuid[])',[ids]);await sql.query('delete from fornecedores where id=$1',[second])
+ }
 })
 test.after(async () => {
  if (supplier) {
@@ -65,22 +195,51 @@ test.after(async () => {
  await sql.query('update frete_orcamento_controle set ativo=false where id=1')
  if (server) await new Promise(r => server.close(r)); await db._pool.end(); await sql.end()
 })
+test('API preserva embalagem declarada no JSON e rejeita embalagem inferida ou malformada',async()=>{
+ const isolated=(await sql.query("insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) values($1,'Embalagem sintetica',true,'5551999876001',true) returning id",['EMBALAGEM-'+Date.now()])).rows[0].id
+ const created=await request('/','POST',{...payload(),transportadora_ids:[isolated],embalagem_externa:'saco_plastico'})
+ assert.equal(created.status,201)
+ try{
+  const detail=await request(`/${created.data.id}`)
+  assert.equal(detail.data.cotacao.dados.embalagem_externa,'saco_plastico')
+  for(const embalagem_externa of ['inferir embalagem',['pallet']])assert.equal((await request('/','POST',{...payload(),embalagem_externa})).status,400)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:created.data.id,p_actor:'test'})}
+})
+
 test('API restringe vendedores e exige autenticação antes de ler fornecedor', async () => {
  assert.equal((await request('/transportadoras', 'GET', undefined, 'vendedor')).status, 403)
  assert.equal((await fetch(`${base}/transportadoras`)).status, 401)
  assert.equal((await request('/transportadoras')).status, 200)
 })
-test('cotação mantém FK fornecedor e rejeita contato já ocupado sem deixar cotação parcial', async () => {
+
+test('RPC aceita 50 participantes, rejeita 51 e preserva permissao de servico', async () => {
+ const fornecedores=(await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete,cotacao_frete_consentimento) select 'TEST-LIMIT50-'||md5(random()::text||n::text),'Transportadora sintetica limite 50',true,'555198765'||lpad(n::text,4,'0'),true from generate_series(1,51) n returning id`)).rows.map(r=>r.id)
+ let criada
+ try {
+  const result=await sql.query('select frete_criar_cotacao($1::jsonb,$2::uuid[],$3) as cotacao',[JSON.stringify(payload()),fornecedores.slice(0,50),'test-limit-50'])
+  criada=result.rows[0].cotacao.id
+  assert.equal((await sql.query('select count(*)::int n from frete_consultas where cotacao_id=$1',[criada])).rows[0].n,50)
+  await assert.rejects(sql.query('select frete_criar_cotacao($1::jsonb,$2::uuid[],$3)',[JSON.stringify(payload()),fornecedores,'test-limit-50']),/Selecione transportadoras/)
+  const proof=(await sql.query("select position('cardinality(p_ids) not between 1 and 30' in prosrc)=0 as antigo_removido,has_function_privilege('service_role',oid,'EXECUTE') as servico from pg_proc where oid='public.frete_criar_cotacao(jsonb,uuid[],text)'::regprocedure")).rows[0]
+  assert.deepEqual(proof,{antigo_removido:true,servico:true})
+ } finally {
+  if(criada){await sql.query('delete from frete_consultas where cotacao_id=$1',[criada]);await sql.query('delete from frete_cotacoes where id=$1',[criada])}
+  await sql.query('delete from fornecedores where id=any($1::uuid[])',[fornecedores])
+ }
+})
+test('cotação mantém FK e permite novos rascunhos com contato ocupado e variante do telefone', async () => {
+ const before=(await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1',['test-actor'])).rows[0].n
  const result = await request('/', 'POST', payload()); assert.equal(result.status, 201); cotacao = result.data
  assert.ok(cotacao.id)
  const row = (await sql.query('select fornecedor_id,telefone from frete_consultas where cotacao_id=$1', [cotacao.id])).rows[0]
  assert.equal(row.fornecedor_id, supplier)
- assert.equal((await request('/', 'POST', payload())).status, 409)
+ const segunda=await request('/', 'POST', payload());assert.equal(segunda.status,201)
+ await sql.query('delete from frete_consultas where cotacao_id=$1',[segunda.data.id]);await sql.query('delete from frete_cotacoes where id=$1',[segunda.data.id])
  const original = '5551999990001'
  const variante = original.slice(0, 4) + original.slice(5)
  const outro = (await sql.query(`insert into fornecedores(cnpj,razao_social,participa_cotacao_frete,telefone_cotacao_frete) values($1,'Outra filial teste',true,$2) returning id`, [`VAR-${Date.now()}`, variante])).rows[0].id
- try { assert.equal((await request('/', 'POST', { ...payload(), transportadora_ids: [outro] })).status, 409) } finally { await sql.query('delete from fornecedores where id=$1', [outro]) }
- assert.equal((await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1', ['test-actor'])).rows[0].n, 1)
+ try { const outra=await request('/', 'POST', { ...payload(), transportadora_ids: [outro] });assert.equal(outra.status,201);await sql.query('delete from frete_consultas where cotacao_id=$1',[outra.data.id]);await sql.query('delete from frete_cotacoes where id=$1',[outra.data.id]) } finally { await sql.query('delete from fornecedores where id=$1', [outro]) }
+ assert.equal((await sql.query('select count(*)::int n from frete_cotacoes where criado_por=$1', ['test-actor'])).rows[0].n, before+1)
 })
 test('fila desligada não envia, dupla solicitação é idempotente e claim concorrente é único', async () => {
  assert.equal((await request(`/${cotacao.id}/enviar`, 'POST', {})).status, 409)
@@ -91,17 +250,17 @@ test('fila desligada não envia, dupla solicitação é idempotente e claim conc
  const claims = await Promise.all([claim(), claim()]); assert.ok(claims.every(r => !r.error)); assert.equal(claims.filter(r => r.data).length, 1)
  assert.equal((await sql.query('select status,attempted_at from frete_envios where id=$1', [e.id])).rows[0].status, 'enviando')
 })
-test('tentativas de frete consomem teto global e por instância mesmo com envios pausados', async () => {
+test('tentativas de frete não consomem teto financeiro global nem por instância', async () => {
  await sql.query(`create table if not exists automacoes_config(id integer primary key,multi_whatsapp boolean,global_daily_limit integer,global_hourly_limit integer); insert into automacoes_config values(1,true,1,1) on conflict(id) do update set multi_whatsapp=true,global_daily_limit=1,global_hourly_limit=1; create table if not exists collection_dispatches(id uuid primary key,purpose text,origem text,criado_em timestamptz); create table if not exists collection_dispatch_attempts(id uuid primary key,dispatch_id uuid,whatsapp_instance_id uuid,criado_em timestamptz); create table if not exists whatsapp_instances(id uuid primary key default gen_random_uuid(),instance_name text unique); insert into whatsapp_instances(instance_name) values('vivenzza-financeiro') on conflict do nothing`)
  process.env.FRETE_MODULO_INSTALADO = 'true'
  try {
   const { contarTentativasReaisDesde } = await import('../../src/lib/collection/providerAttemptCounter.js')
   const { verificarLimiteGlobalEnvio } = await import('../../src/lib/collection/globalSendLimit.js')
   const { contarEnviosReaisHojePorInstancia } = await import('../../src/lib/collection/whatsappInstances.js')
-  assert.equal(await contarTentativasReaisDesde({ desde: '2000-01-01T00:00:00Z' }), 1)
-  assert.equal((await verificarLimiteGlobalEnvio()).permitido, false)
+  assert.equal(await contarTentativasReaisDesde({ desde: '2000-01-01T00:00:00Z' }), 0)
+  assert.equal((await verificarLimiteGlobalEnvio()).permitido, true)
   const instance = (await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0]
-  assert.equal((await contarEnviosReaisHojePorInstancia()).get(instance.id), 1)
+  assert.equal((await contarEnviosReaisHojePorInstancia()).get(instance.id), 0)
  } finally { process.env.FRETE_MODULO_INSTALADO = 'false';await sql.query('update automacoes_config set global_daily_limit=1000,global_hourly_limit=1000 where id=1') }
 })
 test('proposta conferida entra no ranking, pausa assistente e consulta alheia é recusada', async () => {
@@ -140,14 +299,14 @@ test('fila Evolution, resposta limitada, dedup e encerramento durante provider f
  assert.equal((await sql.query('select status from frete_consultas where id=$1', [q.id])).rows[0].status, 'encerrada')
  assert.deepEqual(await handleFreteInbound({ ...event, evolutionId: 'sem-cotacao' }, opts), { semCotacao: true })
 })
-test('respostas simultâneas têm limite transacional de seis e pausam para revisão', async () => {
+test('respostas simultâneas têm limite transacional de 24 e pausam para revisão', async () => {
  const c = (await request('/', 'POST', payload())).data
  const q = (await sql.query('select * from frete_consultas where cotacao_id=$1', [c.id])).rows[0]
  const messages = []
- for (let i=0;i<7;i++) messages.push((await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto,evolution_id) values($1,$2,'entrada','Qual peso?',$3) returning id", [c.id,q.id,`bounded-${c.id}-${i}`])).rows[0].id)
+ for (let i=0;i<25;i++) messages.push((await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto,evolution_id) values($1,$2,'entrada','Qual peso?',$3) returning id", [c.id,q.id,`bounded-${c.id}-${i}`])).rows[0].id)
  const replies = await Promise.all(messages.map(m => db.rpc('frete_enfileirar_resposta', { p_consulta_id: q.id, p_mensagem_id: m, p_texto: 'Peso bruto: 20 kg' })))
- assert.ok(replies.every(r => !r.error)); assert.equal(replies.filter(r => r.data).length, 6)
- assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1 and mensagem_id is not null', [q.id])).rows[0].n, 6)
+ assert.ok(replies.every(r => !r.error)); assert.equal(replies.filter(r => r.data).length, 24)
+ assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1 and mensagem_id is not null', [q.id])).rows[0].n, 24)
  assert.equal((await sql.query('select ia_pausada from frete_consultas where id=$1', [q.id])).rows[0].ia_pausada, true)
  await db.rpc('frete_encerrar_cotacao', { p_cotacao_id: c.id, p_actor: 'test' })
 })
@@ -155,6 +314,129 @@ test('tabelas e RPCs não ficam disponíveis para anon/authenticated', async () 
  const privileges = (await sql.query(`select has_table_privilege('anon','public.frete_cotacoes','SELECT') a,has_table_privilege('authenticated','public.frete_envios','INSERT') b,has_function_privilege('anon','public.frete_claim_envio(uuid)','EXECUTE') c,has_table_privilege('anon','public.frete_reservas_legado','SELECT') d,has_function_privilege('authenticated','public.frete_ativar_orcamento(text)','EXECUTE') e`)).rows[0]
  assert.deepEqual(privileges, { a: false, b: false, c: false,d:false,e:false })
  assert.equal((await sql.query("select count(*)::int n from pg_class where relname in('frete_cotacoes','frete_consultas','frete_mensagens','frete_envios') and relrowsecurity")).rows[0].n, 4)
+ assert.equal((await sql.query("select has_table_privilege('anon','frete_anexos','select') a,has_table_privilege('authenticated','frete_anexos','select') b,has_function_privilege('anon','frete_registrar_progresso(uuid,uuid,timestamptz,jsonb)','execute') c")).rows[0].a,false)
+})
+
+test('formulario inteiro atravessa inbound RPC worker e termina em proposta, sem provider real',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const {runFreteQueue}=await import('../../src/lib/fretes/worker.js')
+ const formPayload={...payload(),descricao:'Embalagens Plasticas'}
+ const c=(await request('/','POST',formPayload)).data
+ await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
+ const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+ const event={instanceName:'vivenzza-financeiro',telefone:q.telefone,fromMe:false},opts={db,installed:true,assistantEnabled:true}
+ const sequence=[['CNPJ do remetente','11111111000111'],['CNPJ do destinatário','22222222000122'],['CEP de origem','90000000'],['CEP de destino','91000000'],['Coleta (essa opção não gera coleta automaticamente)\\n\\n1 - A mercadoria será coletada pela TW\\n2 - A mercadoria será levada até uma base da TW','1'],['Tipo de mercadoria\\nConsulte as mercadorias não transportadas em: https://example.invalid\\nMaterial longo, somente até 3 metros.\\n1 - Diversos\\n2 - Metais\\n3 - Químico','1'],['Peso bruto total (kg)','20'],['Valor da nota fiscal','1000,00'],['Quantidade de volumes','2'],['Comprimento em cm','50'],['Largura em cm','40'],['Altura em cm','30']]
+ let sent=0
+ try{
+  for(const [i,[texto,expected]] of sequence.entries()){
+   await handleFreteInbound({...event,texto,evolutionId:`form-${c.id}-${i}`},opts)
+   await handleFreteInbound({...event,texto,evolutionId:`form-${c.id}-${i}`},opts)
+   const reply=(await sql.query('select * from frete_envios where consulta_id=$1 order by created_at desc limit 1',[q.id])).rows[0]
+   assert.equal(reply?.texto,expected,texto)
+   assert.equal((await sql.query('select ia_pausada from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,false,texto)
+   // Cadencia e global para frete: recuar somente o relogio das fixtures deste ensaio.
+   await sql.query("update frete_envios set attempted_at=now()-interval '5 minutes' where consulta_id in(select id from frete_consultas where fornecedor_id=$1) and attempted_at is not null",[supplier])
+   const result=await runFreteQueue({...opts,enabled:true,dnc:async()=>({blocked:false}),recordSuccess:async()=>{},recordFailure:async()=>{},send:async(_instance,_phone,body)=>{assert.equal(body,expected);return {ok:true,providerMessageId:`synthetic-form-${c.id}-${++sent}`}}})
+   assert.equal(result.status,'enviado',JSON.stringify(result))
+  }
+  assert.equal(sent,sequence.length)
+  assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1',[q.id])).rows[0].n,sequence.length)
+  for(const [i,texto] of ['Total do frete: R$ 100,00','Prazo: 3 dias úteis','Validade: 31/12/2099','Todas as taxas inclusas'].entries())await handleFreteInbound({...event,texto,evolutionId:`form-proposal-${c.id}-${i}`},opts)
+  const final=(await sql.query('select * from frete_consultas where id=$1',[q.id])).rows[0]
+  assert.equal(final.completa,true);assert.equal(final.prazo_dias,3);assert.equal(Number(final.valor_total),100)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})}
+})
+
+test('cidade vem do cadastro compativel CNPJ CEP e endereco, nao de bairro ou numero',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const doc=String(Date.now()).padStart(14,'0'),body=payload()
+ const party=(await sql.query("insert into fornecedores(cnpj,razao_social,endereco)values($1,'Origem sintetica',$2) returning id",[doc,{cep:'90000000',cidade:'Bauru',uf:'SP'}])).rows[0]
+ body.retirada={...body.retirada,cnpj:doc,endereco:'Rua sintetica, Bauru, SP'}
+ const c=(await request('/','POST',body)).data
+ try{
+  await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
+  const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+  const input={instanceName:'vivenzza-financeiro',telefone:q.telefone,texto:'Cidade de origem',evolutionId:'city-'+c.id}
+  await handleFreteInbound(input,{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select texto from frete_envios where consulta_id=$1',[q.id])).rows[0]?.texto,'Bauru')
+  await handleFreteInbound({...input,texto:'Município de origem',evolutionId:'city-accent-'+c.id},{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select texto from frete_envios where consulta_id=$1 order by created_at desc limit 1',[q.id])).rows[0]?.texto,'Bauru')
+  const {completarLocalFormularioFrete}=await import('../../src/lib/fretes/form.js')
+  for(const part of [{...body.retirada,cep:'99999999'},{...body.retirada,endereco:'Rua X, Bairro, SP'},{...body.retirada,endereco:'Rua X, 123, SP'}])assert.equal((await completarLocalFormularioFrete(db,{retirada:part})).retirada.cidade,undefined)
+  const unavailable={...db,from(table){const query=db.from(table),select=query.select.bind(query);query.select=fields=>fields==='cnpj,endereco'?{in:async()=>({error:{code:'READ_FAILURE'}})}:select(fields);return query}}
+  assert.equal(await handleFreteInbound({...input,evolutionId:'city-failure-'+c.id},{db:unavailable,installed:true,assistantEnabled:true}),true)
+  assert.equal((await sql.query('select ia_pausada,status from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,true)
+  await sql.query("update frete_consultas set ia_pausada=false,status='aguardando' where id=$1",[q.id])
+  await handleFreteInbound({...input,texto:'Município de origem',evolutionId:'city-repeat-'+c.id},{db,installed:true,assistantEnabled:true})
+  assert.equal((await sql.query('select ia_pausada from frete_consultas where id=$1',[q.id])).rows[0].ia_pausada,true)
+  assert.equal((await sql.query('select count(*)::int n from frete_envios where consulta_id=$1',[q.id])).rows[0].n,2)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'});await sql.query('delete from fornecedores where id=$1',[party.id])}
+})
+
+test('conversa guarda valor, prazo e validade em mensagens separadas e conclui somente com taxas confirmadas',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const c=(await request('/','POST',payload())).data
+ await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[c.id])
+ const q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+ const opts={db,installed:true,assistantEnabled:true}
+ const input={instanceName:'vivenzza-financeiro',telefone:q.telefone,fromMe:false}
+ const textos=['Total do frete: R$ 365,00','Todas as taxas inclusas','previsão de 5 dias uteis','Validade: 31/12/2099']
+ for(let i=0;i<textos.length;i++){
+  await handleFreteInbound({...input,texto:textos[i],evolutionId:`progress-${c.id}-${i}`},opts)
+  const atual=(await sql.query('select * from frete_consultas where id=$1',[q.id])).rows[0]
+  assert.equal(atual.completa,i===3,JSON.stringify(atual));assert.equal(atual.ia_pausada,i===3)
+  if(i===0)assert.equal(atual.prazo_dias,null)
+ }
+ const final=(await sql.query('select * from frete_consultas where id=$1',[q.id])).rows[0]
+ assert.equal(Number(final.valor_total),365);assert.equal(final.prazo_dias,5)
+ assert.equal((await request(`/${c.id}`)).status,200)
+ const m=(await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto,evolution_id) values($1,$2,'entrada','arquivo',$3) returning id",[c.id,q.id,`private-${c.id}`])).rows[0]
+ await sql.query("insert into frete_anexos(mensagem_id,status,mimetype,conteudo_base64)values($1,'preservado','application/pdf','JVBERi1TWU5USEVUSUM=')",[m.id])
+ const detail=await request(`/${c.id}`)
+ assert.doesNotMatch(JSON.stringify(detail.data),/JVBERi1TWU5USEVUSUM|conteudo_base64/)
+ assert.equal((await fetch(`${base}/${c.id}/anexos/${m.id}`)).status,401)
+ assert.equal((await request(`/${c.id}/anexos/${m.id}`,'GET',undefined,'vendedor')).status,403)
+ await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})
+})
+
+test('pausa humana, CAS e encerramento impedem progresso e nao apagam campos',async()=>{
+ const c=(await request('/','POST',payload())).data,q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+ const m=(await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto)values($1,$2,'entrada','Prazo: 5 dias úteis')returning id",[c.id,q.id])).rows[0]
+ await sql.query("update frete_consultas set ia_pausada=true,atualizado_por='humano' where id=$1",[q.id])
+ const r=await db.rpc('frete_registrar_progresso',{p_consulta_id:q.id,p_mensagem_id:m.id,p_versao:q.updated_at,p_campos:{prazo_dias:5}})
+ assert.equal(r.data,null)
+ assert.equal((await sql.query('select prazo_dias from frete_consultas where id=$1',[q.id])).rows[0].prazo_dias,null)
+ await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})
+})
+
+test('mensagens concorrentes preservam preco e prazo; OCR sem campos nao chama interpretador',async()=>{
+ const {handleFreteInbound}=await import('../../src/lib/fretes/inbound.js')
+ const result=await request('/','POST',payload());assert.equal(result.status,201)
+ await sql.query("update frete_consultas set status='aguardando' where cotacao_id=$1",[result.data.id])
+ const c=result.data,q=(await sql.query('select * from frete_consultas where cotacao_id=$1',[c.id])).rows[0]
+ try{
+  const event={instanceName:'vivenzza-financeiro',telefone:q.telefone,fromMe:false}
+  const opts={db,installed:true,assistantEnabled:true}
+  await Promise.all(['Total do frete: R$ 400,00','Prazo: 7 dias úteis'].map((texto,i)=>handleFreteInbound({...event,texto,evolutionId:`parallel-${c.id}-${i}`},opts)))
+  const saved=(await sql.query('select * from frete_consultas where id=$1',[q.id])).rows[0]
+  assert.equal(Number(saved.valor_total),400);assert.equal(saved.prazo_dias,7);assert.equal(saved.ia_pausada,false)
+  await handleFreteInbound({...event,texto:'arquivo',evolutionId:`ocr-${c.id}`,mediaTipo:'document',mediaMessage:{key:{id:'synthetic'}}},{...opts,attachment:async()=> 'Documento sem valores inequívocos',interpret:async()=>{throw Error('OCR não pode virar instrução')}})
+  const reply=(await sql.query('select texto from frete_envios where consulta_id=$1 order by created_at desc limit 1',[q.id])).rows[0]
+  assert.match(reply.texto,/confirmar os dados em texto/)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})}
+})
+
+test('preco divergente nunca completa com preco antigo e OCR pode ser corrigido por texto',async()=>{
+ const c=(await request('/','POST',payload())).data
+ const q=(await sql.query("update frete_consultas set status='aguardando',valor_total=800 where cotacao_id=$1 returning *",[c.id])).rows[0]
+ try{
+  const m=(await sql.query("insert into frete_mensagens(cotacao_id,consulta_id,direcao,texto)values($1,$2,'entrada','Total frete: R$ 900,00') returning id",[c.id,q.id])).rows[0]
+  const conflict=check(await db.rpc('frete_registrar_progresso',{p_consulta_id:q.id,p_mensagem_id:m.id,p_versao:q.updated_at,p_campos:{valor_total:900,prazo_dias:3,validade:'2099-12-31T00:00:00Z',taxas_inclusas:true}}))
+  assert.equal(conflict.completa,false);assert.equal(conflict.ia_pausada,true);assert.equal(Number(conflict.valor_total),800)
+  const next=(await sql.query("update frete_consultas set ia_pausada=false,proposta_evidencias='{\"anexo_valor_total\":true}' where id=$1 returning *",[q.id])).rows[0]
+  const corrected=check(await db.rpc('frete_registrar_progresso',{p_consulta_id:q.id,p_mensagem_id:m.id,p_versao:next.updated_at,p_campos:{valor_total:900}}))
+  assert.equal(Number(corrected.valor_total),900);assert.equal(corrected.proposta_evidencias.anexo_valor_total,false);assert.equal(corrected.completa,false)
+ }finally{await db.rpc('frete_encerrar_cotacao',{p_cotacao_id:c.id,p_actor:'test'})}
 })
 
 test('novo fornecedor salva WhatsApp e participação na mesma criação, valida CNPJ/telefone e impede financeiro',async()=>{
@@ -211,10 +493,30 @@ test('opt-out com tela antiga nao pode restaurar consentimento',async()=>{
  assert.equal((await sql.query('select cotacao_frete_consentimento from fornecedores where id=$1',[supplier])).rows[0].cotacao_frete_consentimento,false)
 })
 
-test('reserva atomica disputa a ultima vaga entre frete, v2 e legado',async()=>{
+test('cadência própria de 60s é atômica entre réplicas e não debita cobrança',async()=>{
+ const q=(await sql.query('select id from frete_consultas where fornecedor_id=$1 limit 1',[supplier])).rows[0].id
+ await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '2 minutes' where attempted_at is not null")
+ const ids=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key)select $1,'5551999990001','teste cadencia',gen_random_uuid()::text from generate_series(1,2)returning id",[q])).rows.map(r=>r.id)
+ try {
+  const before=Number((await sql.query("select frete_contar_orcamento('2000-01-01'::timestamptz) n")).rows[0].n)
+  const results=await Promise.allSettled(ids.map(id=>db._pool.query('update frete_envios set attempted_at=clock_timestamp() where id=$1 returning id',[id])))
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1)
+  assert.match(results.find(r=>r.status==='rejected').reason.message,/limite_frete_cadencia/)
+  const waiting=results[0].status==='rejected'?ids[0]:ids[1]
+  const first=waiting===ids[0]?ids[1]:ids[0]
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '59 seconds' where id=$1",[first])
+  await assert.rejects(sql.query('update frete_envios set attempted_at=clock_timestamp() where id=$1',[waiting]),/limite_frete_cadencia/)
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '61 seconds' where id=$1",[first])
+  assert.equal((await sql.query('update frete_envios set attempted_at=clock_timestamp() where id=$1 returning id',[waiting])).rows.length,1)
+  assert.equal(Number((await sql.query("select frete_contar_orcamento('2000-01-01'::timestamptz) n")).rows[0].n),before)
+ } finally { await sql.query('delete from frete_envios where id=any($1::uuid[])',[ids]) }
+})
+
+test('frete reserva à parte enquanto v2 e legado disputam somente a ultima vaga financeira',async()=>{
  const q=(await sql.query('select id from frete_consultas where fornecedor_id=$1 limit 1',[supplier])).rows[0].id
  const instancia=(await sql.query("select id from whatsapp_instances where instance_name='vivenzza-financeiro'")).rows[0].id
  for(const porInstancia of [false,true]){
+  await sql.query("update frete_envios set attempted_at=clock_timestamp()-interval '2 minutes' where attempted_at is not null")
   const d=(await sql.query("insert into collection_dispatches(id,purpose,origem,criado_em)values(gen_random_uuid(),'collection','manual',now())returning id")).rows[0].id
   const e=(await sql.query("insert into frete_envios(consulta_id,telefone,texto,idempotency_key)values($1,'5551999990001','teste concorrente',gen_random_uuid()::text)returning id",[q])).rows[0].id
   let ids=[]
@@ -227,7 +529,8 @@ test('reserva atomica disputa a ultima vaga entre frete, v2 e legado',async()=>{
     db._pool.query('insert into collection_dispatch_attempts(id,dispatch_id,whatsapp_instance_id,criado_em)values(gen_random_uuid(),$1,$2,clock_timestamp())returning id',[d,instancia]),
     db._pool.query("select frete_reservar_legado('vivenzza-financeiro') as id")
    ])
-   assert.equal(tentativas.filter(r=>r.status==='fulfilled').length,1)
+   assert.equal(tentativas[0].status,'fulfilled')
+   assert.equal(tentativas.slice(1).filter(r=>r.status==='fulfilled').length,1)
    for(const r of tentativas.filter(r=>r.status==='rejected'))assert.match(r.reason.message,/limite_.*reserva/)
    if(tentativas[2].status==='fulfilled')ids.push(tentativas[2].value.rows[0].id)
   }finally{

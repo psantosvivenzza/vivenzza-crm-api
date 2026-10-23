@@ -5,6 +5,7 @@ import { lerLogisticaNetvision } from '../lib/fretes/netvision.js'
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { adminOuFinanceiro } from '../middleware/auth.js'
+import { candidatosTelefone,telefonesEquivalentes } from '../lib/telefone.js'
 import { compararPropostas, validarCotacao, validarConfigTransportadora, validarProposta, montarSolicitacao, UUID, FreteError } from '../lib/fretes/domain.js'
 
 const CONFIG = () => ({ envio_ativo: process.env.FRETE_ENVIO_ATIVO === 'true', ia_ativa: process.env.FRETE_IA_ATIVA === 'true' })
@@ -13,7 +14,7 @@ function id(v) { if (!UUID.test(v ?? '')) throw new FreteError('Identificador in
 function handler(fn) {
   return async (req, res) => {
     try { await fn(req, res) } catch (e) {
-      if (e.code === '23505') return res.status(409).json({ erro: 'Já existe uma cotação aberta para esse WhatsApp. Encerre a anterior antes de iniciar outra.' })
+      if (e.code === '23505') return res.status(409).json({ erro: 'Registro concorrente ou duplicado. Atualize antes de repetir; não é necessário encerrar outras cotações.' })
       if (e.code === 'P0001') return res.status(409).json({ erro: e.message })
       if (e.status) return res.status(e.status).json({ erro: e.message })
       console.error('[fretes] falha de persistência', e.code ?? 'desconhecida')
@@ -104,15 +105,39 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
   router.get('/:id', handler(async (req, res) => {
     const row = await cotacao(req.params.id)
     const consultas = check(await db.from('frete_consultas').select('*').eq('cotacao_id', row.id).order('nome_transportadora')) ?? []
-    const envios = check(await db.from('frete_envios').select('id,consulta_id,status,error_code,created_at,attempted_at').in('consulta_id', consultas.map(c => c.id)).order('created_at', { ascending: false }).limit(200)) ?? []
-    const mensagens = check(await db.from('frete_mensagens').select('*').eq('cotacao_id', row.id).order('created_at', { ascending: false }).limit(500)) ?? []
-    res.json({ cotacao: row, consultas: consultas.map(c => ({ ...c, envios: envios.filter(e => e.consulta_id === c.id), mensagens: mensagens.filter(m => m.consulta_id === c.id).reverse() })), comparativo: compararPropostas(consultas, row.dados), config: CONFIG() })
+    const telefones=[...new Set(consultas.flatMap(c=>c.telefone?candidatosTelefone(c.telefone):[]))]
+    // All four reads depend only on the quote/consultations already loaded.
+    // Do not make the screen wait for four consecutive database round trips.
+    // Validate every result before returning any part of the detail.
+    const [envios, mensagens, anexos, pendentes] = (await Promise.all([
+      db.from('frete_envios').select('id,consulta_id,status,error_code,created_at,attempted_at').in('consulta_id', consultas.map(c => c.id)).order('created_at', { ascending: false }).limit(200),
+      db.from('frete_mensagens').select('*').eq('cotacao_id', row.id).order('created_at', { ascending: false }).limit(500),
+      db.from('frete_anexos').select('mensagem_id,status,mimetype').eq('cotacao_id',row.id),
+      telefones.length ? db.from('frete_respostas_pendentes').select('id,telefone,texto,created_at,anexo_status,mimetype').is('consulta_id',null).eq('instance_name','vivenzza-financeiro').in('telefone',telefones).order('created_at').limit(100) : Promise.resolve({data:[],error:null})
+    ])).map(result=>check(result)??[])
+    for(const consulta of consultas)consulta.respostas_pendentes=pendentes.filter(p=>telefonesEquivalentes(p.telefone,consulta.telefone))
+    res.json({ cotacao: row, consultas: consultas.map(c => ({ ...c, envios: envios.filter(e => e.consulta_id === c.id), mensagens: mensagens.filter(m => m.consulta_id === c.id).reverse().map(m=>({...m,anexo:anexos.find(a=>a.mensagem_id===m.id)||null})) })), comparativo: compararPropostas(consultas, row.dados), config: CONFIG() })
+  }))
+  router.get('/:id/anexos/:mensagemId',handler(async(req,res)=>{
+    const m=check(await db.from('frete_mensagens').select('id').eq('id',id(req.params.mensagemId)).eq('cotacao_id',id(req.params.id)).maybeSingle())
+    if(!m)throw new FreteError('Anexo não encontrado.',404)
+    const a=check(await db.from('frete_anexos').select('mimetype,conteudo_base64').eq('mensagem_id',m.id).maybeSingle())
+    if(!a?.conteudo_base64)throw new FreteError('Anexo indisponível.',404)
+    res.set({'Content-Type':a.mimetype,'Content-Disposition':'attachment; filename="proposta-frete"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).send(Buffer.from(a.conteudo_base64,'base64'))
   }))
   router.post('/:id/enviar', handler(async (req, res) => {
     if (!CONFIG().envio_ativo) throw new FreteError('Envio Evolution ainda não habilitado para este módulo. A cotação pode ser preenchida e comparada.', 409)
     const row = await cotacao(req.params.id)
     const quantidade = check(await db.rpc('frete_enfileirar_cotacao', { p_cotacao_id: row.id, p_texto: montarSolicitacao(row.dados, `FRETE-${row.id}`), p_actor: req.user.id }))
     res.json({ enfileiradas: quantidade, mensagem: 'Solicitações registradas na fila da Evolution financeira. A entrega será confirmada por transportadora.' })
+  }))
+  router.post('/:id/consultas/:consultaId/liberar-contato', handler(async(req,res)=>{
+    if(typeof req.body?.versao!=='string'||!Number.isFinite(Date.parse(req.body.versao)))throw new FreteError('Atualize o atendimento antes de liberar.',409)
+    res.json(check(await db.rpc('frete_liberar_contato',{p_cotacao_id:id(req.params.id),p_consulta_id:id(req.params.consultaId),p_versao:req.body.versao,p_actor:req.user.id})))
+  }))
+  router.post('/:id/consultas/:consultaId/respostas/:respostaId/associar',handler(async(req,res)=>{
+    if(typeof req.body?.versao!=='string'||!Number.isFinite(Date.parse(req.body.versao)))throw new FreteError('Atualize o atendimento antes de associar.',409)
+    res.json(check(await db.rpc('frete_associar_resposta',{p_cotacao_id:id(req.params.id),p_consulta_id:id(req.params.consultaId),p_resposta_id:id(req.params.respostaId),p_versao:req.body.versao,p_actor:req.user.id})))
   }))
   router.patch('/:id/consultas/:consultaId', handler(async (req, res) => {
     if (req.body?.ia_pausada === true && Object.keys(req.body).length === 1) {

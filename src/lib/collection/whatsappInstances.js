@@ -10,7 +10,6 @@
 // expirar, ela volta a ser candidata (não auto-recupera para 'connected' sozinha —
 // isso só acontece quando o healthcheck confirmar conexão de verdade).
 import { supabase } from '../supabase-admin.server.js'
-import { contarTentativasFrete } from '../fretes/attemptCounter.js'
 
 const DEGRADED_AFTER_FAILURES = 3
 const COOLDOWN_AFTER_FAILURES = 6
@@ -58,6 +57,7 @@ export async function contarEnviosReaisHojePorInstancia() {
 
 export async function contarEnviosReaisDesdePorInstancia(inicioDia) {
   if(process.env.FRETE_MODULO_INSTALADO==='true'){
+    // A assinatura histórica da RPC é preservada, mas sua cota é de cobrança.
     const {data:instancias,error}=await supabase.from('whatsapp_instances').select('id,instance_name')
     if(error)throw error
     const mapa=new Map()
@@ -73,13 +73,7 @@ export async function contarEnviosReaisDesdePorInstancia(inicioDia) {
     .gte('criado_em', inicioDia)
   if (erroDispatches) throw erroDispatches
   const idsReais = new Set((dispatches ?? []).map((d) => d.id))
-  const fretes = await contarTentativasFrete(inicioDia)
   const contagem = new Map()
-  if (fretes) {
-    const { data: financeira, error } = await supabase.from('whatsapp_instances').select('id').eq('instance_name', 'vivenzza-financeiro').maybeSingle()
-    if (error) throw error
-    if (financeira) contagem.set(financeira.id, fretes)
-  }
   if (!idsReais.size) return contagem
 
   const { data: tentativas, error: erroTentativas } = await supabase

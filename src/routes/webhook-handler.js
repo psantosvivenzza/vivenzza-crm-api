@@ -12,6 +12,7 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
 import { handleFreteInbound } from '../lib/fretes/inbound.js'
+import { lerEnvelopeFrete } from '../lib/fretes/envelope.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -289,7 +290,8 @@ export async function processWhatsappEvent(payload) {
     // Se a classificação falhar, preservar cobrança normal, exceto transportadora já identificada.
     let freteInbound = false
     try {
-      freteInbound = await handleFreteInbound({ instanceName, telefone, texto, evolutionId: msg.key?.id ?? null, fromMe, mediaTipo })
+      const envelope=lerEnvelopeFrete(msg)
+      freteInbound = await handleFreteInbound({ instanceName, telefone, texto:envelope.texto??texto, evolutionId: msg.key?.id ?? null, fromMe, mediaTipo:envelope.mediaTipo??mediaTipo,mediaMessage:envelope.mediaMessage,referencedEvolutionId:envelope.referencedEvolutionId })
     } catch (err) {
       console.error('[webhook fretes] classificação indisponível', err.code ?? 'falha')
       freteInbound = err.freteTransportadora ? { semCotacao: true } : false
