@@ -17,7 +17,11 @@ import { executarSincronizacaoPedidos } from '../src/jobs/sync-pedidos-legado.js
 executarSincronizacaoPedidos()
   .then(relatorio => {
     console.log(`[sync-pedidos-legado] ${new Date().toISOString()} —`, JSON.stringify(relatorio))
-    process.exit(relatorio.status === 'concluido_com_erros' ? 0 : 0)
+    // Só conclusão íntegra comprova sucesso ao Task Scheduler. Resultado
+    // parcial, desconhecido ou contador inconsistente deve sinalizar falha.
+    const sucesso = relatorio?.status === 'concluido'
+      && Number.isSafeInteger(relatorio.total_com_erro) && relatorio.total_com_erro === 0
+    process.exit(sucesso ? 0 : 1)
   })
   .catch(err => {
     console.error(`[sync-pedidos-legado] ERRO: ${err.message}`)
