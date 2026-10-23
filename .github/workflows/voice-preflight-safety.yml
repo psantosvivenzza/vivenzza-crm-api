@@ -1,0 +1,46 @@
+name: Voice preflight safety
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/voice-preflight-safety.yml'
+      - 'scripts/voice/verificar-servico-voz.mjs'
+      - 'scripts/lib/voice-preflight-inventory.mjs'
+      - 'scripts/tests/unit/voice-preflight-inventory.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/voice-preflight-safety.yml'
+      - 'scripts/voice/verificar-servico-voz.mjs'
+      - 'scripts/lib/voice-preflight-inventory.mjs'
+      - 'scripts/tests/unit/voice-preflight-inventory.test.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-preflight-safety-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  voice-preflight-safety:
+    name: Preflight (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # Test hooks replace both child_process and fs. No real voice process.
+      - name: Hermetic preflight tests
+        run: node --test scripts/tests/unit/voice-preflight-inventory.test.mjs
