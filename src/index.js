@@ -30,6 +30,7 @@ import cfopsRouter from './routes/cfops.js'
 import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter from './routes/sdr.js'
+import { runSiteCampaignQueue } from './jobs/site-campaign.js'
 import campanhasRouter from './routes/campanhas.js'
 import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
@@ -481,3 +482,8 @@ cron.schedule('* * * * *', async () => {
 // scripts/sync-estoque-e01.js). Um cron aqui só geraria ECONNREFUSED a cada
 // execução. A sincronização roda localmente: `node scripts/sync-pedidos-legado.mjs`
 // (manual ou agendado via Task Scheduler do Windows na máquina com acesso ao e01).
+
+// Site campaign: one durable reservation per tick; disabled until verified.
+cron.schedule('*/2 * * * *', async () => {
+ try { await runSiteCampaignQueue() } catch { console.error('[site-campaign] worker_failed') }
+}, { noOverlap:true, timezone:'America/Sao_Paulo' })
