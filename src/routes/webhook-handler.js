@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { candidatosTelefone, mascararTelefone, normalizarTelefone } from '../lib/telefone.js'
+import { candidatosTelefone, mascararTelefone, normalizarTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
 import { detectarCtwaClid, caminhosIndicioAnuncio } from '../lib/ctwa.js'
 import { buscarClienteErpPorTelefone } from '../lib/clienteErpMatch.js'
@@ -199,7 +199,7 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
 // Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser
 // chamada tanto pela rota direta (/api/whatsapp/webhook) quanto internamente
 // pelo webhook do SDR (/api/sdr/webhook), que recebe o mesmo payload da Evolution.
-export async function processWhatsappEvent(payload) {
+export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
   try {
     // Volume de "messages.update" pode chegar a dezenas por segundo (um ACK de
     // entrega/leitura por destinatário, por mensagem) — logar cada evento aqui
@@ -306,6 +306,12 @@ export async function processWhatsappEvent(payload) {
     // formato nunca era encontrado e o webhook criava um segundo lead duplicado.
     const candidatos = candidatosTelefone(telefone)
 
+    if(campaignLeadId){
+      const {data:known,error:knownError}=await supabase.from('leads')
+        .select('id,telefone,ctwa_clid,campanha_origem').eq('id',campaignLeadId).single()
+      if(knownError || !known || !telefonesEquivalentes(known.telefone,telefone))throw Error('campaign_inbox_identity_mismatch')
+      lead=known
+    }else{
     const { data: leads } = await supabase
       .from('leads')
       .select('id, telefone, ctwa_clid, campanha_origem')
@@ -313,6 +319,7 @@ export async function processWhatsappEvent(payload) {
       .limit(1)
 
     lead = leads?.[0] ?? null
+    }
 
     if (!lead && !fromMe) {
       // BUG CRÍTICO corrigido na Fase 3 (2026-08-10): leads.origem tem CHECK

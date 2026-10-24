@@ -28,6 +28,7 @@ export async function runLeadsParadosAlerta() {
     .from('leads')
     .select('id, nome, created_at, responsavel_id, usuarios!leads_responsavel_id_fkey(nome)')
     .eq('etapa', 'novo')
+    .or('campanha_origem.is.null,campanha_origem.neq.site_volte10_20261023')
     .gte('created_at', desde)
     .lt('created_at', limite)
     .order('created_at', { ascending: true })
