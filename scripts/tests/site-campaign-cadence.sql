@@ -11,9 +11,9 @@ do $$ declare was_enabled boolean; was_verified boolean; begin
  ) t(last_at,expected)
  where public.site_campaign_cadence_ready(last_at,'2026-10-24T16:00:00Z'::timestamptz) is distinct from expected)
  then raise exception 'cadence_boundary_failed'; end if;
- update public.site_campaign_config set daily_limit=50 where id='volte10_20261023';
+ update public.site_campaign_config set daily_limit=100 where id='volte10_20261023';
  begin
-  update public.site_campaign_config set daily_limit=51 where id='volte10_20261023';
+  update public.site_campaign_config set daily_limit=101 where id='volte10_20261023';
   raise exception 'daily_ceiling_missing';
  exception when check_violation then null; end;
  if exists(select 1 from public.site_campaign_config where id='volte10_20261023' and
