@@ -1,0 +1,1 @@
+alter table public.site_campaign_contacts add constraint site_campaign_contacts_unique_lead unique(campaign_id,lead_id);

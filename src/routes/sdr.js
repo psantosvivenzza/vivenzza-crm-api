@@ -2,6 +2,8 @@ import { Router } from 'express'
 import axios from 'axios'
 import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { siteCampaignContext, siteCampaignInstructions, isStopRequest, enforceSiteCampaignReply } from '../lib/siteCampaignPolicy.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
@@ -14,6 +16,9 @@ const router = Router()
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
+const sdrContext = new AsyncLocalStorage()
+const replyInstance = () => sdrContext.getStore()?.instance || EVOLUTION_INSTANCE
+const conversationTable = () => sdrContext.getStore()?.siteCampaign ? 'site_campaign_conversas' : 'sdr_conversas'
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
@@ -707,7 +712,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       evolution_id: evolutionId,
       media_tipo: mediaTipo,
       media_url: mediaUrl,
-      instance_name: EVOLUTION_INSTANCE,
+      instance_name: replyInstance(),
     }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     if (erroInsert?.code === 'PGRST204') {
       // Mesmo fallback de src/routes/webhook-handler.js: se a coluna
@@ -745,7 +750,7 @@ router.get('/estado/:telefone', auth, async (req, res) => {
   try {
     const { telefone } = req.params
     const { data, error } = await supabase
-      .from('sdr_conversas')
+      .from(conversationTable())
       .select('*')
       .eq('telefone', telefone)
       .single()
@@ -764,7 +769,7 @@ router.post('/estado', auth, async (req, res) => {
   try {
     const { telefone, estado, tipo_lead, historico, nome_cliente } = req.body
     const { data, error } = await supabase
-      .from('sdr_conversas')
+      .from(conversationTable())
       .upsert({
         telefone,
         estado,
@@ -795,7 +800,7 @@ async function baixarAudioBase64(msg) {
     }
 
     const { data: result } = await evolutionApi.post(
-      `/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`,
+      `/chat/getBase64FromMediaMessage/${replyInstance()}`,
       { message: messageObj }
     )
 
@@ -906,6 +911,7 @@ async function processarLara(event) {
     .maybeSingle()
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if (erroConfig) logarFalhaDeVerificacao('ler_config_automacoes', erroConfig.code, correlationId)
+  if (sdrContext.getStore()?.siteCampaign && (erroConfig || !configAutomacoes)) return null
   if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
 
   // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
@@ -969,6 +975,22 @@ async function processarLara(event) {
   // sem o 9º dígito após um período sem contato). Um .eq() exato perdia o histórico
   // nesse caso e a Lara reiniciava a conversa do zero.
   const candidatosConversa = candidatosTelefone(telefone)
+  const siteCampaign = sdrContext.getStore()?.siteCampaign === true
+  if (siteCampaign) {
+    // Only imported/known contacts can use the campaign AI; database errors stop it.
+    const { data: contacts, error } = await supabase.from('leads')
+      .select('id, whatsapp_opt_out, atendimento_humano')
+      .in('telefone', candidatosConversa)
+      .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if (error || !contacts?.length) return null
+    if (isStopRequest(mensagem)) {
+      const {error:stopError}=await supabase.rpc('stop_site_campaign_contact',{p_contact_id:sdrContext.getStore().recipient.id,p_phones:candidatosConversa}).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+      if(stopError) throw new Error('site_campaign_opt_out_persistence_failed')
+      await evolutionApi.post('/message/sendText/'+encodeURIComponent(replyInstance()), {number:telefone,text:'Tudo certo. Não enviaremos mais ofertas para este número.'})
+      return null
+    }
+    if (contacts.some(c => c.whatsapp_opt_out || c.atendimento_humano)) return null
+  }
 
   // S1-4: Se a vendedora assumiu o atendimento, Lara não responde nem faz follow-up.
   const { data: leadsHandoff, error: erroHandoff } = await supabase
@@ -978,11 +1000,12 @@ async function processarLara(event) {
     .eq('atendimento_humano', true)
     .limit(1)
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if (siteCampaign && erroHandoff) return null
   if (erroHandoff) logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code, correlationId)
   if (leadsHandoff && leadsHandoff.length > 0) return null
 
   const { data: conversasExistentes, error: erroHistorico } = await supabase
-    .from('sdr_conversas')
+    .from(conversationTable())
     .select('*')
     .in('telefone', candidatosConversa)
     .order('ultimo_contato', { ascending: false })
@@ -990,7 +1013,9 @@ async function processarLara(event) {
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if (erroHistorico) logarFalhaDeVerificacao('ler_historico_conversa', erroHistorico.code, correlationId)
 
+  if (siteCampaign && erroHistorico) return null
   const conversa = conversasExistentes?.[0] ?? null
+  if (siteCampaign && conversa?.status_atendimento === 'vendedor_assumiu') return null
   // Mantém o telefone já salvo como chave canônica, para não fragmentar o
   // histórico em duas linhas diferentes a cada variação de formato recebida.
   const telefoneConversa = conversa?.telefone || telefone
@@ -1015,7 +1040,7 @@ async function processarLara(event) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
     let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from('sdr_conversas').upsert(
+    await supabase.from(conversationTable()).upsert(
       {
         telefone: telefoneConversa,
         historico: historicoParaSalvar,
@@ -1035,7 +1060,7 @@ async function processarLara(event) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
     let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from('sdr_conversas').upsert(
+    await supabase.from(conversationTable()).upsert(
       { telefone: telefoneConversa, historico: historicoParaSalvar, ultimo_contato: new Date().toISOString() },
       { onConflict: 'telefone' }
     ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
@@ -1048,11 +1073,11 @@ async function processarLara(event) {
   // Fora do horário (noite, fins de semana): Lara responde via Claude para todos os leads.
   const dentroDoHorario = dentroDoHorarioComercial()
 
-  if (dentroDoHorario) {
+  if (dentroDoHorario && !siteCampaign) {
     historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
     let historicoParaSalvar = historico.slice(-20)
     if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from('sdr_conversas').upsert(
+    await supabase.from(conversationTable()).upsert(
       {
         telefone: telefoneConversa,
         historico: historicoParaSalvar,
@@ -1104,21 +1129,22 @@ async function processarLara(event) {
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
-      system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia),
+      system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia) + (siteCampaign ? siteCampaignInstructions() : ''),
       messages: messagesParaClaude,
     })
     claudeRawText = claudeResponse.content[0]?.text || ''
   } catch (anthropicErr) {
     console.error(`[sdr] Claude indisponível: correlationId=${correlationId}`, anthropicErr.message)
     try {
-      await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+      await evolutionApi.post(`/message/sendText/${replyInstance()}`, {
         number: telefone,
-        text: 'Oi! Recebi sua mensagem 😊 Nossa equipe vai entrar em contato em breve.',
+        text: siteCampaign ? 'Recebemos sua mensagem. Nosso atendimento automático está temporariamente indisponível. Você pode tentar novamente em alguns minutos.' : 'Oi! Recebi sua mensagem 😊 Nossa equipe vai entrar em contato em breve.',
       })
     } catch {}
     return null
   }
   const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia, correlationId })
+  if(siteCampaign) parsed.resposta=enforceSiteCampaignReply(String(parsed.resposta || 'Como podemos ajudar?'))
 
   // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword
   // de B2B ou B2C é detectada na mensagem — cobre leads criados sem tipo definido.
@@ -1159,7 +1185,7 @@ async function processarLara(event) {
   // preferimos arriscar reprocessar o histórico no próximo turno a deixar de
   // tentar enviar uma resposta já gerada.
   try {
-    const { error: erroSalvarEstado } = await supabase.from('sdr_conversas').upsert({
+    const { error: erroSalvarEstado } = await supabase.from(conversationTable()).upsert({
       telefone: telefoneConversa,
       estado: parsed.proximo_estado,
       tipo_lead: parsed.tipo_lead,
@@ -1189,7 +1215,7 @@ async function processarLara(event) {
   // cada turno, garantindo que etapas como "lead sumiu" ou "preço" nunca saem em áudio.
   // vozAtiva: interruptor da página /automacoes — desativado, a Lara responde só texto.
   const vozAtiva = configAutomacoes?.voz_ativa !== false
-  const deveGerarAudio = vozAtiva && (ETAPA_AUDIO[Number(parsed.etapa_cadencia)] ?? false)
+  const deveGerarAudio = !siteCampaign && vozAtiva && (ETAPA_AUDIO[Number(parsed.etapa_cadencia)] ?? false)
 
   // Checa rajada ANTES de qualquer envio (áudio ou texto) — cobre os dois caminhos
   // abaixo com uma única checagem por mensagem respondida.
@@ -1208,7 +1234,7 @@ async function processarLara(event) {
       )
 
       const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
-      const { data: envioAudio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${EVOLUTION_INSTANCE}`, {
+      const { data: envioAudio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${replyInstance()}`, {
         number: telefone,
         audio: audioBase64,
         encoding: true,
@@ -1233,7 +1259,7 @@ async function processarLara(event) {
   }
 
   try {
-    const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+    const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${replyInstance()}`, {
       number: telefone,
       text: parsed.resposta,
     })
@@ -1246,10 +1272,10 @@ async function processarLara(event) {
     console.error(`[sdr] erro ao enviar texto: correlationId=${correlationId} status=${textErr.response?.status ?? 'sem_status'}`, textErr.message)
   }
 
-  if (ACOES_CATALOGO.includes(parsed.acao)) {
+  if (!siteCampaign && ACOES_CATALOGO.includes(parsed.acao)) {
     for (const cat of catalogosParaEnviar(parsed.tipo_lead)) {
       try {
-        const { data: envioCat } = await evolutionApi.post(`/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+        const { data: envioCat } = await evolutionApi.post(`/message/sendMedia/${replyInstance()}`, {
           number: telefone,
           mediatype: 'document',
           media: cat.url,
@@ -1277,7 +1303,7 @@ async function processarLara(event) {
 // (leads no Pipeline, histórico no chat das vendedoras) continua processando
 // o mesmo payload normalmente — inclusive os eventos fromMe/status, que a
 // Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
-router.post('/webhook', webhookAuth, async (req, res) => {
+async function handleSdrWebhook(req, res) {
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
 
   // messages.update é só confirmação de entrega/leitura (✓✓) — pode chegar às dezenas
@@ -1320,6 +1346,50 @@ router.post('/webhook', webhookAuth, async (req, res) => {
       console.error('[sdr] erro ao taguear lead:', tagErr.message)
     }
   }
+}
+
+router.post('/webhook', webhookAuth, (req,res) => {
+ const instance=req.body?.instance ?? req.body?.instanceName
+ if (instance && (instance===process.env.SDR_SITE_INSTANCE || instance==='Mesagens Site Reativação')) return res.status(403).json({erro:'Use o webhook da campanha'})
+ return handleSdrWebhook(req,res)
+})
+
+router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
+  if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
+  const context = siteCampaignContext(req.body)
+  if (!context) return res.status(403).json({ erro: 'Instância da campanha não habilitada' })
+  if (req.body.event === 'messages.update') return sdrContext.run(context, () => handleSdrWebhook(req,res))
+  if(req.body.event !== 'messages.upsert') return res.json({status:'ignored'})
+  const msg=Array.isArray(req.body.data)?req.body.data[0]:req.body.data
+  if(!msg || msg.key?.fromMe) return res.json({status:'ignored'})
+  const jid=msg.key?.remoteJid?.endsWith('@lid')?msg.key?.remoteJidAlt:msg.key?.remoteJid
+  if(!jid?.endsWith('@s.whatsapp.net')) return res.json({status:'ignored'})
+  const telefone=jid.replace('@s.whatsapp.net','')
+  const {data,error}=await supabase.from('site_campaign_contacts').select('id,lead_id,status')
+    .eq('campaign_id','volte10_20261023').in('telefone',candidatosTelefone(telefone))
+    .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if(error) return res.status(503).json({erro:'Consulta da campanha indisponível'})
+  const recipient=data?.[0]
+  if(!recipient) return res.json({status:'ignored'})
+  context.recipient=recipient
+  const content=msg.message?.ephemeralMessage?.message || msg.message?.viewOnceMessage?.message || msg.message || {}
+  const incomingText=content.conversation || content.extendedTextMessage?.text || content.imageMessage?.caption || content.documentMessage?.caption || ''
+  if(isStopRequest(incomingText)) {
+    const {error:stopError}=await supabase.rpc('stop_site_campaign_contact',{p_contact_id:recipient.id,p_phones:candidatosTelefone(telefone)}).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if(stopError) return res.status(503).json({erro:'Não foi possível registrar o pedido de parada'})
+    res.json({status:'stopped'})
+    await sdrContext.run(context,async()=>{
+      try {const {data:sent}=await evolutionApi.post('/message/sendText/'+encodeURIComponent(replyInstance()),{number:telefone,text:'Tudo certo. Não enviaremos mais ofertas para este número.'});await registrarMensagemSaida({telefone,mensagem:'Tudo certo. Não enviaremos mais ofertas para este número.',evolutionId:sent?.key?.id || null})} catch {console.error('[site-campaign] stop_ack_failed')}
+      try {await processWhatsappEvent(req.body)} catch {console.error('[site-campaign] stop_inbox_failed')}
+    })
+    return
+  }
+  if(recipient.status==='blocked') return res.json({status:'ignored'})
+  // A reply consumes the pending promotion; it must not be sent later.
+  const {error:updateError}=await supabase.from('site_campaign_contacts').update({status:'replied'}).eq('id',recipient.id).neq('status','blocked')
+    .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+  if(updateError) return res.status(503).json({erro:'Registro da resposta indisponível'})
+  return sdrContext.run(context, () => handleSdrWebhook(req, res))
 })
 
 export default router

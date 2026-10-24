@@ -299,6 +299,16 @@ export async function verificarElegiveis() {
   const limiteUltimaMensagem = new Date(Date.now() - DIAS_SEM_RESPOSTA * 86400000).toISOString()
   const limiteFollowup = new Date(Date.now() - DIAS_ENTRE_FOLLOWUPS * 86400000).toISOString()
 
+  const siteContacts=[]
+  for(let offset=0;;offset+=1000){
+    const {data,error:siteError}=await supabase.from('site_campaign_contacts').select('id,lead_id,telefone').order('id').range(offset,offset+999)
+    if(siteError){console.error('[reativacao] campaign_registry_unavailable');return {elegiveis:0,enviados:0}}
+    siteContacts.push(...(data || []))
+    if(!data || data.length<1000) break
+  }
+  const siteLeadIds=new Set(siteContacts.map(c=>c.lead_id))
+  const sitePhones=new Set(siteContacts.flatMap(c=>candidatosParaSdrConversas(c.telefone)))
+
   const { data: candidatos, error } = await supabase
     .from('leads')
     .select('id, nome, telefone, tipo, etapa, responsavel_id, ultima_mensagem_em, ultimo_followup_automatico, qtd_followups_automaticos, status_reativacao')
@@ -330,6 +340,7 @@ export async function verificarElegiveis() {
   }
 
   const elegiveis = (candidatos || []).filter(lead => {
+    if(siteLeadIds.has(lead.id) || sitePhones.has(String(lead.telefone || '').replace(/\D/g,''))) return false
     const candidatosTel = candidatosParaSdrConversas(lead.telefone)
     return !candidatosTel.some(t => conversasMap[t] === 'vendedor_assumiu')
   })
