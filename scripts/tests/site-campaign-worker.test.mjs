@@ -10,7 +10,7 @@ function fixture(script, providerError=false){
  const api={async post(url,body){sent.push({url,body});if(providerError)throw Error('timeout');return {data:{key:{id:'provider-id'}}}}}
  return {run:createSiteCampaignWorker({db,api,env,mediaUrl:'https://example.com/image.jpg'}),calls,sent}
 }
-const r=(table,data,error=null)=>({table,result:{data,error}})
+const r=(table,data,error=null)=>table==='leads'?{rpc:'site_campaign_leads_for_contact',result:{data:data?.map(l=>({telefone:c.telefone,...l})),error}}:{table,result:{data,error}}
 const first=()=>[r('site_campaign_config',cfg),{rpc:'claim_site_campaign_contact',result:{data:[c]}}]
 test('opt-out prevents any provider call',async()=>{
  const f=fixture([...first(),r('leads',[{id:'l',whatsapp_opt_out:true,ativo:true}]),r('site_campaign_contacts',null)])
@@ -34,4 +34,14 @@ test('one image with approved caption uses dedicated number and records instance
  const f=fixture([...ready(),r('whatsapp_mensagens',null),r('site_campaign_contacts',null),r('site_campaign_contacts',null)])
  assert.equal((await f.run()).status,'sent');assert.equal(f.sent.length,1);assert.equal(f.sent[0].url,'/message/sendMedia/site');assert.match(f.sent[0].body.caption,/VOLTE10/);assert.doesNotMatch(f.sent[0].body.caption,/responda SAIR/)
  assert.equal(f.calls.find(c=>c.table==='whatsapp_mensagens'&&c.method==='insert').args[0].instance_name,'site')
+})
+
+test('formatted linked phone dispatches normally',async()=>{
+ const steps=ready();steps[2]=r('leads',[{id:'l',telefone:'(51) 99999-9999',ativo:true}]);
+ const f=fixture([...steps,r('whatsapp_mensagens',null),r('site_campaign_contacts',null),r('site_campaign_contacts',null)]);
+ assert.equal((await f.run()).status,'sent');assert.equal(f.sent.length,1)
+})
+test('changed linked phone pauses before provider IO',async()=>{
+ const f=fixture([...first(),r('leads',[{id:'l',telefone:'5551988887777',ativo:true}]),r('site_campaign_config',null),r('site_campaign_contacts',null)]);
+ assert.equal((await f.run()).status,'paused');assert.equal(f.sent.length,0)
 })

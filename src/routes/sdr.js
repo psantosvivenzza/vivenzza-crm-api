@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { siteCampaignContext, siteCampaignInstructions, isStopRequest, enforceSiteCampaignReply } from '../lib/siteCampaignPolicy.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
-import { candidatosTelefone, mascararTelefone } from '../lib/telefone.js'
+import { candidatosTelefone, mascararTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
@@ -704,7 +704,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
     // (health, volume comercial x financeiro) ficava cega pras respostas da
     // Lara (achado de auditoria b264e419).
     const { error: erroInsert } = await supabase.from('whatsapp_mensagens').insert({
-      lead_id: leads?.[0]?.id ?? null,
+      lead_id: sdrContext.getStore()?.recipient?.lead_id ?? leads?.[0]?.id ?? null,
       mensagem,
       direcao: 'saida',
       telefone,
@@ -720,7 +720,7 @@ async function registrarMensagemSaida({ telefone, mensagem, evolutionId, mediaTi
       // 20260101000041 não aplicada), regrava sem ela — nunca perde o
       // registro local só porque uma coluna nova ainda não chegou.
       const { error: erroFallback } = await supabase.from('whatsapp_mensagens').insert({
-        lead_id: leads?.[0]?.id ?? null,
+        lead_id: sdrContext.getStore()?.recipient?.lead_id ?? leads?.[0]?.id ?? null,
         mensagem,
         direcao: 'saida',
         telefone,
@@ -978,18 +978,18 @@ async function processarLara(event) {
   const siteCampaign = sdrContext.getStore()?.siteCampaign === true
   if (siteCampaign) {
     // Only imported/known contacts can use the campaign AI; database errors stop it.
-    const { data: contacts, error } = await supabase.from('leads')
-      .select('id, whatsapp_opt_out, atendimento_humano')
-      .in('telefone', candidatosConversa)
+    const { data: contacts, error } = await supabase.rpc('site_campaign_leads_for_contact',
+      {p_lead_id:sdrContext.getStore().recipient.lead_id,p_phones:candidatosConversa})
       .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-    if (error || !contacts?.length) return null
+    const linkedContact=contacts?.find(c=>c.id===sdrContext.getStore().recipient.lead_id)
+    if (error || !linkedContact || !telefonesEquivalentes(linkedContact.telefone,telefone)) return null
     if (isStopRequest(mensagem)) {
       const {error:stopError}=await supabase.rpc('stop_site_campaign_contact',{p_contact_id:sdrContext.getStore().recipient.id,p_phones:candidatosConversa}).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
       if(stopError) throw new Error('site_campaign_opt_out_persistence_failed')
       await evolutionApi.post('/message/sendText/'+encodeURIComponent(replyInstance()), {number:telefone,text:'Tudo certo. Não enviaremos mais ofertas para este número.'})
       return null
     }
-    if (contacts.some(c => c.whatsapp_opt_out || c.atendimento_humano)) return null
+    if (contacts.some(c => c.whatsapp_opt_out || c.atendimento_humano || c.ativo===false)) return null
   }
 
   // S1-4: Se a vendedora assumiu o atendimento, Lara não responde nem faz follow-up.
@@ -1311,7 +1311,7 @@ async function handleSdrWebhook(req, res) {
   // pipeline da IA: vai direto pro fluxo humano, que só faz um UPDATE indexado.
   if (req.body?.event === 'messages.update') {
     try {
-      await processWhatsappEvent(req.body)
+      await processWhatsappEvent(req.body, {campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})
     } catch (err) {
       console.error('[sdr] erro ao repassar status para o fluxo humano:', err.message)
     }
@@ -1326,7 +1326,7 @@ async function handleSdrWebhook(req, res) {
   }
 
   try {
-    await processWhatsappEvent(req.body)
+    await processWhatsappEvent(req.body, {campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})
   } catch (err) {
     console.error('[sdr] erro ao repassar para o fluxo humano:', err.message)
   }
@@ -1380,7 +1380,7 @@ router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
     res.json({status:'stopped'})
     await sdrContext.run(context,async()=>{
       try {const {data:sent}=await evolutionApi.post('/message/sendText/'+encodeURIComponent(replyInstance()),{number:telefone,text:'Tudo certo. Não enviaremos mais ofertas para este número.'});await registrarMensagemSaida({telefone,mensagem:'Tudo certo. Não enviaremos mais ofertas para este número.',evolutionId:sent?.key?.id || null})} catch {console.error('[site-campaign] stop_ack_failed')}
-      try {await processWhatsappEvent(req.body)} catch {console.error('[site-campaign] stop_inbox_failed')}
+      try {await processWhatsappEvent(req.body, {campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})} catch {console.error('[site-campaign] stop_inbox_failed')}
     })
     return
   }
