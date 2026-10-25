@@ -1,12 +1,28 @@
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { candidatosTelefone, telefonesEquivalentes } from '../lib/telefone.js'
+import { candidatosTelefone, telefonesEquivalentes, normalizarTelefone, paraJidWhatsapp } from '../lib/telefone.js'
 import { SITE_CAMPAIGN } from '../lib/siteCampaignPolicy.js'
 export const CAMPAIGN_ID = 'volte10_20261023'
 const TEMPLATE = "Olá, [nome]! Tudo bem? 💗\n\nAqui é da Vivenzza Professional! Passamos para te deixar um presente para o seu pedido:\n\n🎟️ 10% OFF com o cupom VOLTE10\n\nSe estiver em dúvida sobre qual produto escolher, responda por aqui. A gente te ajuda a encontrar o cuidado para o seu cabelo! ✨\n\n👉 https://loja.vivenzzaprofessional.com.br/discount/VOLTE10\n\nVálido até 06/11. Um uso por cliente, não cumulativo com outras promoções."
 export function campaignMessage(name) {
  const first = String(name || '').trim().split(/\s+/)[0].replace(/[\r\n]/g,'').slice(0,60)
  return TEMPLATE.replace('[nome]',first || 'tudo bem')
+}
+export async function checkSiteRecipient(api,instance,phone){
+ const numbers=[...new Set(candidatosTelefone(paraJidWhatsapp(normalizarTelefone(phone)||'')).filter(n=>/^55\d{10,11}$/.test(n)))]
+ if(!numbers.length)throw Error('invalid_recipient_phone')
+ const {data:checks}=await api.post('/chat/whatsappNumbers/'+encodeURIComponent(instance),{numbers})
+ if(!Array.isArray(checks))throw Error('invalid_number_check')
+ const results=numbers.map(number=>{
+  const rows=checks.filter(row=>String(row.number||'').replace(/\D/g,'')===number)
+  if(rows.length!==1 || typeof rows[0].exists!=='boolean')throw Error('invalid_number_check')
+  return rows[0]
+ })
+ const positives=results.filter(row=>row.exists)
+ if(!positives.length)return {exists:false}
+ const jids=positives.map(row=>{const number=String(row.jid||'').split('@')[0];if(!/^\d{10,15}@s\.whatsapp\.net$/.test(row.jid||'') || !telefonesEquivalentes(number,phone))throw Error('invalid_recipient_jid');return number})
+ if(new Set(jids).size!==1)throw Error('ambiguous_recipient_jid')
+ return {exists:true,number:jids[0]}
 }
 export function createSiteCampaignWorker({db, api, env, mediaUrl}) {
  return async function run() {
@@ -18,9 +34,9 @@ export function createSiteCampaignWorker({db, api, env, mediaUrl}) {
   if(error) throw new Error('site_campaign_claim_failed')
   const contact=data?.[0]
   if(!contact) return {status:'waiting'}
-  const pause=async(code)=>{
+  const pause=async(code,uncertain=true)=>{
    await db.from('site_campaign_config').update({enabled:false}).eq('id',CAMPAIGN_ID)
-   await db.from('site_campaign_contacts').update({status:'uncertain',last_error:code}).eq('id',contact.id).eq('status','reserved')
+   await db.from('site_campaign_contacts').update({status:uncertain?'uncertain':'pending',last_error:code}).eq('id',contact.id).eq('status','reserved')
   }
   // Recheck all local/ninth-digit variants immediately before provider I/O.
   const {data: leads,error: leadError}=await db.rpc('site_campaign_leads_for_contact',{p_lead_id:contact.lead_id,p_phones:candidatosTelefone(contact.telefone)})
@@ -31,6 +47,18 @@ export function createSiteCampaignWorker({db, api, env, mediaUrl}) {
    if(e) throw new Error('site_campaign_block_persistence_failed')
    return {status:'blocked'}
   }
+  // A definitive recipient rejection must not stop unrelated recipients.
+  // Unknown/malformed checks still pause; never retry uncertain sends.
+  let recipient
+  try {recipient=await checkSiteRecipient(api,cfg.instance_name,contact.telefone)}
+  catch {await pause('recipient_check_unavailable',false);return {status:'paused'}}
+  if(!recipient.exists){
+   try{const {data:state}=await api.get('/instance/connectionState/'+encodeURIComponent(cfg.instance_name));if(state.instance?.state!=='open')throw Error('instance_not_open')}
+   catch{await pause('recipient_check_instance_unavailable',false);return {status:'paused'}}
+   const {error:e}=await db.from('site_campaign_contacts').update({status:'blocked',last_error:'recipient_not_on_whatsapp'}).eq('id',contact.id).eq('status','reserved')
+   if(e){await pause('recipient_block_persistence_failed',false);return {status:'paused'}}
+   return {status:'blocked'}
+  }
   const {data: latest,error: latestError}=await db.from('site_campaign_config').select('enabled,ai_verified,instance_name').eq('id',CAMPAIGN_ID).single()
   if(latestError || !latest.enabled || !latest.ai_verified || latest.instance_name!==cfg.instance_name || Date.now()>Date.parse(SITE_CAMPAIGN.expiresAt)){await pause('preflight_changed');return {status:'paused'}}
   const {data: current,error: currentError}=await db.from('site_campaign_contacts').select('status').eq('id',contact.id).single()
@@ -39,7 +67,7 @@ export function createSiteCampaignWorker({db, api, env, mediaUrl}) {
   const text=campaignMessage(contact.nome)
   let id
   try {
-   const {data: sent}=await api.post('/message/sendMedia/'+encodeURIComponent(cfg.instance_name),{number:contact.telefone,mediatype:'image',mimetype:'image/jpeg',media:mediaUrl,fileName:'Vivenzza-VOLTE10-0611.jpg',caption:text})
+   const {data: sent}=await api.post('/message/sendMedia/'+encodeURIComponent(cfg.instance_name),{number:recipient.number,mediatype:'image',mimetype:'image/jpeg',media:mediaUrl,fileName:'Vivenzza-VOLTE10-0611.jpg',caption:text})
    id=sent?.key?.id
    if(!id) throw new Error('missing_provider_id')
   } catch {await pause('provider_outcome_uncertain');return {status:'paused'}}

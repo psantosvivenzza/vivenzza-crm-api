@@ -21,3 +21,7 @@ Ampliação autorizada em 24/10: exportação oficial de clientes e carrinhos ab
 A ampliação também exclui DNC vigente e atendimento humano anterior por variantes de telefone. O worker e a IA confirmam a identidade pelo lead vinculado. Leads desta importação são excluídos somente do alerta de novos leads parados. Validação: 27 testes de audiência, política, worker e webhook; RPCs verificados em transação com rollback e permissões restritas ao service_role.
 
 Em 24/10, após a ampliação da base, o usuário autorizou 100 tentativas por dia exclusivamente para VOLTE10. A migration 20261024174500 eleva o CHECK, default e configuração desta campanha; mantém dez por hora, mínimo de seis minutos, janela 09h–22h BRT, bloqueios e gates. O teto é um máximo, não uma garantia de volume diário.
+
+Correção 25/10: o worker consulta whatsappNumbers antes do envio, verifica identidade e bloqueia apenas o destinatário quando exists=false. Resposta inconclusiva, falha técnica ou envio sem confirmação continuam pausando sem retry. Isso evita que números sem WhatsApp interrompam a campanha inteira.
+
+A pré-checagem consulta formas com e sem nono dígito; bloqueia somente quando ambas negam existência. Quando há confirmação, usa o JID validado devolvido pelo provedor. Falha de consulta antes do envio mantém o contato pendente e pausa a campanha, sem registrar envio incerto inexistente.
