@@ -25,3 +25,5 @@ Em 24/10, após a ampliação da base, o usuário autorizou 100 tentativas por d
 Correção 25/10: o worker consulta whatsappNumbers antes do envio, verifica identidade e bloqueia apenas o destinatário quando exists=false. Resposta inconclusiva, falha técnica ou envio sem confirmação continuam pausando sem retry. Isso evita que números sem WhatsApp interrompam a campanha inteira.
 
 A pré-checagem consulta formas com e sem nono dígito; bloqueia somente quando ambas negam existência. Quando há confirmação, usa o JID validado devolvido pelo provedor. Falha de consulta antes do envio mantém o contato pendente e pausa a campanha, sem registrar envio incerto inexistente.
+
+Correção 27/10: recibos no endpoint dedicado são monotônicos e filtrados por instância, mensagem e direção de saída. SERVER_ACK atrasado não pode rebaixar entregue/lido/reproduzido. Falha de persistência responde 503 para permitir nova entrega do webhook. O gate de qualidade permanece ativo; reconciliações usam evidência de ACK do provedor, sem reenviar mensagens.
