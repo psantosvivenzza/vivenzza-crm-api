@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { siteCampaignContext, siteCampaignInstructions, isStopRequest, enforceSiteCampaignReply } from '../lib/siteCampaignPolicy.js'
+import { applySiteCampaignReceipts } from '../lib/siteCampaignReceipts.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone, mascararTelefone, telefonesEquivalentes } from '../lib/telefone.js'
@@ -1358,7 +1359,10 @@ router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
   if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
   const context = siteCampaignContext(req.body)
   if (!context) return res.status(403).json({ erro: 'Instância da campanha não habilitada' })
-  if (req.body.event === 'messages.update') return sdrContext.run(context, () => handleSdrWebhook(req,res))
+  if (req.body.event === 'messages.update') {
+    try {await applySiteCampaignReceipts(supabase,req.body,context.instance);return res.json({status:'ok'})}
+    catch {console.error('[site-campaign] receipt_persistence_failed');return res.status(503).json({erro:'Falha ao registrar recibo da campanha'})}
+  }
   if(req.body.event !== 'messages.upsert') return res.json({status:'ignored'})
   const msg=Array.isArray(req.body.data)?req.body.data[0]:req.body.data
   if(!msg || msg.key?.fromMe) return res.json({status:'ignored'})

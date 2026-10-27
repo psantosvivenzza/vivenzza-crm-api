@@ -9,7 +9,7 @@ process.env.SDR_SITE_INSTANCE='site-test'
 process.env.EVOLUTION_WEBHOOK_TOKEN='test-only-webhook-token'
 let scenario='unknown';let dbCalls=[];let sends=[];let rpcCalls=[]
 axios.create=()=>({post:async(url,body)=>{sends.push({url,body});return {data:{key:{id:'test-id'}}}},get:async()=>({data:{}})})
-supabase.from=(table)=>{dbCalls.push(table);const q=new Proxy({}, {get(_t,k){if(k==='then')return resolve=>resolve({data:table==='site_campaign_contacts'?(scenario==='unknown'?[]:[{id:'contact-id',lead_id:'lead-id',status:scenario==='blocked-stop'?'blocked':'sent'}]):[],error:null});return ()=>q}});return q}
+supabase.from=(table)=>{dbCalls.push(table);const q=new Proxy({}, {get(_t,k){if(k==='then')return resolve=>resolve({data:table==='site_campaign_contacts'?(scenario==='unknown'?[]:[{id:'contact-id',lead_id:'lead-id',status:scenario==='blocked-stop'?'blocked':'sent'}]):[],error:table==='whatsapp_mensagens'&&scenario==='receipt-error'?{code:'db'}:null});return ()=>q}});return q}
 supabase.rpc=(name,args)=>{rpcCalls.push({name,args});const q=new Proxy({}, {get(_t,k){if(k==='then')return resolve=>resolve({data:null,error:null});return ()=>q}});return q}
 const originalSchedule=cron.schedule
 cron.schedule=()=>({stop(){},destroy(){}})
@@ -28,3 +28,8 @@ test('unknown contact cannot enter by sending twice',async()=>{scenario='unknown
 test('old webhook cannot process dedicated instance',async()=>{dbCalls=[];assert.equal((await request('/api/sdr/webhook',event())).status,403);assert.equal(dbCalls.length,0)})
 test('stop works even while AI config is unavailable and retries blocked contact',async()=>{scenario='blocked-stop';dbCalls=[];sends=[];rpcCalls=[];const r=await request('/api/sdr/site-reativacao/webhook',event('PARE'));assert.equal(r.body.status,'stopped');assert.equal(rpcCalls[0].name,'stop_site_campaign_contact');assert.equal(dbCalls.includes('automacoes_config'),false);assert.equal(sends[0].url,'/message/sendText/site-test')})
 test.after(()=>{server.closeAllConnections();server.close()})
+
+test('dedicated delivery receipts bypass sales AI and commercial receipt handler',async()=>{dbCalls=[];sends=[];const r=await request('/api/sdr/site-reativacao/webhook',{instance:'site-test',event:'messages.update',data:{keyId:'known-provider-id',status:'DELIVERY_ACK'}});assert.equal(r.status,200);assert.deepEqual(dbCalls,['whatsapp_mensagens']);assert.equal(sends.length,0)})
+
+
+test('dedicated receipt database failure returns retryable 503',async()=>{scenario='receipt-error';sends=[];const r=await request('/api/sdr/site-reativacao/webhook',{instance:'site-test',event:'messages.update',data:{keyId:'known-provider-id',status:'READ'}});assert.equal(r.status,503);assert.equal(sends.length,0)})
