@@ -24,6 +24,7 @@
     "audit:netvision:full": "npm run audit:netvision:pedidos && npm run audit:netvision:faturamento && npm run audit:netvision:financeiro && npm run audit:netvision:clientes && npm run audit:netvision:pagamentos",
     "sync:clientes:legado:dry-run": "node scripts/sync-clientes-legado.mjs --dry-run",
     "sync:clientes:legado": "node scripts/sync-clientes-legado.mjs",
+    "test:financeiro:cli:safety": "node --test scripts/tests/financeiro-cli-safety.test.mjs scripts/tests/financeiro-phase.test.mjs",
     "analise:duplicados-financeiro": "node scripts/analise-duplicados-financeiro.mjs",
     "preview:duplicados-financeiro": "node scripts/preview-duplicados-financeiro.mjs",
     "preview:resolucao-conflitos-financeiro": "node scripts/preview-resolucao-conflitos-financeiro.mjs",
