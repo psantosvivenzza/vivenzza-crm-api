@@ -1,0 +1,54 @@
+name: Pedidos checkpoint safety
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pedidos-checkpoint-safety.yml'
+      - 'src/jobs/sync-pedidos-legado.js'
+      - 'src/lib/pedidos-conexao.js'
+      - 'scripts/tests/unit/pedidos-checkpoint.test.mjs'
+      - 'scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs'
+      - 'scripts/sync-pedidos-legado.mjs'
+      - 'sync-pedidos.bat'
+      - 'package.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pedidos-checkpoint-safety.yml'
+      - 'src/jobs/sync-pedidos-legado.js'
+      - 'src/lib/pedidos-conexao.js'
+      - 'scripts/tests/unit/pedidos-checkpoint.test.mjs'
+      - 'scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs'
+      - 'scripts/sync-pedidos-legado.mjs'
+      - 'sync-pedidos.bat'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pedidos-checkpoint-safety-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pedidos-checkpoint-safety:
+    name: Checkpoint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # Import hooks replace pg, Supabase, E01 and physical logistics before import.
+      - name: Hermetic checkpoint regression tests
+        run: node --test scripts/tests/unit/pedidos-checkpoint.test.mjs scripts/tests/sync-pedidos-bat-wrapper-20260920.test.mjs
