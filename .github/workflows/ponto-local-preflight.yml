@@ -1,0 +1,48 @@
+name: Meu Ponto local preflight
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ponto-local-preflight.yml'
+      - 'local-equipamento-service/servico.mjs'
+      - 'scripts/tests/ponto/servico-local-preflight-e-allowlist.test.mjs'
+      - 'scripts/tests/ponto/_processo-local.mjs'
+      - 'scripts/tests/ponto/servico-local-processo.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ponto-local-preflight.yml'
+      - 'local-equipamento-service/servico.mjs'
+      - 'scripts/tests/ponto/servico-local-preflight-e-allowlist.test.mjs'
+      - 'scripts/tests/ponto/_processo-local.mjs'
+      - 'scripts/tests/ponto/servico-local-processo.test.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ponto-local-preflight-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ponto-local-preflight:
+    name: Pareamento HTTP (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # Temporary loopback HTTP child; execFile is mocked, never real CNG.
+      - name: Local pairing guards without hardware
+        run: node --test scripts/tests/ponto/servico-local-processo.test.mjs scripts/tests/ponto/servico-local-preflight-e-allowlist.test.mjs
