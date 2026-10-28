@@ -82,17 +82,22 @@ export async function verificarFrescorSync({ ignorarCache = false, clienteSupaba
       r = resultado({ allowed: false, reason: 'ultimo_sync_falhou', lastSyncAt: data.concluido_em ?? data.iniciado_em, maxAgeMinutes: maxAtrasoMin })
     } else if (data.status === 'executando') {
       r = resultado({ allowed: false, reason: 'ultimo_sync_em_andamento', maxAgeMinutes: maxAtrasoMin })
-    } else if (Number(data.total_com_erro || 0) > 0) {
+    } else if (data.status === 'concluido_com_erros' || Number(data.total_com_erro || 0) > 0) {
       // Cobre status='concluido_com_erros' e qualquer 'concluido' com erro
       // parcial — pelo menos um título não foi verificado corretamente
       // nesse ciclo, não é confiável o suficiente pra liberar cobrança.
       r = resultado({ allowed: false, reason: 'ultimo_sync_com_erros', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
+    } else if (data.status !== 'concluido') {
+      r = resultado({ allowed: false, reason: 'ultimo_sync_status_invalido', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
     } else if (!data.concluido_em) {
       r = resultado({ allowed: false, reason: 'ultimo_sync_sem_timestamp_conclusao', maxAgeMinutes: maxAtrasoMin })
     } else {
       const concluidoEm = new Date(data.concluido_em)
       if (Number.isNaN(concluidoEm.getTime())) {
         r = resultado({ allowed: false, reason: 'timestamp_invalido', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
+      } else if (concluidoEm.getTime() > Date.now()) {
+        // Check before rounding age: even a slightly future completion is not evidence of a completed sync.
+        r = resultado({ allowed: false, reason: 'timestamp_futuro', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
       } else {
         const ageMinutes = Math.round((Date.now() - concluidoEm.getTime()) / 60000)
         r = ageMinutes > maxAtrasoMin

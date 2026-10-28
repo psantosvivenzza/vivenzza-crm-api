@@ -11,6 +11,13 @@ import { supabase } from '../supabase-admin.server.js'
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { promessaAtivaPara, marcarPromessaCumprida } from './promises.js'
 
+// Usar apenas nos acessos diretos a collection_calls, tabela opcional.
+// PostgreSQL direto retorna 42P01; PostgREST retorna PGRST205 para tabela ausente.
+// Permissão, rede, coluna ausente e outros códigos continuam sendo erros.
+function tabelaLigacoesOpcionalAusente(error) {
+  return error?.code === '42P01' || error?.code === 'PGRST205'
+}
+
 // Motivos possíveis, do mais específico pro genérico — usados por
 // dispatchEngine.enviarComFailover para distinguir a causa do bloqueio (antes
 // os 4 casos abaixo colapsavam no mesmo motivo:'quitado'). `quitado:true`
@@ -74,9 +81,8 @@ export async function cancelarAutomacaoPorPagamento(contasFinanceirasId) {
   // voz experimental (docs/archive/cobranca-ai-v2-original/) — não existe no
   // schema real hoje (a tabela real de voz, voice_calls, é só auditoria
   // técnica de chamada já feita, não uma fila de pendências a cancelar).
-  // Erro 42P01 (relation does not exist, SQLSTATE do Postgres — não é uma
-  // string arbitrária, é o código padrão pra "tabela não existe") é tratado
-  // como "feature ainda não existe" e SÓ esse código — qualquer outro erro
+  // Somente ausência dessa tabela (42P01 em PostgreSQL direto ou PGRST205
+  // em PostgREST) é tratada como feature ainda não existente. Qualquer outro erro
   // (conexão caída, auth, timeout) continua propagando normalmente, nunca é
   // engolido. Se a tabela vier a existir no futuro, o cancelamento passa a
   // funcionar sem mudar código.
@@ -85,7 +91,7 @@ export async function cancelarAutomacaoPorPagamento(contasFinanceirasId) {
     .select('id')
     .eq('contas_financeiras_id', contasFinanceirasId)
     .in('status', ['agendada', 'em_andamento'])
-  if (errLigacoes && errLigacoes.code !== '42P01') throw errLigacoes
+  if (errLigacoes && !tabelaLigacoesOpcionalAusente(errLigacoes)) throw errLigacoes
   for (const l of ligacoes ?? []) {
     const { data: cancelada, error: errCancelarLigacao } = await supabase
       .from('collection_calls')
@@ -94,7 +100,7 @@ export async function cancelarAutomacaoPorPagamento(contasFinanceirasId) {
       .in('status', ['agendada', 'em_andamento'])
       .select()
       .maybeSingle()
-    if (errCancelarLigacao && errCancelarLigacao.code !== '42P01') throw errCancelarLigacao
+    if (errCancelarLigacao && !tabelaLigacoesOpcionalAusente(errCancelarLigacao)) throw errCancelarLigacao
     if (cancelada) canceladas.ligacoes++
   }
 
@@ -145,22 +151,26 @@ export async function cancelarAutomacaoPorPagamento(contasFinanceirasId) {
 export async function varrerTitulosPendentesEcancelarQuitados() {
   const idsComPendencia = new Set()
 
-  const { data: dispatchesAbertos } = await supabase
+  const { data: dispatchesAbertos, error: erroDispatches } = await supabase
     .from('collection_dispatches')
     .select('contas_financeiras_id')
     .in('status', ['queued', 'sending'])
+  if (erroDispatches) throw erroDispatches
   for (const d of dispatchesAbertos ?? []) idsComPendencia.add(d.contas_financeiras_id)
 
-  const { data: promessasAtivas } = await supabase
+  const { data: promessasAtivas, error: erroPromessas } = await supabase
     .from('collection_promises')
     .select('contas_financeiras_id')
     .eq('status', 'ativa')
+  if (erroPromessas) throw erroPromessas
   for (const p of promessasAtivas ?? []) idsComPendencia.add(p.contas_financeiras_id)
 
-  const { data: ligacoesAbertas } = await supabase
+  const { data: ligacoesAbertas, error: erroLigacoes } = await supabase
     .from('collection_calls')
     .select('contas_financeiras_id')
     .in('status', ['agendada', 'em_andamento'])
+  // Mesmo contrato restrito à tabela opcional usado no cancelamento individual.
+  if (erroLigacoes && !tabelaLigacoesOpcionalAusente(erroLigacoes)) throw erroLigacoes
   for (const l of ligacoesAbertas ?? []) idsComPendencia.add(l.contas_financeiras_id)
 
   let quitados = 0
