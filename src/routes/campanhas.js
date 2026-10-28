@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import axios from 'axios'
+import { metaResults, readMetadata } from '../lib/campaignMetrics.js'
 
 const router = Router()
 
@@ -23,33 +24,11 @@ const getCost = (costs, type) => {
   return v != null ? parseFloat(v) : null
 }
 
-// Resultado correto por tipo de campanha. Antes tudo era lido como "conversa iniciada",
-// o que distorcia Landing (leads de formulário) e Lookalike (compras).
-const LEAD_TYPES = ['lead', 'offsite_conversion.fb_pixel_lead', 'onsite_conversion.lead_grouped']
-const PURCHASE_TYPES = ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase']
 const CONVERSA_TYPE = 'onsite_conversion.messaging_conversation_started_7d'
 
-// Os tipos se sobrepõem (mesmo evento sob nomes diferentes): pega o maior, nunca soma.
-const maxAction = (actions, types) =>
-  Math.max(0, ...types.map((t) => getAction(actions, t)))
-
-function tipoResultado(nome = '') {
-  if (/landing|formul|lead/i.test(nome)) return 'lead'
-  if (/lookalike|compra|venda|cat[aá]logo|shopping/i.test(nome)) return 'compra'
-  return 'conversa'
-}
-
 function resultadoCampanha(c) {
-  let tipo = tipoResultado(c.campaign_name)
-  let qtd = tipo === 'lead' ? maxAction(c.actions, LEAD_TYPES)
-    : tipo === 'compra' ? maxAction(c.actions, PURCHASE_TYPES)
-    : getAction(c.actions, CONVERSA_TYPE)
-  // Se o tipo esperado não registrou nada mas há conversas, mostra conversas.
-  if (qtd === 0 && tipo !== 'conversa') {
-    const conv = getAction(c.actions, CONVERSA_TYPE)
-    if (conv > 0) { tipo = 'conversa'; qtd = conv }
-  }
-  return { tipo, qtd }
+  const r = metaResults(c.actions)
+  return { tipo: r.tipoResultado, qtd: r.resultados, metricas: r.metricas }
 }
 
 // ─── Meta provider ────────────────────────────────────────────────────────────
@@ -85,9 +64,10 @@ async function metaFetchInsights(since, until, timeIncrement = null) {
   let reqParams = params
   let rows = []
   for (let i = 0; i < 40; i++) {
-    const { data } = await axios.get(url, { params: reqParams })
+    const { data } = await axios.get(url, { params: reqParams, timeout: 20000 })
     rows = rows.concat(data.data || [])
     if (!data.paging?.next) break
+    if (i === 39) throw new Error('Leitura Meta incompleta: limite de páginas atingido.')
     url = data.paging.next
     reqParams = undefined
   }
@@ -101,7 +81,7 @@ async function metaFetchStatuses(ids) {
     try {
       const { data } = await axios.get(
         `https://graph.facebook.com/${META_GRAPH_VERSION}/${id}`,
-        { params: { fields: 'id,status', access_token: META_ACCESS_TOKEN } }
+        { params: { fields: 'id,status', access_token: META_ACCESS_TOKEN }, timeout: 20000 }
       )
       map[id] = data.status
     } catch {
@@ -132,6 +112,7 @@ function metaNormalizeResumo(insights, statusMap) {
       return {
         tipoResultado: r.tipo,
         resultados: r.qtd,
+        metricas: r.metricas,
         custoResultado: r.qtd > 0 ? parseFloat((gasto / r.qtd).toFixed(2)) : null,
       }
     })(),
@@ -142,10 +123,11 @@ function metaNormalizeHistorico(insights) {
   const byDay = {}
   for (const c of insights) {
     const dia = c.date_start
-    if (!byDay[dia]) byDay[dia] = { dia, gasto: 0, conversas: 0, resultados: 0 }
+    if (!byDay[dia]) byDay[dia] = { dia, gasto: 0, conversas: 0, resultados: null, metricas: { conversa: 0, lead: 0, compra: 0 } }
     byDay[dia].gasto = parseFloat((byDay[dia].gasto + parseFloat(c.spend || 0)).toFixed(2))
     byDay[dia].conversas += getAction(c.actions, CONVERSA_TYPE)
-    byDay[dia].resultados += resultadoCampanha(c).qtd
+    const { metricas } = resultadoCampanha(c)
+    for (const tipo of Object.keys(metricas)) byDay[dia].metricas[tipo] += metricas[tipo]
   }
   return Object.values(byDay).sort((a, b) => a.dia.localeCompare(b.dia))
 }
@@ -154,6 +136,7 @@ function metaNormalizeHistorico(insights) {
 
 // GET /api/admin/campanhas/resumo
 router.get('/resumo', async (req, res) => {
+  if (!process.env.META_ACCESS_TOKEN || !process.env.META_AD_ACCOUNT_ID) return res.status(503).json({ codigo: 'CAMPANHAS_NAO_CONFIGURADO', erro: 'Meta Ads não configurado.' })
   try {
     const { since, until } = dateRange(30)
     const insights = await metaFetchInsights(since, until)
@@ -170,16 +153,17 @@ router.get('/resumo', async (req, res) => {
     prevStart.setDate(prevStart.getDate() - 29)
 
     let prevInsights = []
+    let comparacaoDisponivel = true
     try {
       prevInsights = await metaFetchInsights(
         prevStart.toISOString().split('T')[0],
         prevEnd.toISOString().split('T')[0]
       )
-    } catch { /* período anterior é melhor-esforço */ }
+    } catch { comparacaoDisponivel = false }
 
     const prevCampanhas = metaNormalizeResumo(prevInsights, {})
 
-    res.json({ campanhas, prevCampanhas, periodo: { since, until } })
+    res.json({ campanhas, prevCampanhas, periodo: { since, until }, dados: readMetadata(new Date(), { comparacaoDisponivel }) })
   } catch (err) {
     console.error('[campanhas/resumo]', err.response?.data ?? err.message)
     res.status(500).json({ erro: err.message, detail: err.response?.data })
@@ -188,11 +172,12 @@ router.get('/resumo', async (req, res) => {
 
 // GET /api/admin/campanhas/historico
 router.get('/historico', async (req, res) => {
+  if (!process.env.META_ACCESS_TOKEN || !process.env.META_AD_ACCOUNT_ID) return res.status(503).json({ codigo: 'CAMPANHAS_NAO_CONFIGURADO', erro: 'Meta Ads não configurado.' })
   try {
     const { since, until } = dateRange(30)
     const insights = await metaFetchInsights(since, until, 1)
     const serie = metaNormalizeHistorico(insights)
-    res.json({ serie, periodo: { since, until } })
+    res.json({ serie, periodo: { since, until }, dados: readMetadata() })
   } catch (err) {
     console.error('[campanhas/historico]', err.response?.data ?? err.message)
     res.status(500).json({ erro: err.message, detail: err.response?.data })
