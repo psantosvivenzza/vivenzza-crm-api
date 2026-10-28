@@ -68,11 +68,7 @@ import { mascararTelefone } from '../../src/lib/telefone.js'
 import { construirPayloadOriginateExterno, validarTelefoneBrasileiro } from '../../src/lib/voice/outboundExternalTest.js'
 import { buscarEstadoChamadasExternas, registrarTentativa } from '../../src/lib/voice/voiceCallsRepo.js'
 import { avaliarProximaTentativa } from '../../src/lib/voice/reguaTentativas.js'
-
-const ARI_URL = process.env.ARI_URL || 'http://127.0.0.1:8088'
-const ARI_USER = process.env.ARI_USER
-const ARI_PASSWORD = process.env.ARI_PASSWORD
-const ARI_APP = process.env.ARI_APP || 'vivenzza-voice-ai'
+import { phoneKey } from '../../src/lib/collection/approvedPortfolio.js'
 
 const CONFIRMAR = process.argv.includes('--confirm')
 const LIMITE = Number(process.argv.find((a) => a.startsWith('--limite='))?.split('=')[1] ?? 5)
@@ -150,17 +146,28 @@ export async function avaliarGuardsCobrancaDoCliente(codigoCliente, numero, busc
   return { permitido: true, motivo: null }
 }
 
-async function main() {
-  const config = await obterConfigCobranca()
+export async function main(scope = null) {
+  // Ler depois que o adapter carregou o ambiente operacional existente.
+  const ARI_URL = process.env.ARI_URL || 'http://127.0.0.1:8088'
+  const ARI_USER = process.env.ARI_USER
+  const ARI_PASSWORD = process.env.ARI_PASSWORD
+  const ARI_APP = process.env.ARI_APP || 'vivenzza-voice-ai'
+  const configPersistente = await obterConfigCobranca()
+  const config = scope ? scope.flags(configPersistente) : configPersistente
   const limites = lerLimitesVoz()
 
-  const { data: fila, error } = await supabase
+  let consultaFila = supabase
     .from('vw_fila_ligacao_cobranca')
     .select('codigo_cliente, cliente, telefone, telefone_mascarado, titulos, valor_total, dias_atraso_max, faixa, prioridade')
     .is('motivo_bloqueio', null)
     .order('prioridade', { ascending: true })
     .order('valor_total', { ascending: false })
-    .limit(LIMITE)
+  // O filtro da carteira vem ANTES do limit; nunca autoautorizar a view geral.
+  if (scope) {
+    if (!scope.codes.length) { log('carteira sem candidatos conciliados'); return }
+    consultaFila = consultaFila.in('codigo_cliente', scope.codes)
+  }
+  const { data: fila, error } = await consultaFila.limit(scope ? 120 : LIMITE)
 
   if (error) {
     console.error(`[fila-cobranca] ERRO ao ler a fila: ${error.message}`)
@@ -219,7 +226,9 @@ async function main() {
   let bloqueadas = 0
 
   for (const c of fila) {
-    const numero = c.telefone
+    if (scope && discadas >= 1) break // uma ligação real por execução finita
+    if (scope && !scope.codes.includes(c.codigo_cliente)) { bloqueadas++; continue }
+    const numero = scope ? `+${phoneKey(c.telefone)}` : c.telefone
     const rotulo = `${c.cliente} (${mascararTelefone(numero)})`
 
     let estado
@@ -259,7 +268,9 @@ async function main() {
     // em produção geral, exige o opt-in explícito e ainda passa por todos os
     // guards financeiros, legais e de telefonia. Erro bloqueia antes de
     // qualquer tentativa de originar.
-    const { allowlist, erro: erroAllowlist } = resolverAllowlistParaAutorizacao(numero)
+    const { allowlist, erro: erroAllowlist } = scope
+      ? { allowlist: scope.allowlist, erro: null }
+      : resolverAllowlistParaAutorizacao(numero)
     if (erroAllowlist) {
       log(`BLOQUEADO ${rotulo}: ${erroAllowlist}`)
       bloqueadas++
@@ -322,17 +333,38 @@ async function main() {
       campanha: 'COBRANCA_FILA',
     }
 
+    let originateIniciado = false
+    let canalOriginadoId = null
     try {
       const payload = construirPayloadOriginateExterno({ numero, ariApp: ARI_APP, clienteNome: c.cliente })
       // Only identifies the audited call; no balance is accepted from channel variables.
       payload.variables = { ...payload.variables, VIVENZZA_COBRANCA_NUMERO: numero }
+      if (scope) {
+        const { data: apps } = await cliente.get('/applications')
+        const { data: channels } = await cliente.get('/channels')
+        if (!Array.isArray(apps) || !apps.some(a => a.name === ARI_APP) || !Array.isArray(channels) || channels.length) throw Error('ari_nao_pronto_ou_ocupado')
+        await scope.reserve(c)
+      }
+      originateIniciado = true
       const { data } = await cliente.post('/channels', payload)
+      canalOriginadoId = data.id
       await registrarTentativa({ ...contexto, callId: data.id, status: 'CREATED' })
       ultimoCanalId = data.id
       discadas++
       log(`LIGANDO ${rotulo} - tentativa ${regua.tentativaNumero}/10 - channel=${data.id}`)
     } catch (err) {
+      // Falha de preflight/reserva não é tentativa real de ligação.
+      if (scope && !originateIniciado) {
+        if (['ligacao_ja_reservada', 'promessa_ativa_cliente', 'dnc_ou_quarentena', 'resposta_recente_atendimento_humano', 'telefone_compartilhado', 'contexto_falado_fora_do_escopo'].includes(err.message)) {
+          log(`BLOQUEADO ${rotulo}: ${err.message}`); bloqueadas++; continue
+        }
+        throw err
+      }
       const motivo = err.response?.data?.message || err.message
+      if (scope && canalOriginadoId) {
+        // POST aceito e auditoria falhou: não inventar FAILED nem tentar novamente.
+        throw Error('ligacao_aceita_auditoria_inconclusiva_reserva_preservada')
+      }
       try {
         await registrarTentativa({
           ...contexto,
@@ -344,6 +376,7 @@ async function main() {
       } catch { /* auditoria é best-effort */ }
       log(`FALHOU ${rotulo}: ${motivo}`)
       bloqueadas++
+      if (scope) throw Error('resultado_ligacao_incerto_reserva_preservada')
       continue
     }
 
@@ -354,7 +387,7 @@ async function main() {
     // a segunda ligação estourava o timeout, o TTS falhava e o cliente — que
     // já tinha atendido — ouvia o áudio de fallback no meio da conversa.
     // Agora esperamos o canal SUMIR do Asterisk antes de discar o próximo.
-    if (discadas < fila.length) {
+    if (!scope && discadas < fila.length) {
       log(`   aguardando a ligação atual terminar antes da próxima...`)
       const limite = Date.now() + ESPERA_MAXIMA_CHAMADA_MS
       while (Date.now() < limite) {
@@ -387,7 +420,17 @@ async function main() {
 // import.meta.url (sempre file:// com barra normal).
 const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url
 if (isMain) {
-  main().catch((err) => {
+  const run = async () => {
+    let scope
+    try {
+      if (process.argv.includes('--approved-20261019')) {
+        const { openApprovedVoiceScope } = await import('./approved-portfolio-scope.mjs')
+        scope = await openApprovedVoiceScope()
+      }
+      await main(scope)
+    } finally { if (scope) await scope.close() }
+  }
+  run().catch((err) => {
     console.error(`[fila-cobranca] ERRO FATAL: ${err.message}`)
     process.exitCode = 1
   })

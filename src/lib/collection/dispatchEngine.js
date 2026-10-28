@@ -24,21 +24,37 @@ import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqu
 import { registrarEvento, ORIGEM } from './timeline.js'
 import { hojeBrtISO } from './collectionContactPolicy.js'
 import { telefonesEquivalentes, mascararTelefone } from '../telefone.js'
+import { createHash } from 'node:crypto'
 
 const MAX_TENTATIVAS = 3
 
 // Retorna o dispatch existente (idempotência) OU cria um novo em 'queued'.
 // `criarNovo=false` faz retornar null em vez de criar, útil pra checagem sem
 // efeito colateral (ex: UI perguntando "já foi enviado hoje?").
-async function obterOuCriarDispatch({ contasFinanceirasId, etapa, canal, origem, mensagem, clienteNome, clienteTelefone, valor }) {
-  const idempotencyKey = idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt: hojeBrtISO() })
+async function obterOuCriarDispatch({ contasFinanceirasId, etapa, canal, origem, mensagem, clienteNome, clienteTelefone, valor, correcaoDestinatario = false }) {
+  let idempotencyKey = idempotencyKeyDispatch({ contasFinanceirasId, etapa, diaBrt: hojeBrtISO() })
 
   const { data: existente } = await supabase
     .from('collection_dispatches')
     .select('*')
     .eq('idempotency_key', idempotencyKey)
     .maybeSingle()
-  if (existente) return { dispatch: existente, novo: false }
+  if (existente) {
+    // Nova ação humana após correção cadastral comprovada. Nunca retenta timeout,
+    // envio incerto, entregue/lido ou o mesmo telefone; preserva toda auditoria.
+    if (!correcaoDestinatario || origem !== 'manual' || existente.status !== 'failed' ||
+        telefonesEquivalentes(existente.cliente_telefone, clienteTelefone)) return { dispatch: existente, novo: false }
+    const {data: attempts,error: attemptsError}=await supabase.from('collection_dispatch_attempts')
+      .select('status,failure_kind,provider_message_id,enviado_em').eq('dispatch_id',existente.id)
+    if(attemptsError)throw attemptsError
+    if(!attempts?.length||attempts.some(a=>a.status!=='failed'||a.failure_kind!=='permanent_recipient'||a.provider_message_id||a.enviado_em))return {dispatch:existente,novo:false}
+    const phone=String(clienteTelefone||'').replace(/\D/g,'')
+    if(!/^55\d{10,11}$/.test(phone))throw new Error('correcao_telefone_invalido')
+    idempotencyKey += ':recipient:' + createHash('sha256').update(phone).digest('hex').slice(0,20)
+    const corrected=await supabase.from('collection_dispatches').select('*').eq('idempotency_key',idempotencyKey).maybeSingle()
+    if(corrected.error)throw corrected.error
+    if(corrected.data)return {dispatch:corrected.data,novo:false}
+  }
 
   const { data: criado, error } = await supabase
     .from('collection_dispatches')
@@ -83,7 +99,12 @@ async function atualizarTentativa(id, campos) {
 
 // Ponto de entrada único usado pelo job da régua (v2) e pelo disparo manual v2.
 // Retorna { status, motivo?, dispatchId?, tentativas? }.
-export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null }) {
+export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, instanciaUnicaLegado = null, beforeAttempt, correcaoDestinatario = false, financeiroAlternativoAutorizado = false }) {
+  // Opt-in da carteira humana aprovada, não alteração de flag global. Exige
+  // revalidação por tentativa e fica limitado aos dois números financeiros.
+  const alternateApproved = financeiroAlternativoAutorizado === true && origem === 'manual' && typeof beforeAttempt === 'function'
+  const approvedNames = alternateApproved ? ['vivenzza-financeiro', 'vivenzza-financeiro-reserva-01'] : null
+  const maxTentativas = alternateApproved ? 2 : MAX_TENTATIVAS
   const statusQuitacao = await statusQuitacaoTitulo(contasFinanceirasId)
   if (statusQuitacao.quitado) {
     return { status: 'skipped', motivo: statusQuitacao.motivo }
@@ -95,7 +116,7 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
 
   const config = await obterConfigCobranca()
   const { dispatch, novo } = await obterOuCriarDispatch({
-    contasFinanceirasId, etapa, canal: 'whatsapp', origem, mensagem, clienteNome, clienteTelefone, valor,
+    contasFinanceirasId, etapa, canal: 'whatsapp', origem, mensagem, clienteNome, clienteTelefone, valor, correcaoDestinatario,
   })
   if (!novo) {
     return { status: dispatch.status, motivo: 'idempotencia_existente', dispatchId: dispatch.id }
@@ -110,7 +131,7 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
   const tentadas = []
   let ultimoErro = null
 
-  for (let numero = 1; numero <= MAX_TENTATIVAS; numero++) {
+  for (let numero = 1; numero <= maxTentativas; numero++) {
     // CORREÇÃO 2026-09-03 (auditoria da régua) — revalidação ANTES DE CADA
     // tentativa real ao provider, não só uma vez na entrada. O guard de
     // pagamento/promessa/DNC (estaEmDoNotContact) já era checado em
@@ -151,13 +172,24 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
       return { status: 'blocked', motivo: dncRetry.reason, dispatchId: dispatch.id }
     }
 
+    // Lote autorizado: revalida TODOS os boletos, saldo na origem e respostas,
+    // inclusive em eventual tentativa subsequente. Exceção nunca libera envio.
+    if (beforeAttempt) {
+      let check
+      try { check = await beforeAttempt({ attemptNumber: numero }) } catch { check = { allowed: false, reason: 'revalidacao_falhou' } }
+      if (check?.allowed !== true) {
+        await atualizarDispatch(dispatch.id, { status: 'cancelled' })
+        return { status: 'blocked', motivo: check?.reason || 'revalidacao_bloqueada', dispatchId: dispatch.id }
+      }
+    }
+
     // Instância única legado: usada quando multi_whatsapp=false, para não mudar
     // comportamento em produção enquanto a flag estiver desligada.
     const instancia = instanciaUnicaLegado
       ? (numero === 1 ? instanciaUnicaLegado : null)
-      : await selecionarProximaInstancia({ excluirIds: tentadas })
+      : await selecionarProximaInstancia({ excluirIds: tentadas, nomesPermitidos: alternateApproved ? [approvedNames[numero - 1]] : null })
 
-    if (!instancia) {
+    if (!instancia || (alternateApproved && instancia.instance_name !== approvedNames[numero - 1])) {
       await atualizarDispatch(dispatch.id, { status: 'failed' })
       await registrarEvento({
         contasFinanceirasId, clienteTelefone, tipo: 'MENSAGEM_FALHOU', origem: ORIGEM.SYSTEM,
@@ -208,7 +240,12 @@ export async function enviarComFailover({ contasFinanceirasId, etapa, clienteNom
       // resolve esses casos, e insistir pode mascarar um bloqueio deliberado
       // do provedor (pedido explícito de não construir isso pra burlar
       // limitação/bloqueio).
-      const podeTentarOutra = classificado.failoverEligible && !instanciaUnicaLegado && config.whatsapp_failover === true && numero < MAX_TENTATIVAS
+      // Timeout/reset/5xx podem ocorrer DEPOIS do aceite: não provam falha de
+      // entrega. No opt-in financeiro, somente falha antes da conexão autoriza
+      // a troca. O fluxo global preexistente não é habilitado por este opt-in.
+      const alternateSafe = alternateApproved && ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH'].includes(err.code) && !err.response
+      const failoverEnabled = alternateApproved ? alternateSafe : config.whatsapp_failover === true
+      const podeTentarOutra = classificado.failoverEligible && !instanciaUnicaLegado && failoverEnabled && numero < maxTentativas
       if (!podeTentarOutra) {
         // CORREÇÃO DE SEGURANÇA 2026-08-18 — só PERMANENT_RECIPIENT (número
         // não registrado no WhatsApp) bloqueia o telefone pelo resto do dia.

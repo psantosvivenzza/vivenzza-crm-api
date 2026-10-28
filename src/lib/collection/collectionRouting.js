@@ -26,7 +26,7 @@ import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqu
 // lotes longos (a régua chama isso 1x por conta) — cacheado em
 // financialSyncGuard.js/featureFlags.js pra não consultar o banco a cada
 // mensagem.
-export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem }) {
+export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, beforeAttempt, correcaoDestinatario = false, financeiroAlternativoAutorizado = false }) {
   const guardSync = await verificarFrescorSync()
   if (!guardSync.allowed) {
     logBloqueioSyncStale(origem, guardSync)
@@ -81,6 +81,7 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
   const config = await obterConfigCobranca()
 
   if (config.multi_whatsapp !== true) {
+    if (beforeAttempt) return { status: 'blocked', reason: 'lote_exige_motor_auditavel' }
     // CORREÇÃO DE SEGURANÇA 2026-08-18 — mesmo bloqueio de telefone+dia do
     // motor v2 (dispatchEngine.js), aplicado aqui pro motor legado: só
     // número não registrado no WhatsApp (erro.numeroInvalido) aciona o
@@ -96,6 +97,6 @@ export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, 
     return { status: 'sent', motor: 'legado' }
   }
 
-  const resultado = await enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem })
+  const resultado = await enviarComFailover({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem, beforeAttempt, correcaoDestinatario, financeiroAlternativoAutorizado })
   return { ...resultado, motor: 'v2' }
 }
