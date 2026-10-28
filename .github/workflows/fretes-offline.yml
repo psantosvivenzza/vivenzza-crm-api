@@ -1,0 +1,44 @@
+name: Fretes offline guards
+on:
+  pull_request:
+    paths:
+      - 'src/lib/fretes/**'
+      - 'src/routes/fretes.js'
+      - 'src/routes/webhook-handler.js'
+      - 'scripts/tests/fretes-*.test.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/fretes-offline.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+      - name: Offline freight domain, conversations, menus and attachments
+        # Explicit set excludes database integration and operational scripts.
+        # Add new offline files here deliberately; never auto-include DB tests.
+        run: node --test scripts/tests/fretes-domain.test.mjs scripts/tests/fretes-worker.test.mjs scripts/tests/fretes-proposal.test.mjs scripts/tests/fretes-envelope.test.mjs scripts/tests/fretes-progress.test.mjs scripts/tests/fretes-attachments.test.mjs scripts/tests/fretes-detail-read.test.mjs
+      - name: Syntax only (no worker, migration or sending)
+        shell: bash
+        run: |
+          node --check src/lib/fretes/inbound.js
+          node --check src/lib/fretes/worker.js
+          node --check src/lib/fretes/attachments.js
+          node --check src/routes/fretes.js
+          node --check src/routes/webhook-handler.js

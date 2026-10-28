@@ -469,9 +469,10 @@ cron.schedule('*/5 * * * *', async () => {
   }
 })
 
-// Uma solicitação por tick, mutex/cadência no banco, Evolution financeira fixa.
+// Consulta a fila a cada 10s; o banco permite uma tentativa de frete a cada
+// 60s, independentemente da cota de cobrança e mesmo entre réplicas.
 // Nenhum envio até FRETE_ENVIO_ATIVO=true em liberação explícita.
-cron.schedule('* * * * *', async () => {
+cron.schedule('*/10 * * * * *', async () => {
   try { await runFreteQueue() } catch (err) { console.error('[cron fretes]', err.code ?? 'falha') }
 }, { noOverlap: true })
 

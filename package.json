@@ -36,7 +36,7 @@
     "sync:vendas-fiscais:legado": "node scripts/sync-vendas-fiscais-legado.mjs",
     "sync:vendas-gerenciais:legado:dry-run": "node scripts/sync-vendas-gerenciais-legado.mjs --dry-run",
     "sync:vendas-gerenciais:legado": "node scripts/sync-vendas-gerenciais-legado.mjs",
-    "test:fretes": "node --test scripts/tests/fretes-domain.test.mjs scripts/tests/fretes-worker.test.mjs",
+    "test:fretes": "node --test scripts/tests/fretes-domain.test.mjs scripts/tests/fretes-worker.test.mjs scripts/tests/fretes-proposal.test.mjs scripts/tests/fretes-envelope.test.mjs scripts/tests/fretes-progress.test.mjs scripts/tests/fretes-attachments.test.mjs scripts/tests/fretes-detail-read.test.mjs",
     "test:fretes:db": "node --test scripts/tests/fretes-api-db.test.mjs",
     "test:fretes:webhook": "node --test scripts/tests/fretes-webhook.test.mjs",
     "test:fretes:sync": "node --test scripts/tests/fretes-sync.test.mjs",
