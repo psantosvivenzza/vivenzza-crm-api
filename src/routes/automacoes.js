@@ -23,7 +23,7 @@ const evolutionApi = axios.create({
 // Área sensível (liga/desliga a IA, reconecta o WhatsApp) — restrita a um único
 // usuário, não ao role "admin" geral (outros admins não devem ver/acionar isso).
 router.use((req, res, next) => {
-  if (req.user?.email !== SUPER_ADMIN_EMAIL) {
+  if (req.user?.email !== SUPER_ADMIN_EMAIL || req.user?.role !== 'admin') {
     return res.status(403).json({ erro: 'Acesso restrito.' })
   }
   next()

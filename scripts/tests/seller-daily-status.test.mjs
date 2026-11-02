@@ -10,7 +10,8 @@ const source=readFileSync(new URL('../../src/routes/automacoes.js',import.meta.u
 const admin=source.match(/const SUPER_ADMIN_EMAIL = '([^']+)'/)[1]
 const OWN='5511999990099',COMMERCIAL='5511999990001'
 async function request(options={}){
- const {ready=true,authorized=true}=options
+ const {ready=true,authorized=true,method='GET',url='/status'}=options
+ const role=Object.hasOwn(options,'role')?options.role:'admin'
  const flag=Object.hasOwn(options,'flag')?options.flag:'true',recipient=Object.hasOwn(options,'recipient')?options.recipient:COMMERCIAL
  let readyCalls=0,reads=0
  const env={SELLER_DAILY_BRIEF_ENABLED:flag,DIRECTION_REPORT_NUMBER:OWN,LEADS_PARADOS_COMERCIAL_NUMBER:recipient}
@@ -22,7 +23,7 @@ async function request(options={}){
  await module.link(name=>{const values=deps[name];assert.ok(values,`Unexpected import ${name}`);return new vm.SyntheticModule(Object.keys(values),function(){for(const [k,v] of Object.entries(values))this.setExport(k,v)},{context})})
  await module.evaluate()
  const response=await new Promise((resolve,reject)=>{
-  const req={method:'GET',url:'/status',originalUrl:'/status',headers:{},user:authorized===true?{email:admin,role:'admin'}:authorized==='wrong'?{email:'not-authorized@example.invalid',role:'admin'}:undefined}
+  const req={method,url,originalUrl:url,headers:{},user:authorized===true?{email:admin,role}:authorized==='wrong'?{email:'not-authorized@example.invalid',role:'admin'}:undefined}
   const res={statusCode:200,status(n){this.statusCode=n;return this},json(body){resolve({status:this.statusCode,body});return this}}
   module.namespace.default.handle(req,res,error=>reject(error||Error('No response')))
  })
@@ -35,3 +36,11 @@ test('unavailable direction cannot claim enabled or delivery',async()=>{const r=
 test('real Router authorization rejects before database and notifier reads',async()=>{for(const authorized of [false,'wrong']){const r=await request({authorized});assert.equal(r.response.status,403);assert.equal(r.reads,0);assert.equal(r.readyCalls,0)}})
 
 test('readiness rejection or nonboolean cannot break legacy status or enable card',async()=>{for(const ready of ['throw','true']){const r=await request({ready});assert.equal(r.response.status,200);assert.equal(r.response.body.capacidades[0].estado,'bloqueado');assert.ok(r.response.body.sdr);assert.ok(r.response.body.evolution)}})
+
+test('matching identity without literal admin role is denied before reads on status and legacy operations',async()=>{
+ for(const role of [undefined,null,'vendedor','gestor','Admin','',false]){
+  for(const [method,url] of [['GET','/status'],['POST','/sdr/toggle'],['POST','/voz/toggle'],['POST','/evolution/reconectar']]){
+   const r=await request({role,method,url});assert.equal(r.response.status,403);assert.equal(r.reads,0);assert.equal(r.readyCalls,0)
+  }
+ }
+})
