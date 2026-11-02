@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -10,6 +11,7 @@ import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone, mascararTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
+import { evolutionOwnership } from '../lib/whatsappInboundOwnership.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
 
 const router = Router()
@@ -43,7 +45,7 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000)
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -873,6 +875,20 @@ async function processarLara(event) {
   const msg = Array.isArray(event.data) ? event.data[0] : event.data
   if (!msg || msg.key?.fromMe) return null
 
+  if (sdrContext.getStore()?.provider === 'fzap') {
+    // Secondary replay guard after a restart. This existing inbox is written
+    // after Lara processing, so it is not an atomic or global dispatch claim.
+    if (!msg.key?.id) return null
+    const { data: prior, error: replayError } = await supabase.from('whatsapp_mensagens')
+      .select('evolution_id').eq('evolution_id', msg.key.id).eq('instance_name', replyInstance())
+      .limit(1).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if (replayError) {
+      console.error('[sdr] replay_lookup_failed', { code: 'FZAP_REPLAY_LOOKUP_FAILED' })
+      return null
+    }
+    if (prior?.length) return null
+  }
+
   // Um id opaco por mensagem recebida — só pra cruzar, no Railway, os logs de
   // um mesmo turno (extração de telefone -> decisão -> envio -> persistência),
   // inclusive os descartes abaixo. Nunca é telefone/conteúdo, nunca é
@@ -1304,7 +1320,7 @@ async function processarLara(event) {
 // (leads no Pipeline, histórico no chat das vendedoras) continua processando
 // o mesmo payload normalmente — inclusive os eventos fromMe/status, que a
 // Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
-async function handleSdrWebhook(req, res) {
+export async function handleSdrWebhook(req, res) {
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
 
   // messages.update é só confirmação de entrega/leitura (✓✓) — pode chegar às dezenas
@@ -1349,16 +1365,25 @@ async function handleSdrWebhook(req, res) {
   }
 }
 
-router.post('/webhook', webhookAuth, (req,res) => {
+// Called only after the FZAP route resolves an authenticated allowlisted instance.
+// Carry its identity through every reply and media download, including contingency.
+export function handleFzapSdrWebhook(req, res) {
+  const instance = req.body?.instance
+  if (typeof instance !== 'string' || !instance) return res.status(503).json({ erro: 'Conexão WhatsApp não confirmada' })
+  if (instance === process.env.SDR_SITE_INSTANCE?.trim() || instance === 'Mesagens Site Reativação') return res.status(403).json({ erro: 'Use o webhook da campanha' })
+  return sdrContext.run({ instance, provider: 'fzap' }, () => handleSdrWebhook(req, res))
+}
+
+router.post('/webhook', webhookAuth, evolutionOwnership, (req,res) => {
  const instance=req.body?.instance ?? req.body?.instanceName
  if (instance && (instance===process.env.SDR_SITE_INSTANCE || instance==='Mesagens Site Reativação')) return res.status(403).json({erro:'Use o webhook da campanha'})
  return handleSdrWebhook(req,res)
 })
 
-router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
-  if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
+export async function handleSiteCampaignWebhook(req, res, options = {}) {
   const context = siteCampaignContext(req.body)
   if (!context) return res.status(403).json({ erro: 'Instância da campanha não habilitada' })
+  if (options.provider === 'fzap') context.provider = 'fzap'
   if (req.body.event === 'messages.update') {
     try {await applySiteCampaignReceipts(supabase,req.body,context.instance);return res.json({status:'ok'})}
     catch {console.error('[site-campaign] receipt_persistence_failed');return res.status(503).json({erro:'Falha ao registrar recibo da campanha'})}
@@ -1394,6 +1419,11 @@ router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if(updateError) return res.status(503).json({erro:'Registro da resposta indisponível'})
   return sdrContext.run(context, () => handleSdrWebhook(req, res))
+}
+
+router.post('/site-reativacao/webhook', webhookAuth, evolutionOwnership, (req, res) => {
+  if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
+  return handleSiteCampaignWebhook(req, res)
 })
 
 export default router
