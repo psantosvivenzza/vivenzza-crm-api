@@ -487,3 +487,13 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('*/2 * * * *', async () => {
  try { await runSiteCampaignQueue() } catch { console.error('[site-campaign] worker_failed') }
 }, { noOverlap:true, timezone:'America/Sao_Paulo' })
+
+// Daily consolidated team brief; independent of CRM reactivation and its model.
+cron.schedule('5 9 * * *', async () => {
+  try {
+    const { runSellerDailyBrief } = await import('./jobs/vendedores-resumo-diario.js')
+    const result = await runSellerDailyBrief()
+    if (['unconfirmed', 'sender_not_ready', 'window_closed', 'recipient_changed'].includes(result.status)) console.error('[seller-daily] RUN_UNCONFIRMED')
+  } catch { console.error('[seller-daily] RUN_UNCONFIRMED') }
+}, { name: 'seller-daily-brief', timezone: 'America/Sao_Paulo', noOverlap: true })
+// End daily consolidated team brief.
