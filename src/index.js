@@ -5,6 +5,7 @@ import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { corsMiddleware } from './middleware/cors.js'
 import { auth, adminOnly, adminOuFinanceiro } from './middleware/auth.js'
+import { supabase } from './lib/supabase-admin.server.js'
 
 import authRouter from './routes/auth.js'
 import usuariosRouter from './routes/usuarios.js'
@@ -506,3 +507,10 @@ cron.schedule('5 9 * * *', async () => {
   } catch { console.error('[seller-daily] RUN_UNCONFIRMED') }
 }, { name: 'seller-daily-brief', timezone: 'America/Sao_Paulo', noOverlap: true })
 // End daily consolidated team brief.
+
+
+// Existing financial recovery: uncertain reservations stay blocked; no resend.
+cron.schedule('* * * * *', async () => {
+  try { const {error}=await supabase.rpc('reap_financial_ai_runs');if(error)console.error('[financial-ai] recovery_unavailable') }
+  catch { console.error('[financial-ai] recovery_unavailable') }
+}, {name:'financial-ai-recovery',noOverlap:true})

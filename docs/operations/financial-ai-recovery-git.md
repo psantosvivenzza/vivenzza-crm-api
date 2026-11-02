@@ -1,0 +1,19 @@
+# Recuperação financeira: fonte e callback reconciliados
+
+Esta DRAFT é empilhada na PR 173, com dependências 172 e 170. O index produtivo da API 80942 já possui o callback; este recorte o reconcilia no Git, sem instalar cron ou executar a RPC. Não é uma nova política de cobrança ou de retentativa.
+
+O callback existente faz uma chamada a reap_financial_ai_runs por rodada, sem argumentos, em agenda de um minuto, noOverlap literal e nome financial-ai-recovery. Falha no recibo ou exceção gera somente o diagnóstico fixo recovery_unavailable. Não ecoa erro ou contagens, não envia notificações e não repete a chamada. Não tem deadline explícito nem comprovação de que noOverlap funcione entre réplicas; esses limites são preservados, não homologados pela fixture.
+
+O import administrativo foi inserido depois de dotenv/config e auth, como na fonte. A inversão das duas inserções recupera exatamente o index pai. Outros crons, rotas, controles e estado financeiro não foram editados; package acrescenta somente um script. Dependências e lock não mudam.
+
+Um SELECT catalogal previamente revisado foi executado uma vez na conta Vivenzza, sem registros, corpo, defaults ou RPC de negócio. A evidência arquivada mostra um overload, zero argumentos, retorno integer, invoker e digest igual aos bytes originais CRLF da fonte. EXECUTE é efetivo para service_role e não para anon/authenticated/PUBLIC no escopo observado. Isso não comprova USAGE de schema, grants/RLS de tabelas, triggers, todas as roles, engine ou migration inteira. A evidência é histórica, não estado permanentemente atualizado nem autorização de alteração.
+
+A referência em reference/financial-ai-recovery.sql.txt é somente o trecho existente de função e ACL, fora de migrations e de qualquer pipeline. Contém UPDATE/INSERT/GRANT/REVOKE: não executar, renomear ou concatenar como migration. O trecho move runs reserved/sending antigos para uncertain e marca contato humano; não os torna elegíveis para reenviar. Não alterar esse bloqueio ou presumir que uncertain equivale a transmissão confirmada. O corpo foi conferido por digest, não devolvido pelo banco.
+
+O retorno integer conta contatos inseridos/atualizados por telefone distinto no INSERT final, não o número de runs alterados. O callback ignora esse valor; o recibo fake5 não demonstra cinco recuperações. O corte de três minutos pode coincidir com envio lento e conclusão tardia: a disputa de estados com o handler ainda precisa de ensaio. ON CONFLICT(phone) exige UNIQUE e o contato por telefone compartilha estado humano entre instâncias; schema, namespace e concorrência continuam pendentes, sem nova regra de identificação neste pacote.
+
+Os cinco casos usam o callback real extraído do index, scheduler/RPC/console fictícios e preload que bloqueia fetch/http/https. Não inicializam o servidor ou node-cron, não carregam env/credenciais, não consultam DB e não executam cron, timer de negócio, modelo ou envio real. A contagem é somente deste alvo, sem somar as suítes 92/18/80/27 anteriores. Não é prova de engine, concorrência, bootstrap completo ou execução bem-sucedida em produção.
+
+Antes de merge/deploy: fechar schema/grants de tabelas, efeitos e concorrência, orçamento e semântica dos estados, carga/latência/deadline e política de operação. A chave/saldo Anthropic e os gates financeiros das PRs anteriores são frentes separadas. Sem SQL/env/flags, alteração de rotina ou publicação neste recorte. Memória sanitizada local; sem upload de dados.
+
+Uma implantação futura pelo Git passará a registrar esse callback de escrita por minuto nesse ambiente; não presumir que preview/local tenham a função nem que log fixo constitua alarme durável. A presença do código na fonte e a leitura catalogal não comprovam execução natural bem-sucedida. Não houve prova de aplicação integral de migration pelo hash.

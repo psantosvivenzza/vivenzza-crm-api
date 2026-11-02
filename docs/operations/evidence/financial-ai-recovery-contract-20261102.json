@@ -1,0 +1,31 @@
+{
+  "observed_at": "2026-11-02T23:12:41.054689+00:00",
+  "query_sha256": "e51b296ee791a2da1071d2ba5af324ae2dd47cbc74133713815e4b2cf4d9f7d4",
+  "result_sha256": "6451d5bc83bd90401aaf95411edb7c61df5dea3907833430ef90fc560791c2e1",
+  "historical_execution_count": 1,
+  "new_executions_for_pr": 0,
+  "metadata": {
+    "overload_count": 1,
+    "contracts": [
+      {
+        "name": "reap_financial_ai_runs",
+        "body_md5": "2394b998a9be9c12c54dc29f697ed907",
+        "return_type": "integer",
+        "anon_execute": false,
+        "argument_count": 0,
+        "public_execute": false,
+        "security_definer": false,
+        "identity_arguments": "",
+        "service_role_execute": true,
+        "authenticated_execute": false
+      }
+    ]
+  },
+  "source_body_md5_matches_original_bytes": true,
+  "limits": [
+    "No function execution",
+    "No schemaUSAGE/tablegrants/RLS/triggers/engine/concurrency proof",
+    "No whole migration applied claim",
+    "Only named roles and PUBLIC function EXECUTE scoped"
+  ]
+}
