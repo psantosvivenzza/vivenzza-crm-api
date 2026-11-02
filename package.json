@@ -41,7 +41,8 @@
     "test:fretes:webhook": "node --test scripts/tests/fretes-webhook.test.mjs",
     "test:fretes:sync": "node --test scripts/tests/fretes-sync.test.mjs",
     "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs",
-    "test:seller-daily-brief": "node --experimental-vm-modules --test scripts/tests/seller-daily-brief.test.mjs scripts/tests/seller-daily-status.test.mjs"
+    "test:seller-daily-brief": "node --experimental-vm-modules --test scripts/tests/seller-daily-brief.test.mjs scripts/tests/seller-daily-status.test.mjs",
+    "test:commercial-guarded": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/seller-daily-brief.test.mjs scripts/tests/seller-daily-status.test.mjs scripts/tests/fzap-conexoes-service.test.mjs scripts/tests/fzap-provider-ownership.test.mjs scripts/tests/network-guard.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
