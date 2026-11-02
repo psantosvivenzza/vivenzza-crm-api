@@ -51,6 +51,7 @@ import googleReviewsRouter from './routes/google-reviews.js'
 import agingRouter from './routes/aging.js'
 import dashboardRecuperacaoRouter from './routes/dashboard-recuperacao.js'
 import cobrancasRouter from './routes/cobrancas.js'
+import financialInboxRouter from './routes/financial-inbox.js'
 import vozRouter from './routes/voz.js'
 import notificationsRouter from './routes/notifications.js'
 import cron from 'node-cron'
@@ -233,6 +234,7 @@ app.use('/api/blog', auth, adminOnly, blogRouter)
 // avaliações da loja, que alimentam o widget público em /api/avaliacoes.
 app.use('/api/admin/avaliacoes', auth, adminOnly, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOuFinanceiro, cobrancasRouter)
+app.use('/api/financeiro-atendimentos', auth, adminOuFinanceiro, financialInboxRouter)
 // Painel da Central de Voz — SÓ LEITURA das views de auditoria das ligações.
 // Mesmo controle de acesso da cobrança (admin ou financeiro): quem pode ver
 // título vencido pode ver a ligação que cobrou aquele título.
