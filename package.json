@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
+    "test:lara:etapas:git": "node --experimental-vm-modules --test scripts/tests/lead-stage-advisor.test.mjs scripts/tests/lead-stage-freshness.test.mjs scripts/tests/commercial-conversation-observer.test.mjs scripts/tests/commercial-stage-webhook-transport.test.mjs scripts/tests/commercial-stage-module-link.test.mjs",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "db:local:start": "node scripts/localdb-start.mjs",

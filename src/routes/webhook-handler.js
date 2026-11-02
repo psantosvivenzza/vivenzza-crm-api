@@ -12,6 +12,7 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
 import { handleFreteInbound } from '../lib/fretes/inbound.js'
+import { observeCommercialStage } from '../lib/commercialConversationObserver.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -506,14 +507,20 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
     // funcionar sozinha, sem precisar de outro deploy.
     const { error: erroUpsertMensagem } = await supabase.from('whatsapp_mensagens')
       .upsert({ ...payloadMensagem, instance_name: instanceName }, { onConflict: 'evolution_id', ignoreDuplicates: true })
+    let mensagemPersistida = !erroUpsertMensagem
 
     if (erroUpsertMensagem?.code === 'PGRST204') {
       console.warn('[webhook] coluna instance_name ainda não existe (aplicar migration 20260101000041) — gravando mensagem sem ela')
       const { error: erroFallback } = await supabase.from('whatsapp_mensagens')
         .upsert(payloadMensagem, { onConflict: 'evolution_id', ignoreDuplicates: true })
+      mensagemPersistida = !erroFallback
       if (erroFallback) console.error('[webhook] erro ao gravar mensagem (fallback sem instance_name):', erroFallback.message)
     } else if (erroUpsertMensagem) {
       console.error('[webhook] erro ao gravar mensagem:', erroUpsertMensagem.message)
+    }
+
+    if (!ehFinanceiro && !freteInbound && lead?.id && evolutionId && mensagemPersistida) {
+      observeCommercialStage(lead.id).catch(() => console.error('[pipeline-ai] evidence_or_update_failed'))
     }
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.
