@@ -1,4 +1,4 @@
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone, mascararTelefone, normalizarTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
@@ -18,7 +18,7 @@ const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-pr
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -113,9 +113,13 @@ function mapStatus(code) {
   return map[code] ?? null
 }
 
-// Baixa mídia via Evolution API e salva no Supabase Storage (fire-and-forget)
-async function baixarEArmazenarMidia(evolutionId, mediaData) {
+// The authenticated event's instance must select its own transport/token.
+// Default is only for old Evolution envelopes with no instance field at all.
+async function baixarEArmazenarMidia(evolutionId, mediaData, instanceName = INSTANCE) {
   try {
+    if (typeof instanceName !== 'string' || !instanceName.trim() || instanceName.length > 100 || /[\u0000-\u001f\u007f-\u009f/\\]/.test(instanceName)) {
+      throw new Error('Identidade da conexão de mídia não confirmada')
+    }
     if (!mediaData?.mediaKey || !mediaData?.messageType) {
       console.log('[webhook] mídia sem mediaKey — download ignorado:', evolutionId)
       return
@@ -159,7 +163,7 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
     }
 
     const { data: result } = await evolutionApi.post(
-      `/chat/getBase64FromMediaMessage/${INSTANCE}`,
+      `/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
       { message: messageObj }
     )
 
@@ -200,7 +204,17 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
 // Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser
 // chamada tanto pela rota direta (/api/whatsapp/webhook) quanto internamente
 // pelo webhook do SDR (/api/sdr/webhook), que recebe o mesmo payload da Evolution.
-export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
+export async function processWhatsappEvent(payload, {campaignLeadId=null, financialExpected=false}={}) {
+  // FZAP's financial route must never inherit the legacy false-on-error fallback
+  // into sales. Check before any receipt, freight, lead or inbox side effect;
+  // keep the confirmed classification throughout this invocation. This throw is
+  // intentionally outside the legacy catch so the route returns a retryable 503.
+  if (financialExpected) {
+    let confirmed = false
+    try { confirmed = await ehInstanciaFinanceira(payload?.instance ?? payload?.instanceName ?? null) }
+    catch { /* unavailable is not permission to enter the commercial flow */ }
+    if (confirmed !== true) throw Object.assign(new Error('Classificação financeira não confirmada.'), { code: 'FZAP_FINANCIAL_CLASSIFICATION' })
+  }
   try {
     // Volume de "messages.update" pode chegar a dezenas por segundo (um ACK de
     // entrega/leitura por destinatário, por mensagem) — logar cada evento aqui
@@ -296,7 +310,7 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
       freteInbound = err.freteTransportadora ? { semCotacao: true } : false
     }
     if (freteInbound && !freteInbound.semCotacao) return
-    const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
+    const ehFinanceiro = financialExpected || await ehInstanciaFinanceira(instanceName)
 
     const semPrefixo = telefone.replace(/^55/, '')
     let lead = null
@@ -529,7 +543,8 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
     // internamente se há mediaKey; se não houver (mensagens enviadas pela API do CRM),
     // ela retorna sem fazer nada.
     if (mediaTipo && evolutionId) {
-      baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
+      const mediaInstance = payload.instance === undefined && payload.instanceName === undefined ? undefined : instanceName
+      baixarEArmazenarMidia(evolutionId, mediaData, mediaInstance).catch(() => {})
     }
 
     // Resposta do cliente a um follow-up automático de reativação — verifica em
