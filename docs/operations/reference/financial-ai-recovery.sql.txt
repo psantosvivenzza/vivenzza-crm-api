@@ -1,0 +1,16 @@
+-- HISTORICAL REFERENCE ONLY. Not a migration or execution authorization.
+-- Source excerpt: migrations/financial_ai_runtime.sql in API80942.
+-- Contains writes/GRANT/REVOKE; DO NOT execute, rename or concatenate into migrations.
+
+-- Crash recovery preserves reservations permanently; never makes them retryable.
+CREATE OR REPLACE FUNCTION public.reap_financial_ai_runs() RETURNS integer LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,public AS $$
+DECLARE n integer;
+BEGIN
+ WITH expired AS (UPDATE public.financial_ai_runs SET status='uncertain',reason='interrupted_run',finished_at=clock_timestamp() WHERE status IN ('reserved','sending') AND created_at<clock_timestamp()-interval '3 minutes' RETURNING phone,instance_name,created_at)
+ INSERT INTO public.financial_ai_contacts(phone,instance_name,human,reason,updated_at)
+ SELECT DISTINCT ON(phone) phone,instance_name,true,'interrupted_run',clock_timestamp() FROM expired ORDER BY phone,created_at DESC
+ ON CONFLICT(phone) DO UPDATE SET human=true,reason='interrupted_run',updated_at=clock_timestamp();
+ GET DIAGNOSTICS n=ROW_COUNT;RETURN n;
+END $$;
+REVOKE ALL ON FUNCTION public.reap_financial_ai_runs() FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.reap_financial_ai_runs() TO service_role;
