@@ -41,7 +41,7 @@
     "test:fretes:webhook": "node --test scripts/tests/fretes-webhook.test.mjs",
     "test:fretes:sync": "node --test scripts/tests/fretes-sync.test.mjs",
     "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs",
-    "test:seller-daily-brief": "node --experimental-vm-modules --test scripts/tests/seller-daily-brief.test.mjs"
+    "test:seller-daily-brief": "node --experimental-vm-modules --test scripts/tests/seller-daily-brief.test.mjs scripts/tests/seller-daily-status.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

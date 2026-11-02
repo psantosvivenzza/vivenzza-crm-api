@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { selectCommercialRecipient } from '../lib/sellerDailyBrief.js'
+import { enviarNotificacaoDirecao } from '../lib/directionNotifications.js'
 import axios from 'axios'
 import { supabase } from '../lib/supabase-admin.server.js'
 
@@ -74,7 +76,22 @@ router.get('/status', async (req, res) => {
     const evoEstado = evolutionEstado.status === 'fulfilled' ? evolutionEstado.value : null
     const elevenValue = elevenlabsInfo.status === 'fulfilled' ? elevenlabsInfo.value : null
 
+    // Only the daily team brief is reconciled here; existing automation fields are preserved.
+    const sellerDailyEnabled = process.env.SELLER_DAILY_BRIEF_ENABLED === 'true'
+    let sellerDailyRecipientValid = false
+    try { sellerDailyRecipientValid = !!selectCommercialRecipient(process.env.LEADS_PARADOS_COMERCIAL_NUMBER, process.env.DIRECTION_REPORT_NUMBER) } catch {}
+    let sellerDailyReady = false
+    if (sellerDailyEnabled && sellerDailyRecipientValid) {
+      try { sellerDailyReady = await enviarNotificacaoDirecao.ready() === true } catch {}
+    }
     res.json({
+      capacidades: [{
+        id: 'vendedores-resumo',
+        nome: 'Resumo e motivação da equipe — 9h05',
+        ativo: sellerDailyEnabled,
+        estado: !sellerDailyEnabled ? 'pausado' : !sellerDailyRecipientValid || !sellerDailyReady ? 'bloqueado' : 'habilitado',
+        detalhe: 'Uma mensagem diária no Comercial, com indicadores consolidados da equipe e orientação prática de vendas. Independente da reativação de clientes e da geração por IA. Configuração ligada não comprova entrega; exige destinos confirmados.',
+      }],
       sdr: {
         // O processo respondendo essa requisição já é a prova de que o serviço está
         // no ar — "online" aqui reflete isso; "atenção" é quando o admin pausou a Lara.
