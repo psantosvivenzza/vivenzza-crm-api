@@ -10,12 +10,14 @@ export const auth = (req, res, next) => {
 
   // Compatibilidade com API_SECRET_KEY estático (integrações)
   if (process.env.API_SECRET_KEY && token === process.env.API_SECRET_KEY) {
+    req.authMethod = 'static_key'
     req.user = { id: 'api-user', email: 'api@vivenzza.com.br', role: 'admin' }
     return next()
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    req.authMethod = 'jwt'
     req.user = decoded
     next()
   } catch {
