@@ -1,0 +1,16 @@
+-- LOCAL PREPARADO. Aplicação administrativa separada, após revisão/autorização.
+-- Não contém destinatário, token, pareamento ou ativação de envio.
+BEGIN;
+ALTER TABLE public.whatsapp_connections
+  DROP CONSTRAINT IF EXISTS whatsapp_connections_finalidade_check;
+ALTER TABLE public.whatsapp_connections ADD CONSTRAINT whatsapp_connections_finalidade_check
+  CHECK (finalidade IN ('comercial','financeiro','notificacoes'));
+INSERT INTO public.whatsapp_connections(id,instance_name,finalidade)
+VALUES('direcao-notificacoes','vivenzza-notificacoes-direcao','notificacoes')
+ON CONFLICT(id) DO NOTHING;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.whatsapp_connections WHERE id='direcao-notificacoes'
+    AND instance_name='vivenzza-notificacoes-direcao' AND finalidade='notificacoes')
+  THEN RAISE EXCEPTION 'Cadastro da conexão da direção divergente'; END IF;
+END $$;
+COMMIT;

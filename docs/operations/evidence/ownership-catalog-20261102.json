@@ -1,0 +1,96 @@
+{
+  "observed_at": "2026-11-02T19:44:21.233967+00:00",
+  "scope": "Vivenzza metadata and booleans for one technical direction connection only",
+  "query_sha256": "f8e6cc3d93f72dbffb8923e7fabde479e42fba7d0e4e4b1c9af6bdcfb4cdc451",
+  "source_result_sha256": "e9c30d4bf33af9189b413c6643ffca7d847958bd63c2aea07210a1f97a89ff9c",
+  "source_execution_count": 1,
+  "rows": [
+    {
+      "present": true,
+      "relation_kind": "r",
+      "persistence": "p",
+      "rls_enabled": true,
+      "rls_forced": false,
+      "has_rules": false,
+      "service_role_select": true,
+      "service_role_update": true,
+      "columns": [
+        {
+          "name": "finalidade",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "id",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "instance_name",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "migrated_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "generated": false
+        },
+        {
+          "name": "migration_requested",
+          "type": "boolean",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "owner",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "generated": false
+        }
+      ],
+      "id_primary_key_confirmed": true,
+      "identity_trigger": [
+        {
+          "name": "whatsapp_connection_identity_immutable",
+          "enabled": "O",
+          "has_when": false,
+          "type_bits": 19,
+          "deferrable": false,
+          "expected_function": true,
+          "initially_deferred": false
+        }
+      ],
+      "identity_function": {
+        "body_md5": "4d75f25af28d42547315be47da3cd56d",
+        "return_type": "trigger",
+        "security_definer": false
+      },
+      "direction_ownership": {
+        "exactly_one": true,
+        "owner_is_fzap": true,
+        "identity_matches": true
+      }
+    }
+  ],
+  "function_body_matches_pinned_local_source": true,
+  "expected_function_body_md5": {
+    "original_bytes": "4d75f25af28d42547315be47da3cd56d",
+    "normalized_lf": "4d75f25af28d42547315be47da3cd56d"
+  },
+  "new_queries_for_archive_commit": 0,
+  "no_site_provider_or_session_read": true,
+  "no_ddl_dml_or_business_rpc": true,
+  "proves_current_delivery_or_full_migration": false,
+  "trigger_update_of_columns_inspected": false,
+  "all_roles_or_column_grants_inspected": false
+}

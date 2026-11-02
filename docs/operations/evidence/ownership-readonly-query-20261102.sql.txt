@@ -1,0 +1,58 @@
+WITH target AS (
+  SELECT pg_catalog.to_regclass('public.whatsapp_connections') AS oid
+), wanted AS (
+  SELECT ARRAY['id','instance_name','finalidade','owner','migration_requested','migrated_at','updated_at']::text[] AS names
+)
+SELECT
+  c.oid IS NOT NULL AS present,
+  c.relkind AS relation_kind,
+  c.relpersistence AS persistence,
+  c.relrowsecurity AS rls_enabled,
+  c.relforcerowsecurity AS rls_forced,
+  c.relhasrules AS has_rules,
+  pg_catalog.has_table_privilege('service_role', c.oid, 'SELECT') AS service_role_select,
+  pg_catalog.has_table_privilege('service_role', c.oid, 'UPDATE') AS service_role_update,
+  COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', a.attname, 'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+      'not_null', a.attnotnull, 'generated', a.attgenerated <> ''
+    ) ORDER BY a.attname)
+    FROM pg_catalog.pg_attribute a, wanted w
+    WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attname = ANY(w.names)
+  ), '[]'::jsonb) AS columns,
+  EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint pk
+    JOIN pg_catalog.pg_attribute a ON a.attrelid = pk.conrelid AND a.attname = 'id' AND NOT a.attisdropped
+    WHERE pk.conrelid = c.oid AND pk.contype = 'p' AND pk.convalidated
+      AND pk.conkey = ARRAY[a.attnum]::smallint[]
+  ) AS id_primary_key_confirmed,
+  COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', t.tgname, 'enabled', t.tgenabled, 'type_bits', t.tgtype,
+      'deferrable', t.tgdeferrable, 'initially_deferred', t.tginitdeferred,
+      'has_when', t.tgqual IS NOT NULL,
+      'expected_function', t.tgfoid = pg_catalog.to_regprocedure('public.guard_whatsapp_connection_identity()')
+    ) ORDER BY t.tgname)
+    FROM pg_catalog.pg_trigger t
+    WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgname = 'whatsapp_connection_identity_immutable'
+  ), '[]'::jsonb) AS identity_trigger,
+  (
+    SELECT jsonb_build_object(
+      'return_type', pg_catalog.format_type(p.prorettype, NULL),
+      'security_definer', p.prosecdef,
+      'body_md5', pg_catalog.md5(p.prosrc)
+    )
+    FROM pg_catalog.pg_proc p
+    WHERE p.oid = pg_catalog.to_regprocedure('public.guard_whatsapp_connection_identity()')
+  ) AS identity_function,
+  (
+    SELECT jsonb_build_object(
+      'exactly_one', count(*) = 1,
+      'identity_matches', bool_and(w.instance_name = 'vivenzza-notificacoes-direcao' AND w.finalidade = 'notificacoes'),
+      'owner_is_fzap', bool_and(w.owner = 'fzap')
+    )
+    FROM public.whatsapp_connections w
+    WHERE w.id = 'direcao-notificacoes'
+  ) AS direction_ownership
+FROM target x
+LEFT JOIN pg_catalog.pg_class c ON c.oid = x.oid;
