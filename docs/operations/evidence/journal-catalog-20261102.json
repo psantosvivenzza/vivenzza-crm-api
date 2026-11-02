@@ -1,0 +1,86 @@
+{
+  "observation_date": "2026-11-02",
+  "scope": "Vivenzza, journal metadata only; not a new query",
+  "query_sha256": "5bd493045a87929c9d9cc8f7fd3b18ae4288b20e23b8473fa45f588096e359e5",
+  "source_result_sha256": "398bd6d7fdcdedaa3dc5665e5962e8be1e13a6b7eb3d8d2cb30fde6c5e919d1c",
+  "source_execution_count": 1,
+  "rows": [
+    {
+      "present": true,
+      "relation_kind": "r",
+      "rls_enabled": true,
+      "rls_forced": false,
+      "persistence": "p",
+      "has_rules": false,
+      "service_role_bypasses_rls": true,
+      "service_role_select": true,
+      "service_role_insert": true,
+      "service_role_update": true,
+      "columns": [
+        {
+          "name": "key",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "provider_message_id",
+          "type": "text",
+          "not_null": false,
+          "generated": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "not_null": true,
+          "generated": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "generated": false
+        }
+      ],
+      "unique_key_confirmed": true,
+      "status_default_reserved": true,
+      "service_role_any_column_select": true,
+      "service_role_any_column_insert": true,
+      "service_role_any_column_update": true,
+      "policy_count": 0,
+      "exposed_role_privileges": [
+        {
+          "role": "anon",
+          "table_delete": false,
+          "table_insert": false,
+          "table_select": false,
+          "table_update": false,
+          "table_truncate": false,
+          "any_column_insert": false,
+          "any_column_select": false,
+          "any_column_update": false
+        },
+        {
+          "role": "authenticated",
+          "table_delete": false,
+          "table_insert": false,
+          "table_select": false,
+          "table_update": false,
+          "table_truncate": false,
+          "any_column_insert": false,
+          "any_column_select": false,
+          "any_column_update": false
+        }
+      ],
+      "enabled_user_trigger_count": 0
+    }
+  ],
+  "original_local_records": [
+    "output/VIVENZZA_VENDEDORES_JOURNAL_CATALOGO_20261102.md",
+    "output/VIVENZZA_COMERCIAL_RESUMO_DIARIO_PUBLICADO_20261102.md",
+    "output/VIVENZZA_COMERCIAL_MOTIVACAO_REFERENCIAS_20261102.md"
+  ],
+  "new_queries_run_for_this_pr": 0,
+  "publication_state_currently_revalidated_by_this_receipt": false,
+  "delivery_or_migration_homologation": false
+}

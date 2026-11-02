@@ -1,0 +1,75 @@
+-- Aplicação manual após revisão. Sem tokens, telefones ou ativação FZAP.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.whatsapp_connections (
+  id text PRIMARY KEY CHECK (id ~ '^[a-z0-9][a-z0-9_-]{0,63}$'),
+  instance_name text UNIQUE NOT NULL CHECK (length(instance_name) BETWEEN 1 AND 100),
+  finalidade text NOT NULL CHECK (finalidade IN ('comercial', 'financeiro')),
+  owner text NOT NULL DEFAULT 'evolution' CHECK (owner IN ('evolution', 'fzap')),
+  migration_requested boolean NOT NULL DEFAULT false,
+  migrated_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.whatsapp_connections ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.whatsapp_connections FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.whatsapp_connections FROM service_role;
+GRANT SELECT, UPDATE ON TABLE public.whatsapp_connections TO service_role;
+DROP POLICY IF EXISTS whatsapp_connections_service_role ON public.whatsapp_connections;
+CREATE POLICY whatsapp_connections_service_role ON public.whatsapp_connections
+  FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Imutabilidade também no banco: o service_role pode promover, nunca reverter
+-- ou trocar a identidade/finalidade de uma conexão já cadastrada.
+CREATE OR REPLACE FUNCTION public.guard_whatsapp_connection_identity()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.instance_name IS DISTINCT FROM OLD.instance_name
+    OR NEW.finalidade IS DISTINCT FROM OLD.finalidade THEN
+    RAISE EXCEPTION 'Identidade da conexão WhatsApp é imutável' USING ERRCODE = '23514';
+  END IF;
+  IF OLD.owner = 'fzap' AND NEW.owner IS DISTINCT FROM 'fzap' THEN
+    RAISE EXCEPTION 'Proprietário FZAP não pode retornar à Evolution' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.guard_whatsapp_connection_identity() FROM PUBLIC, anon, authenticated, service_role;
+DROP TRIGGER IF EXISTS whatsapp_connection_identity_immutable ON public.whatsapp_connections;
+CREATE TRIGGER whatsapp_connection_identity_immutable
+  BEFORE UPDATE ON public.whatsapp_connections
+  FOR EACH ROW EXECUTE FUNCTION public.guard_whatsapp_connection_identity();
+
+INSERT INTO public.whatsapp_connections (id, instance_name, finalidade) VALUES
+  ('comercial', 'vivenzza', 'comercial'),
+  ('comercial-contingencia', 'vivenzza-teste-cloud', 'comercial'),
+  ('site-reativacao', 'Mesagens Site Reativação', 'comercial'),
+  ('financeiro', 'vivenzza-financeiro', 'financeiro'),
+  ('financeiro-reserva-01', 'vivenzza-financeiro-reserva-01', 'financeiro'),
+  ('financeiro-reserva-02', 'vivenzza-financeiro-reserva-02', 'financeiro')
+ON CONFLICT (id) DO NOTHING;
+
+-- Reexecução preserva decisões já persistidas; não aceita identidades trocadas.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM (VALUES
+      ('comercial', 'vivenzza', 'comercial'),
+      ('comercial-contingencia', 'vivenzza-teste-cloud', 'comercial'),
+      ('site-reativacao', 'Mesagens Site Reativação', 'comercial'),
+      ('financeiro', 'vivenzza-financeiro', 'financeiro'),
+      ('financeiro-reserva-01', 'vivenzza-financeiro-reserva-01', 'financeiro'),
+      ('financeiro-reserva-02', 'vivenzza-financeiro-reserva-02', 'financeiro')
+    ) AS expected(id, instance_name, finalidade)
+    LEFT JOIN public.whatsapp_connections actual ON actual.id = expected.id
+    WHERE actual.id IS NULL OR actual.instance_name <> expected.instance_name
+      OR actual.finalidade <> expected.finalidade
+  ) THEN
+    RAISE EXCEPTION 'Identidade das conexões WhatsApp diverge da configuração esperada';
+  END IF;
+END $$;
+
+COMMIT;
