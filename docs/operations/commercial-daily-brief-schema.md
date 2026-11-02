@@ -37,3 +37,16 @@ As referências foram comparadas byte a byte com as fontes locais pinadas; o jou
 ## Proveniência textual
 
 As duas fontes iniciais vêm da árvore congelada da API 80942, não de uma aplicação SQL neste ciclo. A fonte do complemento estava preparada localmente e não era rastreada no HEAD cd9f02fb2e4aa87641fa73ecdc8368ddb4aa1fae do worktree de origem. Seu pin é o SHA256 4434f91241aaf08c602db01c8cdb5da515b99fa781b1dda1fd977f1a17dc650f do arquivo, e NÃO um commit dessa alteração nem prova de execução. As cópias integrais preservam os bytes; o trecho do journal preserva as linhas3–10 da fonte SHA256 45e92fea67b1630ebc4a0ba30d4ff3adace71e378675fb3eed214cd3a5a5dff7. A fonte inicial de ownership tem SHA256 2ffbbc184a315531a34ef0d09a47bf29890da292fed2a53a6cd455691b54ec74.
+
+
+## Observação pontual do contrato de ownership em02/11
+
+Uma [consulta de leitura escopada](evidence/ownership-readonly-query-20261102.sql.txt), revisada antes de uma execução, produziu o [recibo de metadados e booleans](evidence/ownership-catalog-20261102.json). Nenhuma operação de promoção, pareamento, alteração de grant, SQL de instalação ou envio foi realizada.
+
+A relação observada é tabela ordinária persistente, com RLS ligado e FORCE desligado, semrules. Os sete campos técnicos usados pelo transporte têm os tipos esperados e não são gerados; id temPK. O papel service_role possui SELECT/UPDATE de tabela. Isso não inspecionou todos os papéis, grants porcoluna ou policies.
+
+O trigger nomeado foi observado habilitado para origem, com bits19 (BEFORE ROW UPDATE), não deferrable e semWHEN, apontando para a função esperada. A função retorna trigger, é invoker e seu MD5 de corpo coincide com o corpo da fonte local pinada. A lista UPDATE OF de colunas e outros triggers não foram inspecionados; não se declara proteção universal de todas as atualizações nem equivalência da migração inteira.
+
+Para a única conexão técnica da direção filtrada pela consulta, os booleans de presença única, identidade esperada e ownerFZap vieram true. Isso é um snapshot do registro de ownership, não saúde de sessão do provedor, pareamento atual, saldo de modelo ou entrega de mensagem. Nenhuma linha do Site ou de outras conexões, telefone, token ou dado de cliente foi retornado.
+
+A leitura reduz o desconhecimento de tipos, PK, privilégios de tabela, função/trigger nomeados e ownership dessa identidade. Não autoriza repetir seed, promover/reverter owner, executar os textos históricos, fazer testes reais ou retirar os gates de concorrência/entrega/restauração e paridade restante. O catálogo do journal e o recibo de alias não foram reconsultados.
