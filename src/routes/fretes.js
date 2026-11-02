@@ -7,7 +7,7 @@ import { supabase } from '../lib/supabase-admin.server.js'
 import { adminOuFinanceiro } from '../middleware/auth.js'
 import { compararPropostas, validarCotacao, validarConfigTransportadora, validarProposta, montarSolicitacao, UUID, FreteError } from '../lib/fretes/domain.js'
 
-const CONFIG = () => ({ envio_ativo: process.env.FRETE_ENVIO_ATIVO === 'true', ia_ativa: process.env.FRETE_IA_ATIVA === 'true' })
+const CONFIG = () => ({ envio_ativo: process.env.FRETE_ENVIO_ATIVO === 'true', ia_ativa: process.env.FRETE_IA_ATIVA === 'true', acoes_contato: { contrato: 'frete-contact-actions-v1', liberar_contato: false, associar_resposta: false } })
 function check(result) { if (result.error) throw result.error; return result.data }
 function id(v) { if (!UUID.test(v ?? '')) throw new FreteError('Identificador inválido.'); return v }
 function handler(fn) {
@@ -113,6 +113,45 @@ export function createFretesRouter(db = supabase, { loadLogistica = lerLogistica
     const row = await cotacao(req.params.id)
     const quantidade = check(await db.rpc('frete_enfileirar_cotacao', { p_cotacao_id: row.id, p_texto: montarSolicitacao(row.dados, `FRETE-${row.id}`), p_actor: req.user.id }))
     res.json({ enfileiradas: quantidade, mensagem: 'Solicitações registradas na fila da Evolution financeira. A entrega será confirmada por transportadora.' })
+  }))
+  // Prepared contact operations stay closed until server readiness is confirmed.
+  const contactUnconfirmed = () => new FreteError('Não foi possível confirmar a operação. Ela pode ter sido concluída; confira o atendimento antes de qualquer nova ação.', 503)
+  const contactHandler = fn => async (req, res) => {
+    try {
+      if (req.authMethod !== 'jwt' || !UUID.test(req.user?.id ?? '')) throw new FreteError('Sessão humana autenticada obrigatória.', 403)
+      await fn(req, res)
+    } catch (e) {
+      if (e instanceof FreteError) return res.status(e.status).json({ erro: e.message })
+      if (e?.code === 'P0001') return res.status(409).json({ erro: 'Atendimento alterado ou operação indisponível. Atualize os dados antes de decidir a próxima ação.' })
+      console.error('[fretes] CONTACT_OPERATION_UNCONFIRMED')
+      const err = contactUnconfirmed()
+      res.status(err.status).json({ erro: err.message })
+    }
+  }
+  const validateContactVersion = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value.slice(0, 10) + 'T00:00:00Z').toISOString().slice(0, 10) !== value.slice(0, 10)) throw new FreteError('Atualize o atendimento antes de continuar.', 409)
+  }
+  const confirmContactReceipt = (row, quoteId, consultationId, release) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || row.id !== consultationId || row.cotacao_id !== quoteId || row.ia_pausada !== true || (release && row.contato_liberado !== true)) throw contactUnconfirmed()
+    return { id: row.id, cotacao_id: row.cotacao_id, ia_pausada: row.ia_pausada, contato_liberado: row.contato_liberado }
+  }
+  router.post('/:id/consultas/:consultaId/liberar-contato', contactHandler(async (req, res) => {
+    if (CONFIG().acoes_contato.liberar_contato !== true) throw new FreteError('Liberação de contato indisponível: prontidão do servidor ainda não confirmada.', 409)
+    validateContactVersion(req.body?.versao)
+    const quoteId = id(req.params.id), consultationId = id(req.params.consultaId)
+    const row = check(await db.rpc('frete_liberar_contato', { p_cotacao_id: quoteId, p_consulta_id: consultationId, p_versao: req.body.versao, p_actor: req.user.id }))
+    res.json(confirmContactReceipt(row, quoteId, consultationId, true))
+  }))
+  router.post('/:id/consultas/:consultaId/respostas/:respostaId/associar', contactHandler(async (req, res) => {
+    if (CONFIG().acoes_contato.associar_resposta !== true) throw new FreteError('Associação de resposta indisponível: prontidão do servidor ainda não confirmada.', 409)
+    validateContactVersion(req.body?.versao)
+    const quoteId = id(req.params.id), consultationId = id(req.params.consultaId), responseId = id(req.params.respostaId)
+    const row = check(await db.rpc('frete_associar_resposta', { p_cotacao_id: quoteId, p_consulta_id: consultationId, p_resposta_id: responseId, p_versao: req.body.versao, p_actor: req.user.id }))
+    const receipt = confirmContactReceipt(row, quoteId, consultationId, false)
+    // One readback verifies the exact response link; failure never retries the write.
+    const linked = check(await db.from('frete_respostas_pendentes').select('id,consulta_id').eq('id', responseId).maybeSingle())
+    if (!linked || linked.id !== responseId || linked.consulta_id !== consultationId) throw contactUnconfirmed()
+    res.json({ ...receipt, resposta_associada_id: linked.id })
   }))
   router.patch('/:id/consultas/:consultaId', handler(async (req, res) => {
     if (req.body?.ia_pausada === true && Object.keys(req.body).length === 1) {
