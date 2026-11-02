@@ -12,6 +12,7 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
 import { handleFreteInbound } from '../lib/fretes/inbound.js'
+import { processFinancialInbound, observeFinancialOutbound } from '../lib/financialAiRuntime.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -514,6 +515,13 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
       if (erroFallback) console.error('[webhook] erro ao gravar mensagem (fallback sem instance_name):', erroFallback.message)
     } else if (erroUpsertMensagem) {
       console.error('[webhook] erro ao gravar mensagem:', erroUpsertMensagem.message)
+    }
+
+    if (ehFinanceiro && !freteInbound && evolutionId && !erroUpsertMensagem) {
+      const operation = fromMe
+        ? observeFinancialOutbound({phone:telefone,instance:instanceName,providerId:evolutionId,text:texto})
+        : processFinancialInbound({id:evolutionId,timestamp:msg.messageTimestamp})
+      operation.catch(() => console.error('[financial-ai] inbound_processing_unavailable'))
     }
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.

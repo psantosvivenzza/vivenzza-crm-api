@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
+    "test:financial-ai:git": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/financial-ai-runtime.test.mjs scripts/tests/financial-ai-handler-vm.test.mjs scripts/tests/financial-ai-webhook-consumer-vm.test.mjs",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "db:local:start": "node scripts/localdb-start.mjs",
