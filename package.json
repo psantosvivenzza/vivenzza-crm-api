@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
+    "test:financial-human-pause:git": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/financial-human-pause-vm.test.mjs scripts/tests/financial-human-routing-vm.test.mjs",
     "test:fzap-inbound:git": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/fzap-inbound-ownership.test.mjs scripts/tests/fzap-webhook-wrappers.test.mjs scripts/tests/fzap-native-media.test.mjs scripts/tests/fzap-provider.test.mjs scripts/tests/fzap-inbound-consumer-vm.test.mjs scripts/tests/financial-ai-webhook-consumer-vm.test.mjs",
     "test:financial-ai-recovery:git": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/financial-ai-recovery-cron.test.mjs",
     "test:financial-inbox:git": "node --import ./scripts/tests/helpers/deny-real-network.mjs --experimental-vm-modules --test scripts/tests/financial-inbox-vm.test.mjs scripts/tests/financial-inbox-router-git.test.mjs",

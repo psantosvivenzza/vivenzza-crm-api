@@ -14,6 +14,7 @@
 import { enviarTextoFinanceiro } from '../evolutionFinanceiro.js'
 import { enviarComFailover } from './dispatchEngine.js'
 import { obterConfigCobranca } from './featureFlags.js'
+import { financialHumanPause } from './financialHumanPause.js'
 import { verificarFrescorSync, logBloqueioSyncStale } from './financialSyncGuard.js'
 import { verificarLimiteGlobalEnvio } from './globalSendLimit.js'
 import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqueioNumeroInvalidoHoje } from './doNotContactGuard.js'
@@ -27,6 +28,8 @@ import { estaEmDoNotContact, registrarBloqueioOptOutSeNecessario, registrarBloqu
 // financialSyncGuard.js/featureFlags.js pra não consultar o banco a cada
 // mensagem.
 export async function enviarCobrancaComRoteamento({ contasFinanceirasId, etapa, clienteNome, clienteTelefone, valor, mensagem, origem }) {
+  const human = await financialHumanPause(clienteTelefone)
+  if (human.blocked) return {status:'blocked',motor:null,reason:human.reason,motivo:'Atendimento financeiro sob revisão humana ou estado não confirmado.'}
   const guardSync = await verificarFrescorSync()
   if (!guardSync.allowed) {
     logBloqueioSyncStale(origem, guardSync)
