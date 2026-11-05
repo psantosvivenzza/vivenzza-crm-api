@@ -1,0 +1,10 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import vm from 'node:vm'
+import {readFile} from 'node:fs/promises'
+import {paraJidWhatsapp,candidatosTelefone} from '../../src/lib/telefone.js'
+async function fixture(rows=[],error=null,reject=false){let variants;const query={select(){return this},in(k,v){variants=v;return this},limit(){return this},abortSignal:async()=>{if(reject)throw Object.assign(Error('fixture'),{name:'AbortError'});return{data:rows,error}}};const db={from:()=>query};const context=vm.createContext({AbortSignal});const m=new vm.SourceTextModule(await readFile(new URL('../../src/lib/collection/financialHumanPause.js',import.meta.url),'utf8'),{context});const deps={'../supabase-admin.server.js':{supabase:db},'../telefone.js':{paraJidWhatsapp,candidatosTelefone}};await m.link(k=>new vm.SyntheticModule(Object.keys(deps[k]),function(){for(const [n,v] of Object.entries(deps[k]))this.setExport(n,v)},{context}));await m.evaluate();return{run:phone=>m.namespace.financialHumanPause(phone),variants:()=>variants}}
+test('pausa humana vale com e sem nono dígito, sem alterar cadastro',async()=>{const f=await fixture([{human:false},{human:true}]);assert.equal((await f.run('11999990000')).blocked,true);assert.ok(f.variants().includes('5511999990000'));assert.ok(f.variants().includes('551199990000'))})
+test('ausência comprovada libera; falha de consulta ou telefone inválido bloqueiam',async()=>{const f=await fixture([]);assert.equal((await f.run('11999990000')).blocked,false);assert.equal((await f.run('abc')).blocked,true);const malformed=await fixture(null);assert.equal((await malformed.run('11999990000')).blocked,true);const g=await fixture(null,{code:'offline'});assert.equal((await g.run('11999990000')).blocked,true)})
+
+test('rejeição/abort da consulta e linhas malformadas também bloqueiam sem propagar erro',async()=>{const f=await fixture([],null,true);assert.equal((await f.run('11999990000')).blocked,true);for(const rows of [[{}],[null],[{human:'true'}]]){const g=await fixture(rows);assert.equal((await g.run('11999990000')).blocked,true)}})
