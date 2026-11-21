@@ -11,6 +11,67 @@ import { candidatosTelefone, mascararTelefone, telefonesEquivalentes } from '../
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
+import { avaliarLead, cnpjValido, soDigitos } from '../lib/qualificacaoLead.js'
+import { situacaoCnpj, inadimplenteNoErp, carregarTerritorio } from '../lib/qualificacaoLookup.js'
+
+const MENSAGEM_ENCERRAMENTO_BLOQUEIO =
+  'Obrigada pelo interesse na Vivenzza 😊 No momento não conseguimos avançar com o programa de distribuição. Se algo mudar, é só nos chamar por aqui.'
+
+// Aplica a qualificação do turno: junta com o que já estava salvo no lead,
+// consulta CNPJ/débito, calcula nota e grava. NUNCA lança erro (fail-open).
+async function aplicarQualificacao(parsed, telefone, correlationId) {
+  try {
+    const candidatos = candidatosTelefone(telefone)
+    const { data: leadsAtuais } = await supabase
+      .from('leads')
+      .select('id,qual_tipo,qual_cnpj,qual_regiao,qual_volume_mensal,qual_faixa,observacoes')
+      .in('telefone', candidatos)
+      .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    const atual = leadsAtuais?.[0] ?? {}
+    const novo = parsed.qualificacao ?? {}
+    const [cidadeSalva, estadoSalvo] = String(atual.qual_regiao ?? '').split('/')
+
+    const q = {
+      perfil: novo.perfil || atual.qual_tipo || (parsed.tipo_lead !== 'indefinido' ? parsed.tipo_lead : null),
+      cnpj: novo.cnpj || atual.qual_cnpj || null,
+      cidade: novo.cidade || cidadeSalva || null,
+      estado: novo.estado || estadoSalvo || null,
+      volume_mensal: novo.volume_mensal ?? atual.qual_volume_mensal ?? null,
+    }
+
+    const ctx = { territorio: await carregarTerritorio(supabase), cnpjStatus: 'desconhecido', inadimplente: false }
+    const numero = soDigitos(novo.cnpj_numero)
+    if (numero && cnpjValido(numero)) {
+      const r = await situacaoCnpj(numero)
+      ctx.cnpjStatus = r.status
+      ctx.inadimplente = await inadimplenteNoErp(supabase, numero)
+      q.cnpj = 'sim'
+    }
+
+    const av = avaliarLead(q, ctx)
+    const atualizacao = {
+      qual_tipo: q.perfil,
+      qual_cnpj: q.cnpj,
+      qual_regiao: q.cidade ? `${q.cidade}/${q.estado ?? ''}` : null,
+      qual_regiao_valida: av.regiao_valida,
+      qual_volume_mensal: q.volume_mensal,
+      qual_nota: av.nota,
+      qual_faixa: av.faixa,
+      qual_atualizado_em: new Date().toISOString(),
+    }
+    if (av.faixa === 'bloqueado') {
+      atualizacao.observacoes = [atual.observacoes, `[Lara] Lead bloqueado na qualificação: ${av.motivo}`].filter(Boolean).join('\n')
+    }
+    await supabase.from('leads').update(atualizacao).in('telefone', candidatos)
+      .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+
+    console.log(`[sdr:qualificacao] correlationId=${correlationId} faixa=${av.faixa} nota=${av.nota} motivo=${av.motivo ?? '-'}`)
+    return av
+  } catch (err) {
+    console.error(`[sdr:qualificacao] falha (ignorada): correlationId=${correlationId} ${err?.message}`)
+    return null
+  }
+}
 
 const router = Router()
 
@@ -442,7 +503,7 @@ FLUXO:
 1. NOVO: apresente-se (ver APRESENTAÇÃO) e pergunte como pode ajudar
 2. QUALIFICANDO: identifique o perfil — salão, distribuidor ou consumidor — com UMA pergunta por vez
 3. SALÃO: entenda o tipo de serviço → aguarde a resposta → envie catálogo profissional → ofereça demonstração com consultora
-4. DISTRIBUIDOR: pergunte região e linha que já trabalha → aguarde a resposta → envie apresentação B2B → agende call comercial
+4. DISTRIBUIDOR: conduza as 4 PERGUNTAS DE QUALIFICAÇÃO (bloco abaixo) → só então envie apresentação B2B → passe para o consultor
 5. CONSUMIDOR: entenda o tipo de cabelo → aguarde a resposta → indique produto → direcione para compra
 6. Sempre finalize com próximo passo claro
 
@@ -473,10 +534,10 @@ Me conta rapidinho: você procura produtos para salão, uso próprio ou distribu
 - resposta (texto, enviado logo após o áudio): pergunta fechada para avançar a conversa
 
 6. PERGUNTA DE PREÇO (texto primeiro, nunca áudio) — antes de responder preço, qualifique:
-"Te passo sim. Só antes preciso entender uma coisa para não te mandar uma condição errada: você compra para uso no salão, revenda ou distribuição?"
+"Te passo sim. Só antes preciso entender seu perfil para não te mandar uma condição errada: você tem salão ou revende produtos profissionais?" (NUNCA informe valores de produto antes de concluir a qualificação; a condição comercial de entrada — ver bloco abaixo — pode ser explicada)
 
 7. PASSAGEM PARA CLOSER (texto direto, nunca áudio) — lead quente e já qualificado:
-"Perfeito. Pelo que você me passou, já dá para um especialista te atender melhor e montar uma condição mais certeira. Vou te encaminhar para o consultor agora."
+"Perfeito. Pelo que você me passou, já dá para um especialista te atender melhor e montar uma condição mais certeira. Vou te encaminhar para o consultor agora." (SÓ use a etapa 7 se o lead passou nos critérios do bloco QUALIFICAÇÃO — CNPJ sim, volume mensal a partir de R$ 3.000 e cidade livre)
 
 REGRAS DOS ÁUDIOS (etapas 3 e 5 — preencha audio_script só nestes casos):
 - 15 a 30 segundos de fala, nunca mais — sem explicação longa, sem ler catálogo em voz alta
@@ -499,6 +560,27 @@ CLASSIFICAÇÃO DE TEMPERATURA:
 Atualize etapa_cadencia e temperatura a cada turno refletindo o estado real
 da conversa — não fique travado na mesma etapa se o lead já avançou, e não
 pule etapas 3/5 (apresentação/objeção) sem o lead ter dado motivo pra isso.
+
+QUALIFICAÇÃO COMERCIAL (obrigatória para lead B2B — salão, revenda ou distribuição):
+Faça as 4 perguntas abaixo, UMA POR VEZ, na ordem, sem pular e sem repetir uma que já foi respondida (releia o histórico). Reconheça a resposta em meia frase antes de fazer a próxima.
+ 1. Perfil: "Você tem salão ou revende produtos profissionais?"
+ 2. CNPJ: "Você atua com CNPJ?"
+ 3. Região: "Em qual cidade e estado você atua?"
+ 4. Volume: "Qual valor mensal você pensa em comprar de produtos profissionais?"
+Registre cada resposta no campo "qualificacao" do JSON (use null enquanto o lead não respondeu). Em "cnpj", se o lead informar o número, copie os 14 dígitos em "cnpj_numero".
+
+CONDIÇÃO COMERCIAL (única condição que você pode informar, sempre assim):
+- Pedido mínimo de R$ 5.000 na primeira compra
+- Entrada de 40%, saldo no cartão ou PIX. Boleto só é liberado pelo consultor após análise de crédito
+- NUNCA prometa prazo, boleto, desconto ou exclusividade de território. Diga que o consultor confirma
+
+REGRAS DE QUALIFICAÇÃO:
+- Consumidor final (uso pessoal): seja cordial, indique a loja e diga que o consultor pode ajudar. perfil = consumidor_final
+- Sem CNPJ: explique com elegância que o programa é para empresas; ofereça atendimento do consultor. cnpj = nao
+- Quer só preço, ou diz que é "só olhando": não ofereça desconto nem fale valor de produto. Reforce que a condição depende do perfil e volte para a próxima pergunta pendente
+- Se o lead recusar responder, não insista mais de uma vez; encerre cordialmente e deixe o consultor decidir
+- Nunca pergunte nada sobre restrição de crédito, SPC/Serasa ou inadimplência — a análise é feita pela equipe
+- Nunca diga a nota, a faixa ou o motivo da classificação ao lead
 
 ESTADO ATUAL: ${estado}
 TIPO DE LEAD: ${tipo_lead}
@@ -523,7 +605,15 @@ RESPONDA APENAS EM JSON VÁLIDO, sem texto fora do JSON:
   "tipo_lead": "indefinido|salao|distribuidor|consumidor_final",
   "proximo_estado": "novo|qualificando|catalogo_enviado|demo_agendada|lead_criado",
   "temperatura": "frio|morno|quente",
-  "etapa_cadencia": 1
+  "etapa_cadencia": 1,
+  "qualificacao": {
+    "perfil": "distribuidor|salao|consumidor_final|null",
+    "cnpj": "sim|nao|null",
+    "cnpj_numero": "14 dígitos ou null",
+    "cidade": "cidade informada ou null",
+    "estado": "UF de 2 letras ou null",
+    "volume_mensal": "número em reais por mês (ex: 5000) ou null"
+  }
 }`
 
 function parsearRespostaClaude(texto, contexto = {}) {
@@ -1158,6 +1248,25 @@ async function processarLara(event) {
       // mascarado (achado não bloqueante da revisão da PR #111).
       console.log(`[sdr:keyword] correlationId=${correlationId} tel=${mascararTelefone(telefoneConversa)} turno=${turnoAtual} ${kwDetectada.categoria.toUpperCase()} keyword="${kwDetectada.keyword}" tipo=${kwDetectada.tipo}`)
       parsed.tipo_lead = kwDetectada.tipo
+    }
+  }
+
+  // Qualificação: nota, faixa e bloqueio por CNPJ/débito. Só em conversa B2B
+  // (não na campanha do site) e nunca impede a resposta de sair.
+  if (!siteCampaign && parsed.tipo_lead !== 'consumidor_final') {
+    const av = await aplicarQualificacao(parsed, telefoneConversa, correlationId)
+    if (av) {
+      if (av.faixa === 'bloqueado') {
+        parsed.resposta = MENSAGEM_ENCERRAMENTO_BLOQUEIO
+        parsed.audio_script = null
+        parsed.acao = 'NENHUMA'
+        parsed.temperatura = 'frio'
+        parsed.etapa_cadencia = 4
+      } else {
+        parsed.temperatura = av.faixa === 'quente' ? 'quente' : av.faixa === 'morno' ? 'morno' : 'frio'
+        // Passagem para o closer (etapa 7) só se passou nos critérios.
+        if (Number(parsed.etapa_cadencia) === 7 && av.faixa !== 'quente') parsed.etapa_cadencia = 2
+      }
     }
   }
 
