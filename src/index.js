@@ -15,6 +15,7 @@ import whatsappConexoesRouter from './routes/whatsapp-conexoes.js'
 import financialInboxRouter from './routes/financial-inbox.js'
 import {readFzapConfig,FzapConnectionError} from './lib/fzapConnections.js'
 import laraCoachRouter from './routes/lara-coach.js'
+import { runDisparoDirecao } from './jobs/disparo-direcao.js'
 import handleWebhook, {processWhatsappEvent} from './routes/webhook-handler.js'
 import {evolutionOwnership,createFzapWebhookHandler} from './lib/whatsappInboundOwnership.js'
 import { webhookAuth } from './middleware/webhookAuth.js'
@@ -374,6 +375,16 @@ cron.schedule('*/15 11-20 * * 1-5', async () => {
     console.error('[cron cobranca-whatsapp] Erro:', err.message)
   }
 })
+
+// 2026-11-21 — disparo cadenciado do número da direção (20/dia, 2-4 min entre
+// envios, só em horário comercial). Nasce DESLIGADO: disparo_direcao_config.ativo.
+cron.schedule('* * * * *', async () => {
+  try {
+    await runDisparoDirecao()
+  } catch (err) {
+    console.error('[cron disparo-direcao] Erro:', err.message)
+  }
+}, { name: 'disparo-direcao', noOverlap: true })
 
 // 2026-09-01 — sweep de pagamento tardio (paymentGuard.varrerTitulosPendentesEcancelarQuitados,
 // via payment-reconciliation-sweep.js). A cada 15 min, mesma cadência da régua
