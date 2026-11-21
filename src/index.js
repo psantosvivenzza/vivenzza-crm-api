@@ -11,6 +11,7 @@ import usuariosRouter from './routes/usuarios.js'
 import leadsRouter from './routes/leads.js'
 import contatosRouter from './routes/contatos.js'
 import whatsappRouter from './routes/whatsapp.js'
+import laraCoachRouter from './routes/lara-coach.js'
 import handleWebhook from './routes/webhook-handler.js'
 import { webhookAuth } from './middleware/webhookAuth.js'
 import produtosRouter from './routes/produtos.js'
@@ -177,6 +178,8 @@ app.use('/api/usuarios', auth, usuariosRouter)
 app.use('/api/leads', auth, leadsRouter)
 app.use('/api/contatos', auth, contatosRouter)
 app.use('/api/whatsapp', auth, whatsappRouter)
+// Lara coach: sugestão de resposta por conversa + avaliação das vendedoras
+app.use('/api/lara', auth, laraCoachRouter)
 app.use('/api/produtos', auth, produtosRouter)
 app.use('/api/pedidos', auth, pedidosRouter)
 app.use('/api/clientes-erp', auth, clientesErpRouter)
