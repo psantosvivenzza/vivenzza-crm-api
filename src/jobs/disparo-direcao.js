@@ -19,7 +19,7 @@ export function dentroDaJanela(data = new Date()) {
     timeZone: 'America/Sao_Paulo', weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false,
   }).formatToParts(data)
   const get = (t) => partes.find((p) => p.type === t)?.value ?? ''
-  const util = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => get('weekday').includes(d))
+  const util = ['segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'].some((d) => get('weekday').includes(d))
   const min = Number(get('hour')) * 60 + Number(get('minute'))
   return util && min >= 9 * 60 && min <= 17 * 60 + 30
 }
