@@ -1,5 +1,7 @@
 import { Router } from 'express'
+import { humanOwnsSdr, saveLaraTurn, transferSdrToHuman, HUMAN_TRANSFER_REPLY, observeSdrHumanOutbound } from '../lib/sdrOwnership.js'
 import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -10,6 +12,7 @@ import { processWhatsappEvent } from './webhook-handler.js'
 import { candidatosTelefone, mascararTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { auth } from '../middleware/auth.js'
 import { webhookAuth } from '../middleware/webhookAuth.js'
+import { evolutionOwnership } from '../lib/whatsappInboundOwnership.js'
 import { CATALOGO_PROFISSIONAL, CATALOGO_COLORACAO, CATALOGO_HOME_CARE } from '../lib/catalogos.js'
 import { avaliarLead, cnpjValido, soDigitos } from '../lib/qualificacaoLead.js'
 import { situacaoCnpj, inadimplenteNoErp, carregarTerritorio } from '../lib/qualificacaoLookup.js'
@@ -104,7 +107,7 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000)
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -589,6 +592,8 @@ TEMPERATURA ATUAL: ${temperatura}
 ETAPA DE CADÊNCIA ATUAL: ${etapaCadencia}
 
 REGRAS GERAIS:
+- Atenda o primeiro contato e tire dúvidas em qualquer horário enquanto nenhum humano assumir a conversa.
+- Se o cliente pedir um atendente, ou se faltar informação segura para responder, use acao TRANSFERIR_HUMANO. Não invente respostas, preços, estoque ou condições. O sistema encaminha para a equipe e pausa suas respostas nessa conversa.
 - Frases curtas, linguagem natural de WhatsApp (máximo 3 parágrafos curtos)
 - Uma pergunta por vez — nunca bombardeie o cliente com várias perguntas de uma vez
 - Use o nome do lead quando souber
@@ -601,7 +606,7 @@ RESPONDA APENAS EM JSON VÁLIDO, sem texto fora do JSON:
 {
   "resposta": "texto da mensagem de texto — resumo + pergunta quando houver áudio (etapas 3/5), ou a mensagem completa quando não houver",
   "audio_script": "roteiro de 15 a 30s de fala — preencha SÓ nas etapas 3 ou 5; em qualquer outra etapa, use null",
-  "acao": "NENHUMA|ENVIAR_CATALOGO_PRO|ENVIAR_CATALOGO_HOME|ENVIAR_APRESENTACAO_B2B|AGENDAR_DEMO|CRIAR_LEAD",
+  "acao": "NENHUMA|ENVIAR_CATALOGO_PRO|ENVIAR_CATALOGO_HOME|ENVIAR_APRESENTACAO_B2B|AGENDAR_DEMO|CRIAR_LEAD|TRANSFERIR_HUMANO",
   "tipo_lead": "indefinido|salao|distribuidor|consumidor_final",
   "proximo_estado": "novo|qualificando|catalogo_enviado|demo_agendada|lead_criado",
   "temperatura": "frio|morno|quente",
@@ -621,47 +626,20 @@ function parsearRespostaClaude(texto, contexto = {}) {
     try { return JSON.parse(str) } catch { return null }
   }
   const resultado = tryParse(texto) ?? tryParse((texto.match(/\{[\s\S]*\}/) || [])[0])
-  if (resultado) return resultado
+  if (resultado && !Array.isArray(resultado) && typeof resultado==='object' && typeof resultado.resposta==='string' && resultado.resposta.trim()) return resultado
 
-  // Claude retornou texto puro sem JSON — usa o texto como resposta para não
-  // desperdiçar uma mensagem válida, preservando o estado atual da conversa.
-  const textoLimpo = texto?.trim() ?? ''
-  // Nunca loga o conteúdo do texto (é claudeRawText, pode conter dado do
-  // lead ecoado pelo modelo) — só tamanho e o correlationId do turno, quando
-  // disponível, para permitir achar o evento completo nos logs estruturados.
-  console.warn(`[sdr] parsearRespostaClaude: JSON inválido, usando texto puro (correlationId=${contexto.correlationId ?? 'nao_informado'}, len=${textoLimpo.length})`)
+  // An unstructured answer cannot confirm a safe sales decision. Hand it off.
+  console.warn('[sdr] invalid_model_decision_transfer_required')
   return {
-    resposta: textoLimpo || 'Pode repetir? Não entendi sua mensagem 😊',
+    resposta: HUMAN_TRANSFER_REPLY,
     audio_script: null,
-    acao: 'NENHUMA',
+    acao: 'TRANSFERIR_HUMANO',
     tipo_lead: contexto.tipo_lead ?? 'indefinido',
     proximo_estado: contexto.estado ?? 'qualificando',
     temperatura: contexto.temperatura ?? 'frio',
     etapa_cadencia: contexto.etapaCadencia ?? 1,
   }
 }
-
-// Horário comercial: segunda a sexta, 08:20–18:00, fuso America/Sao_Paulo.
-// Usa formatToParts para evitar comparação de string com separador locale-dependente
-// (Windows formata como "14h20", não "14:20", quebrando >= / <=).
-function dentroDoHorarioComercial(data = new Date()) {
-  const partes = new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    weekday: 'long',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(data)
-  const get = (tipo) => partes.find((p) => p.type === tipo)?.value ?? ''
-  const diaUtil = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => get('weekday').includes(d))
-  const hora = get('hour')
-  const minuto = get('minute')
-  const totalMin = Number(hora) * 60 + Number(minuto)
-  return diaUtil && totalMin >= 8 * 60 + 20 && totalMin <= 18 * 60
-}
-
-const MENSAGEM_FORA_DO_HORARIO =
-  'Oi! Nosso time comercial atende de segunda a sexta, das 8h20 às 18h. Mas pode me contar o que precisa que eu já anoto tudo pra quando a equipe voltar 😊'
 
 // Movida pra lib/sdrConversas.js (sem dependência de rota) pra evitar import circular
 // com reativacao.js, que também precisa dela. Re-exportada aqui porque whatsapp.js
@@ -957,11 +935,25 @@ function detectarTipoKeyword(texto) {
 // Fluxo da Lara (IA) — só atua em mensagens novas recebidas (não-fromMe).
 // Retorna { telefone, parsed } quando responde, ou null quando não há o que fazer
 // (evento irrelevante, mensagem de status, eco da própria Lara, etc).
-async function processarLara(event) {
+async function processarLara(event, { insertedBeforeAck = false } = {}) {
   if (event.event !== 'messages.upsert') return null
 
   const msg = Array.isArray(event.data) ? event.data[0] : event.data
   if (!msg || msg.key?.fromMe) return null
+
+  if (sdrContext.getStore()?.provider === 'fzap' && !insertedBeforeAck) {
+    // Secondary replay guard after a restart. This existing inbox is written
+    // after Lara processing, so it is not an atomic or global dispatch claim.
+    if (!msg.key?.id) return null
+    const { data: prior, error: replayError } = await supabase.from('whatsapp_mensagens')
+      .select('evolution_id').eq('evolution_id', msg.key.id).eq('instance_name', replyInstance())
+      .limit(1).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    if (replayError) {
+      console.error('[sdr] replay_lookup_failed', { code: 'FZAP_REPLAY_LOOKUP_FAILED' })
+      return null
+    }
+    if (prior?.length) return null
+  }
 
   // Um id opaco por mensagem recebida — só pra cruzar, no Railway, os logs de
   // um mesmo turno (extração de telefone -> decisão -> envio -> persistência),
@@ -1002,7 +994,7 @@ async function processarLara(event) {
     .maybeSingle()
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if (erroConfig) logarFalhaDeVerificacao('ler_config_automacoes', erroConfig.code, correlationId)
-  if (sdrContext.getStore()?.siteCampaign && (erroConfig || !configAutomacoes)) return null
+  if (erroConfig || !configAutomacoes) return null
   if (configAutomacoes && configAutomacoes.sdr_ativo === false) return null
 
   // Desembrulha ephemeralMessage/viewOnceMessage — o conteúdo real fica aninhado em
@@ -1088,11 +1080,10 @@ async function processarLara(event) {
     .from('leads')
     .select('id')
     .in('telefone', candidatosConversa)
-    .eq('atendimento_humano', true)
+    .or('atendimento_humano.eq.true,whatsapp_opt_out.eq.true,ativo.eq.false')
     .limit(1)
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-  if (siteCampaign && erroHandoff) return null
-  if (erroHandoff) logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code, correlationId)
+  if (erroHandoff) {logarFalhaDeVerificacao('checar_handoff_humano', erroHandoff.code, correlationId);return null}
   if (leadsHandoff && leadsHandoff.length > 0) return null
 
   const { data: conversasExistentes, error: erroHistorico } = await supabase
@@ -1104,9 +1095,9 @@ async function processarLara(event) {
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if (erroHistorico) logarFalhaDeVerificacao('ler_historico_conversa', erroHistorico.code, correlationId)
 
-  if (siteCampaign && erroHistorico) return null
+  if (erroHistorico) return null
   const conversa = conversasExistentes?.[0] ?? null
-  if (siteCampaign && conversa?.status_atendimento === 'vendedor_assumiu') return null
+  if (conversa?.status_atendimento === 'vendedor_assumiu') return null
   // Mantém o telefone já salvo como chave canônica, para não fragmentar o
   // histórico em duas linhas diferentes a cada variação de formato recebida.
   const telefoneConversa = conversa?.telefone || telefone
@@ -1121,25 +1112,14 @@ async function processarLara(event) {
   // menos de 5 minutos, é ping-pong com outro bot/auto-resposta (ex: um número de
   // atendimento automático de terceiros que responde toda mensagem que recebe) — sem
   // essa guarda, a Lara entra num loop infinito respondendo a si mesma indiretamente.
-  // Escala pro vendedor e não responde, em vez de continuar o loop.
+  // Ignora a repetição, sem bloquear permanentemente a conversa.
   const ultimaEntrada = [...historico].reverse().find((h) => h.role === 'user')
   if (
     ultimaEntrada &&
     ultimaEntrada.content === mensagem &&
     Date.now() - new Date(ultimaEntrada.timestamp).getTime() < 5 * 60 * 1000
   ) {
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-20)
-    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from(conversationTable()).upsert(
-      {
-        telefone: telefoneConversa,
-        historico: historicoParaSalvar,
-        status_atendimento: 'vendedor_assumiu',
-        ultimo_contato: new Date().toISOString(),
-      },
-      { onConflict: 'telefone' }
-    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
+    // Ignore repeated input without inventing a permanent human takeover.
     return null
   }
 
@@ -1159,30 +1139,7 @@ async function processarLara(event) {
   }
   ultimoProcessamentoPorTelefone.set(telefoneConversa, Date.now())
 
-  // --- Controle de atendimento: vendedor x IA, dentro/fora do horário comercial ---
-  // Dentro do horário (seg–sex 08:20–18:00): time comercial assume, Lara fica silenciosa.
-  // Fora do horário (noite, fins de semana): Lara responde via Claude para todos os leads.
-  const dentroDoHorario = dentroDoHorarioComercial()
-
-  if (dentroDoHorario && !siteCampaign) {
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-20)
-    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from(conversationTable()).upsert(
-      {
-        telefone: telefoneConversa,
-        historico: historicoParaSalvar,
-        status_atendimento: 'vendedor_assumiu',
-        ultimo_contato: new Date().toISOString(),
-      },
-      { onConflict: 'telefone' }
-    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-    return null
-  }
-
-  // Fora do horário comercial: Lara responde via Claude independente do status anterior.
-  // Se o vendedor havia assumido, Lara retoma o controle até o próximo horário comercial.
-  const statusAtendimento = conversa?.status_atendimento || 'ia_atendendo'
+  // Lara qualifies in every schedule; only ownership of this conversation pauses it.
   historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
   let historicoRecente = historico.slice(-20)
   if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
@@ -1225,17 +1182,12 @@ async function processarLara(event) {
     })
     claudeRawText = claudeResponse.content[0]?.text || ''
   } catch (anthropicErr) {
-    console.error(`[sdr] Claude indisponível: correlationId=${correlationId}`, anthropicErr.message)
-    try {
-      await evolutionApi.post(`/message/sendText/${replyInstance()}`, {
-        number: telefone,
-        text: siteCampaign ? 'Recebemos sua mensagem. Nosso atendimento automático está temporariamente indisponível. Você pode tentar novamente em alguns minutos.' : 'Oi! Recebi sua mensagem 😊 Nossa equipe vai entrar em contato em breve.',
-      })
-    } catch {}
-    return null
+    console.error('[sdr] model_unavailable_transfer_required',{correlationId,status:anthropicErr.status??'unavailable'})
+    return {telefone:telefoneConversa,transferirHumano:true,parsed:{acao:'TRANSFERIR_HUMANO',tipo_lead,proximo_estado:estado,temperatura,etapa_cadencia:etapaCadencia}}
   }
   const parsed = parsearRespostaClaude(claudeRawText, { estado, tipo_lead, temperatura, etapaCadencia, correlationId })
   if(siteCampaign) parsed.resposta=enforceSiteCampaignReply(String(parsed.resposta || 'Como podemos ajudar?'))
+  if(parsed.acao==='TRANSFERIR_HUMANO') return {telefone:telefoneConversa,parsed,transferirHumano:true}
 
   // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword
   // de B2B ou B2C é detectada na mensagem — cobre leads criados sem tipo definido.
@@ -1287,15 +1239,11 @@ async function processarLara(event) {
 
   historicoRecente.push({ role: 'assistant', content: parsed.resposta, timestamp: new Date().toISOString() })
 
-  // Achado do incidente 2026-09-13: este upsert nunca teve timeout nem checagem
-  // de erro — sem isso, uma instabilidade aqui travava (ou abortava sem log) o
-  // fluxo INTEIRO antes de chegar no envio de texto logo abaixo, mesmo com a
-  // resposta da Claude já pronta. Agora nunca bloqueia o envio: em erro/timeout,
-  // loga (sanitizado) e segue para tentar enviar a resposta mesmo assim —
-  // preferimos arriscar reprocessar o histórico no próximo turno a deixar de
-  // tentar enviar uma resposta já gerada.
+  // Persist only while this conversation is still available to Lara. Unknown
+  // ownership or a concurrent human takeover prevents an outbound reply.
   try {
-    const { error: erroSalvarEstado } = await supabase.from(conversationTable()).upsert({
+    if(await humanOwnsSdr({db:supabase,table:conversationTable(),phone:telefoneConversa}))return null
+    await saveLaraTurn({db:supabase,table:conversationTable(),phone:telefoneConversa,exists:!!conversa,payload:{
       telefone: telefoneConversa,
       estado: parsed.proximo_estado,
       tipo_lead: parsed.tipo_lead,
@@ -1304,10 +1252,10 @@ async function processarLara(event) {
       historico: historicoRecente,
       status_atendimento: 'ia_atendendo',
       ultimo_contato: new Date().toISOString(),
-    }, { onConflict: 'telefone' }).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-    if (erroSalvarEstado) logarFalhaDeVerificacao('salvar_estado_conversa', erroSalvarEstado.code, correlationId)
+    }})
   } catch (err) {
     logarFalhaDeVerificacao('salvar_estado_conversa', err?.code, correlationId)
+    return null
   }
 
   // Achado da auditoria de 2026-09-21: um caso real teve `status_atendimento`
@@ -1330,6 +1278,7 @@ async function processarLara(event) {
   // Checa rajada ANTES de qualquer envio (áudio ou texto) — cobre os dois caminhos
   // abaixo com uma única checagem por mensagem respondida.
   await aplicarPacingLara()
+  if(await humanOwnsSdr({db:supabase,table:conversationTable(),phone:telefoneConversa}))return null
 
   if (deveGerarAudio && ELEVENLABS_KEY) {
     try {
@@ -1343,6 +1292,7 @@ async function processarLara(event) {
         { headers: { 'xi-api-key': ELEVENLABS_KEY }, responseType: 'arraybuffer' }
       )
 
+      if(await humanOwnsSdr({db:supabase,table:conversationTable(),phone:telefoneConversa}))return null
       const audioBase64 = Buffer.from(audioResponse.data).toString('base64')
       const { data: envioAudio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${replyInstance()}`, {
         number: telefone,
@@ -1368,6 +1318,7 @@ async function processarLara(event) {
     }
   }
 
+  if(await humanOwnsSdr({db:supabase,table:conversationTable(),phone:telefoneConversa}))return null
   try {
     const { data: envioTexto } = await evolutionApi.post(`/message/sendText/${replyInstance()}`, {
       number: telefone,
@@ -1384,6 +1335,7 @@ async function processarLara(event) {
 
   if (!siteCampaign && ACOES_CATALOGO.includes(parsed.acao)) {
     for (const cat of catalogosParaEnviar(parsed.tipo_lead)) {
+      if(await humanOwnsSdr({db:supabase,table:conversationTable(),phone:telefoneConversa}))break
       try {
         const { data: envioCat } = await evolutionApi.post(`/message/sendMedia/${replyInstance()}`, {
           number: telefone,
@@ -1413,7 +1365,36 @@ async function processarLara(event) {
 // (leads no Pipeline, histórico no chat das vendedoras) continua processando
 // o mesmo payload normalmente — inclusive os eventos fromMe/status, que a
 // Lara ignora mas o fluxo humano precisa para manter o chat fiel ao WhatsApp real.
-async function handleSdrWebhook(req, res) {
+export async function handleSdrWebhook(req, res) {
+  const outgoing=Array.isArray(req.body?.data)?req.body.data[0]:req.body?.data
+  // Acknowledge FZAP commercial messages only after the CRM write has finished.
+  // Keep the legacy and site paths unchanged.
+  const persistBeforeAck = sdrContext.getStore()?.provider === 'fzap' &&
+    !sdrContext.getStore()?.recipient && req.body?.event === 'messages.upsert'
+  const humanOutbound = req.body?.event === 'messages.upsert' && outgoing?.key?.fromMe === true
+  // Classify the outbound before recording it. Otherwise the origin lookup
+  // sees this very message in the inbox and mistakes it for a known API send.
+  if (humanOutbound) {
+    try { await observeSdrHumanOutbound({db:supabase,table:conversationTable(),instance:replyInstance(),message:outgoing}) }
+    catch { return res.status(503).json({erro:'Não foi possível confirmar o controle humano da conversa.'}) }
+  }
+  let insertedBeforeAck = false
+  if (persistBeforeAck) {
+    try {
+      const persisted = await processWhatsappEvent(req.body, { requirePersistence: true })
+      insertedBeforeAck = persisted?.inserted === true
+      if (!insertedBeforeAck && outgoing?.key?.fromMe !== true) return res.json({ status: 'received' })
+    } catch {
+      return res.status(503).json({ erro: 'Não foi possível gravar a mensagem comercial.' })
+    }
+  }
+  if(humanOutbound){
+    res.json({status:'received'})
+    if (persistBeforeAck) return
+    try{await processWhatsappEvent(req.body,{campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})}
+    catch{console.error('[sdr] human_outbound_inbox_failed')}
+    return
+  }
   res.json({ status: 'received' }) // responde imediatamente ao Evolution
 
   // messages.update é só confirmação de entrega/leitura (✓✓) — pode chegar às dezenas
@@ -1430,15 +1411,29 @@ async function handleSdrWebhook(req, res) {
 
   let resultadoLara = null
   try {
-    resultadoLara = await processarLara(req.body)
+    resultadoLara = await processarLara(req.body, { insertedBeforeAck })
   } catch (err) {
     console.error('[sdr] erro no fluxo Lara:', err.message)
   }
 
-  try {
-    await processWhatsappEvent(req.body, {campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})
-  } catch (err) {
-    console.error('[sdr] erro ao repassar para o fluxo humano:', err.message)
+  if (!persistBeforeAck) {
+    try {
+      await processWhatsappEvent(req.body, {campaignLeadId:sdrContext.getStore()?.recipient?.lead_id})
+    } catch (err) {
+      console.error('[sdr] erro ao repassar para o fluxo humano:', err.message)
+    }
+  }
+
+  // Ingest the inbound into the CRM first, so a new lead exists before handoff.
+  if(resultadoLara?.transferirHumano){
+    try {
+      const transferred=await transferSdrToHuman({db:supabase,table:conversationTable(),phone:resultadoLara.telefone})
+      if(transferred){
+        await aplicarPacingLara()
+        const {data:sent}=await evolutionApi.post('/message/sendText/'+encodeURIComponent(replyInstance()),{number:resultadoLara.telefone,text:HUMAN_TRANSFER_REPLY})
+        await registrarMensagemSaida({telefone:resultadoLara.telefone,mensagem:HUMAN_TRANSFER_REPLY,evolutionId:sent?.key?.id??null})
+      }
+    }catch{console.error('[sdr] human_transfer_unconfirmed')}
   }
 
   // Tagueia o lead com o perfil identificado pela Lara.
@@ -1458,23 +1453,32 @@ async function handleSdrWebhook(req, res) {
   }
 }
 
-router.post('/webhook', webhookAuth, (req,res) => {
+// Called only after the FZAP route resolves an authenticated allowlisted instance.
+// Carry its identity through every reply and media download, including contingency.
+export function handleFzapSdrWebhook(req, res) {
+  const instance = req.body?.instance
+  if (typeof instance !== 'string' || !instance) return res.status(503).json({ erro: 'Conexão WhatsApp não confirmada' })
+  if (instance === process.env.SDR_SITE_INSTANCE?.trim() || instance === 'Mesagens Site Reativação') return res.status(403).json({ erro: 'Use o webhook da campanha' })
+  return sdrContext.run({ instance, provider: 'fzap' }, () => handleSdrWebhook(req, res))
+}
+
+router.post('/webhook', webhookAuth, evolutionOwnership, (req,res) => {
  const instance=req.body?.instance ?? req.body?.instanceName
  if (instance && (instance===process.env.SDR_SITE_INSTANCE || instance==='Mesagens Site Reativação')) return res.status(403).json({erro:'Use o webhook da campanha'})
  return handleSdrWebhook(req,res)
 })
 
-router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
-  if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
+export async function handleSiteCampaignWebhook(req, res, options = {}) {
   const context = siteCampaignContext(req.body)
   if (!context) return res.status(403).json({ erro: 'Instância da campanha não habilitada' })
+  if (options.provider === 'fzap') context.provider = 'fzap'
   if (req.body.event === 'messages.update') {
     try {await applySiteCampaignReceipts(supabase,req.body,context.instance);return res.json({status:'ok'})}
     catch {console.error('[site-campaign] receipt_persistence_failed');return res.status(503).json({erro:'Falha ao registrar recibo da campanha'})}
   }
   if(req.body.event !== 'messages.upsert') return res.json({status:'ignored'})
   const msg=Array.isArray(req.body.data)?req.body.data[0]:req.body.data
-  if(!msg || msg.key?.fromMe) return res.json({status:'ignored'})
+  if(!msg) return res.json({status:'ignored'})
   const jid=msg.key?.remoteJid?.endsWith('@lid')?msg.key?.remoteJidAlt:msg.key?.remoteJid
   if(!jid?.endsWith('@s.whatsapp.net')) return res.json({status:'ignored'})
   const telefone=jid.replace('@s.whatsapp.net','')
@@ -1485,6 +1489,7 @@ router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
   const recipient=data?.[0]
   if(!recipient) return res.json({status:'ignored'})
   context.recipient=recipient
+  if(msg.key?.fromMe===true)return sdrContext.run(context,()=>handleSdrWebhook(req,res))
   const content=msg.message?.ephemeralMessage?.message || msg.message?.viewOnceMessage?.message || msg.message || {}
   const incomingText=content.conversation || content.extendedTextMessage?.text || content.imageMessage?.caption || content.documentMessage?.caption || ''
   if(isStopRequest(incomingText)) {
@@ -1503,6 +1508,11 @@ router.post('/site-reativacao/webhook', webhookAuth, async (req, res) => {
     .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
   if(updateError) return res.status(503).json({erro:'Registro da resposta indisponível'})
   return sdrContext.run(context, () => handleSdrWebhook(req, res))
+}
+
+router.post('/site-reativacao/webhook', webhookAuth, evolutionOwnership, (req, res) => {
+  if (!process.env.EVOLUTION_WEBHOOK_TOKEN) return res.status(503).json({ erro: 'Webhook não configurado' })
+  return handleSiteCampaignWebhook(req, res)
 })
 
 export default router

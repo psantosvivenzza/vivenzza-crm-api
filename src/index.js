@@ -11,8 +11,12 @@ import usuariosRouter from './routes/usuarios.js'
 import leadsRouter from './routes/leads.js'
 import contatosRouter from './routes/contatos.js'
 import whatsappRouter from './routes/whatsapp.js'
+import whatsappConexoesRouter from './routes/whatsapp-conexoes.js'
+import financialInboxRouter from './routes/financial-inbox.js'
+import {readFzapConfig,FzapConnectionError} from './lib/fzapConnections.js'
 import laraCoachRouter from './routes/lara-coach.js'
-import handleWebhook from './routes/webhook-handler.js'
+import handleWebhook, {processWhatsappEvent} from './routes/webhook-handler.js'
+import {evolutionOwnership,createFzapWebhookHandler} from './lib/whatsappInboundOwnership.js'
 import { webhookAuth } from './middleware/webhookAuth.js'
 import produtosRouter from './routes/produtos.js'
 import pedidosRouter from './routes/pedidos.js'
@@ -30,7 +34,7 @@ import comissoesRouter from './routes/comissoes.js'
 import cfopsRouter from './routes/cfops.js'
 import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
-import sdrRouter from './routes/sdr.js'
+import sdrRouter, {handleFzapSdrWebhook,handleSiteCampaignWebhook} from './routes/sdr.js'
 import { runSiteCampaignQueue } from './jobs/site-campaign.js'
 import campanhasRouter from './routes/campanhas.js'
 import googleAdsRouter from './routes/google-ads.js'
@@ -101,6 +105,9 @@ import pontoAdminRouter from './routes/ponto-admin.js'
 import pontoEquipamentoRouter from './routes/ponto-equipamento.js'
 import { exigirGestorOuAdmin, exigirUsuarioAtivo } from './middleware/pontoAuth.js'
 
+const fzapStartupConfig=readFzapConfig()
+if(fzapStartupConfig?.connections?.length&&!/^[A-Za-z0-9_-]{32,256}$/.test(process.env.FZAP_WEBHOOK_SECRET||''))throw new FzapConnectionError('CONFIG')
+
 const app = express()
 const PORT = process.env.PORT || 3001
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -131,7 +138,8 @@ app.use((req, res, next) => {
 })
 
 // Webhook do WhatsApp — autenticado via x-webhook-token (S1-2)
-app.post('/api/whatsapp/webhook', webhookAuth, handleWebhook)
+app.post('/api/whatsapp/webhook', webhookAuth, evolutionOwnership, handleWebhook)
+app.post('/api/whatsapp/fzap-webhook/:id', createFzapWebhookHandler({financial:processWhatsappEvent,commercial:handleFzapSdrWebhook,site:handleSiteCampaignWebhook}))
 
 // Rate limit na rota pública: máx 10 submissões por IP a cada 15 min
 const publicLeadsLimit = rateLimit({
@@ -178,6 +186,7 @@ app.use('/api/usuarios', auth, usuariosRouter)
 app.use('/api/leads', auth, leadsRouter)
 app.use('/api/contatos', auth, contatosRouter)
 app.use('/api/whatsapp', auth, whatsappRouter)
+app.use('/api/whatsapp-conexoes', auth, whatsappConexoesRouter)
 // Lara coach: sugestão de resposta por conversa + avaliação das vendedoras
 app.use('/api/lara', auth, laraCoachRouter)
 app.use('/api/produtos', auth, produtosRouter)
@@ -226,6 +235,7 @@ app.use('/api/blog', auth, adminOnly, blogRouter)
 // avaliações da loja, que alimentam o widget público em /api/avaliacoes.
 app.use('/api/admin/avaliacoes', auth, adminOnly, avaliacoesAdminRouter)
 app.use('/api/cobrancas', auth, adminOuFinanceiro, cobrancasRouter)
+app.use('/api/financeiro-atendimentos', auth, adminOuFinanceiro, financialInboxRouter)
 // Painel da Central de Voz — SÓ LEITURA das views de auditoria das ligações.
 // Mesmo controle de acesso da cobrança (admin ou financeiro): quem pode ver
 // título vencido pode ver a ligação que cobrou aquele título.

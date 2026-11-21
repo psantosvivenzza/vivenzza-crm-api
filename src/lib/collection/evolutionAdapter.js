@@ -8,7 +8,7 @@
 // Reaproveita a MESMA técnica de confirmação de número + variante de 9º dígito já
 // validada em produção por src/lib/evolutionFinanceiro.js — não reimplementa do
 // zero, só generaliza para múltiplas instâncias.
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../whatsappProviderClient.js'
 import { paraJidWhatsapp, telefonesEquivalentes, mascararTelefone } from '../telefone.js'
 
 const EVOLUTION_URL_PADRAO = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
@@ -26,7 +26,7 @@ function comNonoDigito(jid) {
 function clientPara(instancia) {
   const baseURL = instancia.api_base_url || EVOLUTION_URL_PADRAO
   const apiKey = process.env[instancia.api_key_env_var || 'EVOLUTION_API_KEY']
-  return axios.create({ baseURL, headers: { apikey: apiKey }, timeout: 20000 })
+  return createWhatsappProviderClient({ baseURL, headers: { apikey: apiKey }, timeout: 20000 })
 }
 
 async function existeNoWhatsapp(client, instanceName, jid) {
@@ -98,6 +98,11 @@ export const FAILURE_CATEGORY = Object.freeze({
 const FALHA_TECNICA_RETRYABLE = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET', 'EHOSTUNREACH', 'ENOTFOUND'])
 
 export function classifyEvolutionFailure(err) {
+  // The FZAP request may already have reached WhatsApp. Neither uncertainty
+  // nor an indeterminate owner permits retry/failover to a second number.
+  if (typeof err?.code === 'string' && err.code.startsWith('FZAP_') && err.code !== 'FZAP_REJECTED') {
+    return { category: FAILURE_CATEGORY.UNKNOWN, failureKind: 'unknown', failoverEligible: false, affectsInstanceHealth: false, mensagem: 'Operação WhatsApp indeterminada; requer reconciliação antes de nova tentativa.' }
+  }
   if (err?.numeroInvalido) {
     return { category: FAILURE_CATEGORY.PERMANENT_RECIPIENT, failureKind: 'permanent_recipient', failoverEligible: false, affectsInstanceHealth: false, mensagem: err.message }
   }

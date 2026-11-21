@@ -1,10 +1,10 @@
 import { supabase } from '../lib/supabase-admin.server.js'
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
+import { enviarNotificacaoDirecao } from '../lib/directionNotifications.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
-const PETERSON_NUMERO = '555131372313'
 const LIMITE_48H = 48 * 60 * 60 * 1000
 const LIMITE_72H = 72 * 60 * 60 * 1000
 
@@ -24,7 +24,7 @@ const LIMITE_POR_EXECUCAO = 15 // máx. de leads processados (=~30 msgs) por rod
 const INTERVALO_MIN_MS = 45000
 const INTERVALO_MAX_MS = 90000 // 45-90s entre mensagens — nunca rajada, mesmo padrão do cobranca-whatsapp.js
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -43,24 +43,28 @@ function aguardarIntervaloAleatorio() {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function enviarWhatsApp(numero, texto) {
+async function enviarWhatsApp(numero, texto, key) {
   try {
     let dest = numero.replace(/\D/g, '')
-    if (!dest.startsWith('55')) dest = '55' + dest
-    await evolutionApi.post(`/message/sendText/${INSTANCE}`, { number: dest, text: texto })
+    if (/^\d{10,11}$/.test(dest)) dest = '55' + dest
+    await enviarNotificacaoDirecao(texto, { recipient: dest, key })
     return true
   } catch (err) {
     console.error('[handoff-alerta] erro ao enviar WA:', err.message)
+    if (err.message === 'NOTIFICATION_PREVIOUS_UNCERTAIN') return 'previous_uncertain'
     return false
   }
 }
 
 export async function runHandoffAlerta() {
+  const PETERSON_NUMERO = process.env.DIRECTION_REPORT_NUMBER
+  if (!PETERSON_NUMERO) return { ativo: false, motivo: 'destinatario_direcao_pendente' }
   const ativo = await handoffAlertaEstaAtivo()
   if (!ativo) {
     console.log('[handoff-alerta] desligado em automacoes_config.handoff_alerta_ativo — nada foi verificado')
     return { ativo: false, verificados: 0, alertas_48h: 0, alertas_72h: 0 }
   }
+  if (!await enviarNotificacaoDirecao.ready()) return { ativo: false, motivo: 'remetente_direcao_pendente' }
 
   const agora = Date.now()
 
@@ -105,10 +109,14 @@ export async function runHandoffAlerta() {
     if (msDesdeUltima >= LIMITE_72H && lead.handoff_alerta_nivel < 72) {
       const msg72 = `⚠️ *Handoff sem resposta há 72h*\n\nLead: *${lead.nome}*\nResponsável: ${nomeVendedora}\n\nO cliente não recebeu mensagem há mais de 72 horas. Ação imediata necessária.`
 
-      await enviarWhatsApp(PETERSON_NUMERO, msg72)
+      processados++
+      const key=`handoff:${lead.id}:72:${ultimaSaida ?? 'none'}`
+      const delivery = await enviarWhatsApp(PETERSON_NUMERO, msg72,key)
+      if (delivery === 'previous_uncertain') { processados--; continue }
+      if (!delivery) break
       await aguardarIntervaloAleatorio()
       if (telVendedora) {
-        await enviarWhatsApp(telVendedora, msg72)
+        await enviarWhatsApp(telVendedora, msg72,key)
         await aguardarIntervaloAleatorio()
       } else {
         semTelefoneVendedora++
@@ -117,7 +125,6 @@ export async function runHandoffAlerta() {
 
       await supabase.from('leads').update({ handoff_alerta_nivel: 72 }).eq('id', lead.id)
       alertas72++
-      processados++
       console.log(`[handoff-alerta] 72h enviado — lead ${lead.id} (${lead.nome})`)
       continue
     }
@@ -128,12 +135,16 @@ export async function runHandoffAlerta() {
     // for pra lá; o Peterson recebendo também garante que alguém vê a tempo).
     if (msDesdeUltima >= LIMITE_48H && lead.handoff_alerta_nivel < 48) {
       const msg48Peterson = `⏰ *Lembrete de atendimento (48h) — cópia gestão*\n\nLead: *${lead.nome}*\nResponsável: ${nomeVendedora}\n\nEsse lead está há mais de 48 horas sem resposta da vendedora responsável.`
-      await enviarWhatsApp(PETERSON_NUMERO, msg48Peterson)
+      processados++
+      const key=`handoff:${lead.id}:48:${ultimaSaida ?? 'none'}`
+      const delivery = await enviarWhatsApp(PETERSON_NUMERO, msg48Peterson,key)
+      if (delivery === 'previous_uncertain') { processados--; continue }
+      if (!delivery) break
       await aguardarIntervaloAleatorio()
 
       if (telVendedora) {
         const msg48 = `⏰ *Lembrete de atendimento*\n\nLead: *${lead.nome}*\n\nVocê assumiu este atendimento mas não enviou mensagem há mais de 48 horas. O cliente está esperando!`
-        await enviarWhatsApp(telVendedora, msg48)
+        await enviarWhatsApp(telVendedora, msg48,key)
         await aguardarIntervaloAleatorio()
       } else {
         semTelefoneVendedora++
@@ -142,7 +153,6 @@ export async function runHandoffAlerta() {
 
       await supabase.from('leads').update({ handoff_alerta_nivel: 48 }).eq('id', lead.id)
       alertas48++
-      processados++
       console.log(`[handoff-alerta] 48h enviado — lead ${lead.id} (${lead.nome})`)
     }
   }

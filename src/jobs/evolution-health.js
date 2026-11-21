@@ -1,6 +1,7 @@
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { atualizarStatusConexao } from '../lib/collection/whatsappInstances.js'
+import { enviarAlertaWhatsapp } from '../lib/whatsappAlert.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
@@ -36,9 +37,7 @@ const NOME_AMIGAVEL = {
   'vivenzza-financeiro-reserva-01': 'WhatsApp Financeiro Reserva 01',
 }
 
-const PETERSON_NUMERO = '555131372313'
-
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 15000,
@@ -53,28 +52,13 @@ const evolutionApi = axios.create({
 // está com problema, e só tenta a própria instância com problema como último
 // recurso (caso já tenha voltado entre a checagem e o envio).
 async function enviarAlerta(texto, instanciaComProblema) {
-  const candidatas = [
-    ...INSTANCIAS_MONITORADAS.filter((i) => i !== instanciaComProblema),
-    instanciaComProblema,
-  ]
-
-  for (const instancia of candidatas) {
-    try {
-      await evolutionApi.post(`/message/sendText/${instancia}`, {
-        number: PETERSON_NUMERO,
-        text: texto,
-      })
-      return true
-    } catch {
-      continue
-    }
-  }
-  return false
+  try { await enviarAlertaWhatsapp(texto,{key:'health:'+instanciaComProblema+':'+Math.floor(Date.now()/3600000)}); return true }
+  catch { return false }
 }
 
 // Verifica se já enviamos alerta de "offline" para ESSA instância nos
 // últimos 60 min, para não inundar o Peterson de mensagens repetidas.
-async function alertaRecente(nomeInstancia) {
+async function alertaRecente(nomeInstancia, status) {
   const limite = new Date(Date.now() - 60 * 60 * 1000).toISOString()
   const { data } = await supabase
     .from('evolution_health')
@@ -84,20 +68,9 @@ async function alertaRecente(nomeInstancia) {
     .limit(20)
 
   return (data || []).some(
-    (r) => r.alerta_enviado && r.status !== 'open' && r.detalhes?.instanceName === nomeInstancia
+    (r) => r.alerta_enviado && r.status !== 'open' && r.detalhes?.instanceName === nomeInstancia &&
+      ['error', 'unknown'].includes(r.status) === ['error', 'unknown'].includes(status)
   )
-}
-
-function statusDaInstancia(lista, nomeInstancia) {
-  const instancia = lista.find(
-    (i) => (i.name || i.instance?.instanceName || i.instanceName) === nomeInstancia
-  )
-  if (!instancia) return 'not_found'
-  return instancia?.connectionStatus
-    || instancia?.instance?.connectionStatus
-    || instancia?.instance?.status
-    || instancia?.status
-    || 'unknown'
 }
 
 async function registrarEAlertar(nomeInstancia, status, latencia, detalhesExtra = {}) {
@@ -115,11 +88,14 @@ async function registrarEAlertar(nomeInstancia, status, latencia, detalhesExtra 
 
   let alertaEnviado = false
   if (status !== 'open') {
-    const jaAlertou = await alertaRecente(nomeInstancia)
+    const jaAlertou = await alertaRecente(nomeInstancia, status)
     if (!jaAlertou) {
       const nomeAmigavel = NOME_AMIGAVEL[nomeInstancia] || nomeInstancia
       const emoji = status === 'error' || status === 'not_found' ? '🔴' : '🟠'
-      const msg = `${emoji} *${nomeAmigavel} FORA*\n\nStatus: ${status}\nLatência: ${latencia}ms\nInstância: ${nomeInstancia}\n\nVerifique em: ${EVOLUTION_URL}`
+      const consultaInconclusiva = status === 'error' || status === 'unknown'
+      const titulo = consultaInconclusiva ? 'CONEXÃO NÃO CONFIRMADA' : 'FORA'
+      const explicacao = consultaInconclusiva ? '\nA consulta não conseguiu confirmar o estado da sessão.' : ''
+      const msg = `${consultaInconclusiva ? '🟠' : emoji} *${nomeAmigavel} ${titulo}*\n\nStatus: ${status}\nLatência: ${latencia}ms\nInstância: ${nomeInstancia}${explicacao}\n\nVerifique em: Conexões WhatsApp no CRM`
       alertaEnviado = await enviarAlerta(msg, nomeInstancia)
 
       if (registro?.id) {
@@ -131,48 +107,42 @@ async function registrarEAlertar(nomeInstancia, status, latencia, detalhesExtra 
   return { instancia: nomeInstancia, status, latencia_ms: latencia, alerta_enviado: alertaEnviado }
 }
 
-export async function runEvolutionHealthCheck() {
-  const inicio = Date.now()
-  let lista = []
-  let latencia = null
-  let erroGeral = null
-
-  try {
-    const { data: instancias } = await evolutionApi.get('/instance/fetchInstances')
-    latencia = Date.now() - inicio
-    // Evolution API v2 retorna array. Cada item tem instance.instanceName e instance.connectionStatus
-    lista = Array.isArray(instancias) ? instancias : Object.values(instancias || {})
-  } catch (err) {
-    latencia = Date.now() - inicio
-    erroGeral = err.message
-    console.error('[evolution-health] erro ao checar:', err.message)
-  }
-
-  const resultados = []
-  for (const nomeInstancia of INSTANCIAS_MONITORADAS) {
-    if (erroGeral) {
-      // A própria chamada à Evolution API falhou — não dá pra saber o status
-      // de nenhuma instância, então registra 'error' para cada uma monitorada
-      // (senão a financeira nunca teria um registro nesse cenário).
-      resultados.push(await registrarEAlertar(nomeInstancia, 'error', latencia, { erro: erroGeral }))
-      continue
-    }
-
-    const status = statusDaInstancia(lista, nomeInstancia)
-    resultados.push(await registrarEAlertar(nomeInstancia, status, latencia, {
-      raw_status: status,
-    }))
-
-    // Espelha na Central de Instâncias (whatsapp_instances) do motor de cobrança
-    // v2 — no-op silencioso se a instância não estiver cadastrada lá (ex: só
-    // 'vivenzza' comercial hoje, que não faz parte do motor de cobrança — a
-    // função é um UPDATE por instance_name, casa zero linhas e não cria nada).
+export async function runEvolutionHealthCheck({ client = evolutionApi, instances = INSTANCIAS_MONITORADAS, record = registrarEAlertar, update = atualizarStatusConexao } = {}) {
+  const readings = new Array(instances.length), resultados = []
+  async function check(nomeInstancia) {
+    const inicio = Date.now()
+    let status
     try {
-      await atualizarStatusConexao(nomeInstancia, status)
-    } catch {
-      // tabela pode não existir se a migration não tiver sido aplicada neste
-      // ambiente — não deve derrubar o healthcheck real (evolution_health).
+      // Resolve this instance's owner independently. An unavailable Evolution
+      // inventory must not make an authoritative FZAP session appear offline.
+      const { data } = await client.get(`/instance/connectionState/${encodeURIComponent(nomeInstancia)}`)
+      status = data?.instance?.state ?? data?.state ?? 'unknown'
+    } catch (error) {
+      if (error?.response?.status === 404 && !String(error?.code || '').startsWith('FZAP_')) status = 'not_found'
+      else {
+        return { status: 'error', latencia: Date.now() - inicio, erro: error.message }
+      }
     }
+    return { status, latencia: Date.now() - inicio }
+  }
+  // Two independent checks at a time; an unavailable legacy instance cannot
+  // serially delay every other connection by its full HTTP timeout.
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(2, instances.length) }, async () => {
+    while (next < instances.length) {
+      const index = next++
+      readings[index] = await check(instances[index])
+    }
+  }))
+  // Preserve sequential recording/alerts; only read-only provider checks run
+  // concurrently, without creating a new burst of outbound notifications.
+  for (let index = 0; index < instances.length; index++) {
+    const nomeInstancia = instances[index], reading = readings[index]
+    resultados.push(await record(nomeInstancia, reading.status, reading.latencia,
+      reading.erro ? { erro: reading.erro } : { raw_status: reading.status }))
+    if (reading.status === 'error' || reading.status === 'unknown') continue
+    // UPDATE by existing instance_name, never creates a commercial reserve.
+    try { await update(nomeInstancia, reading.status) } catch { /* preserve legacy no-op for unavailable table */ }
   }
 
   console.log('[evolution-health]', resultados)

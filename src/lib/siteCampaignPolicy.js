@@ -1,9 +1,10 @@
 // Explicitly scoped to the site campaign. No automatic instance failover.
 export const SITE_CAMPAIGN = Object.freeze({
-  code: 'VOLTE10',
-  discount: 10,
-  expiresAt: '2026-11-07T02:59:59.999Z',
-  url: 'https://loja.vivenzzaprofessional.com.br/discount/VOLTE10',
+  code: 'BLACKVIVENZZA',
+  discount: 20,
+  minimumExclusive: 200,
+  expiresAt: '2026-12-01T02:59:59.999Z',
+  url: 'https://loja.vivenzzaprofessional.com.br/discount/BLACKVIVENZZA',
 })
 
 export function siteCampaignContext(event, env = process.env) {
@@ -17,14 +18,14 @@ export function siteCampaignContext(event, env = process.env) {
 export function siteCampaignInstructions(now = new Date()) {
   const valid = now.getTime() <= Date.parse(SITE_CAMPAIGN.expiresAt)
   return `\nCONTEXTO PRIORITÁRIO — ATENDIMENTO DO SITE VIVENZZA:
-Você atende clientes que já compraram na loja ou demonstraram interesse, após a campanha VOLTE10.
+Você atende clientes que já compraram na loja ou demonstraram interesse, após a campanha Black Vivenzza.
 Fale em nome da Vivenzza, sem se apresentar como pessoa ou vendedora.
 Ajude a escolher produtos perguntando sobre cabelo, química e necessidade.
 Use o conhecimento técnico acima. Nunca invente preço, estoque ou entrega.
 Encaminhe para a equipe quando não houver informação segura ou pedirem humano.
-O cupom VOLTE10 oferece 10% de desconto, sem mínimo, um uso por cliente,
-sem combinar com outras promoções, sem desconto sobre frete.
-Validade: 06/11/2026 às 23h59, horário de Brasília.
+O cupom BLACKVIVENZZA oferece 20% de desconto em compras acima de R$ 200 em produtos, um uso por cliente,
+sem combinar com outras promoções, sem desconto sobre frete. Frete não conta no valor mínimo.
+Validade: 30/11/2026 às 23h59, horário de Brasília.
 ${valid ? 'O cupom está no período de validade.' : 'O cupom venceu. Não ofereça desconto nem diga que ainda está válido.'}
 Link oficial: ${SITE_CAMPAIGN.url}
 Atenda por texto; não envie áudio nem catálogo automaticamente.
@@ -39,6 +40,6 @@ export function isStopRequest(text = '') {
  return /^(sair|stop|pare|parar|cancelar|chega)[.! ]*$/.test(s) || /descadastr|nao\s+me\s+(mande|manda|envie|chame)|nao\s+(mande|manda|envie)\s+(mais|mensage|oferta)|nao\s+(quero|desejo)\s+(mais\s+)?(receber|mensage)|par[ae]\s+de\s+(me\s+)?(mandar|enviar)|remov[ae]\s+(meu\s+)?(contato|numero|telefone)/.test(s)
 }
 export function enforceSiteCampaignReply(text, now = new Date()) {
- if(now.getTime()>Date.parse(SITE_CAMPAIGN.expiresAt) && /VOLTE10|cupom|desconto|10\s*%/i.test(text)) return 'O cupom VOLTE10 encerrou em 06/11/2026. Posso ajudar você a escolher os produtos na nossa loja: https://loja.vivenzzaprofessional.com.br'
+ if(now.getTime()>Date.parse(SITE_CAMPAIGN.expiresAt) && /BLACKVIVENZZA|VOLTE10|cupom|desconto|(?:10|20)\s*%|\bOFF\b/i.test(text)) return 'O cupom BLACKVIVENZZA encerrou em 30/11/2026. Posso ajudar você a escolher os produtos na nossa loja: https://loja.vivenzzaprofessional.com.br'
  return text
 }

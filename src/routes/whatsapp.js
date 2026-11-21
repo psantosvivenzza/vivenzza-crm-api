@@ -1,17 +1,29 @@
 import { Router } from 'express'
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import { supabase } from '../lib/supabase-admin.server.js'
-import { marcarVendedorAssumiu } from './sdr.js'
+import { claimSdrForHuman } from '../lib/sdrOwnership.js'
 import { paraJidWhatsapp } from '../lib/telefone.js'
 import { inboxListPolicy } from '../lib/whatsappInboxPolicy.js'
+import { createWhatsappRealtime, createWhatsappEventStream } from '../lib/whatsappRealtime.js'
+import { whatsappHistory } from '../lib/whatsappHistoryRuntime.js'
+import { adminOnly } from '../middleware/auth.js'
 
 const router = Router()
+router.get('/events', createWhatsappEventStream(createWhatsappRealtime(supabase)))
+router.get('/history-sync', adminOnly, (req, res) => { res.set('Cache-Control', 'no-store'); res.json(whatsappHistory.status()) })
+router.post('/history-sync', adminOnly, (req, res) => {
+  const mode = req.body?.mode ?? 'known'
+  if (!['recent', 'known', 'full'].includes(mode)) return res.status(400).json({ error: 'Modo de sincronização inválido.' })
+  const options = mode === 'recent' ? { since: new Date(Date.now() - 86400000).toISOString() } : { createMissing: mode === 'full' }
+  try { return res.status(202).json(whatsappHistory.start(options)) }
+  catch { return res.status(503).json({ error: 'HISTORY_CONFIG_UNAVAILABLE' }) }
+})
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -459,18 +471,14 @@ router.post('/enviar-audio', async (req, res) => {
     }
 
     const numero_limpo = paraJidWhatsapp(destino)
+    // Reserve human ownership before any provider I/O; failure cannot leave Lara active.
+    await claimSdrForHuman({db:supabase,table:'sdr_conversas',phone:numero_limpo,leadId:lead_id})
 
     const { data: envio } = await evolutionApi.post(`/message/sendWhatsAppAudio/${INSTANCE}`, {
       number: numero_limpo,
       audio,
       encoding: true,
     })
-
-    await marcarVendedorAssumiu(numero_limpo)
-
-    if (lead_id) {
-      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
-    }
 
     const evolutionId = envio?.key?.id ?? null
     let mediaUrl = null
@@ -527,6 +535,8 @@ router.post('/enviar-midia', async (req, res) => {
     }
 
     const numero_limpo = paraJidWhatsapp(destino)
+    // Reserve human ownership before any provider I/O; failure cannot leave Lara active.
+    await claimSdrForHuman({db:supabase,table:'sdr_conversas',phone:numero_limpo,leadId:lead_id})
 
     const { data: envio } = await evolutionApi.post(`/message/sendMedia/${INSTANCE}`, {
       number: numero_limpo,
@@ -536,12 +546,6 @@ router.post('/enviar-midia', async (req, res) => {
       media,
       fileName,
     })
-
-    await marcarVendedorAssumiu(numero_limpo)
-
-    if (lead_id) {
-      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
-    }
 
     const evolutionId = envio?.key?.id ?? null
     const tipoMap = { image: 'image', video: 'video', document: 'document' }
@@ -611,17 +615,13 @@ router.post('/enviar', async (req, res) => {
     }
 
     const numero_limpo = paraJidWhatsapp(destino)
+    // Reserve human ownership before any provider I/O; failure cannot leave Lara active.
+    await claimSdrForHuman({db:supabase,table:'sdr_conversas',phone:numero_limpo,leadId:lead_id})
 
     const { data: envio } = await evolutionApi.post(`/message/sendText/${INSTANCE}`, {
       number: numero_limpo,
       text: mensagem,
     })
-
-    await marcarVendedorAssumiu(numero_limpo)
-
-    if (lead_id) {
-      await supabase.from('leads').update({ atendimento_humano: true, handoff_alerta_nivel: 0 }).eq('id', lead_id)
-    }
 
     if (lead_id) {
       await inserirMensagemSaida({

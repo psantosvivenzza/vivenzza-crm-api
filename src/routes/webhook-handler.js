@@ -1,4 +1,4 @@
-import axios from 'axios'
+import { createWhatsappProviderClient } from '../lib/whatsappProviderClient.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { candidatosTelefone, mascararTelefone, normalizarTelefone, telefonesEquivalentes } from '../lib/telefone.js'
 import { criarOuObterLeadWhatsapp } from '../lib/distribuicao.js'
@@ -12,12 +12,13 @@ import { CATALOGOS_POR_NOME_ARQUIVO } from '../lib/catalogos.js'
 import { aplicarAckDeEntrega } from '../lib/collection/dispatchEngine.js'
 import { ehInstanciaFinanceira } from '../lib/collection/whatsappInstances.js'
 import { handleFreteInbound } from '../lib/fretes/inbound.js'
+import { processFinancialInbound, observeFinancialOutbound } from '../lib/financialAiRuntime.js'
 
 const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-production-6f0a.up.railway.app'
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -112,9 +113,13 @@ function mapStatus(code) {
   return map[code] ?? null
 }
 
-// Baixa mídia via Evolution API e salva no Supabase Storage (fire-and-forget)
-async function baixarEArmazenarMidia(evolutionId, mediaData) {
+// The authenticated event's instance must select its own transport/token.
+// Default is only for old Evolution envelopes with no instance field at all.
+async function baixarEArmazenarMidia(evolutionId, mediaData, instanceName = INSTANCE) {
   try {
+    if (typeof instanceName !== 'string' || !instanceName.trim() || instanceName.length > 100 || /[\u0000-\u001f\u007f-\u009f/\\]/.test(instanceName)) {
+      throw new Error('Identidade da conexão de mídia não confirmada')
+    }
     if (!mediaData?.mediaKey || !mediaData?.messageType) {
       console.log('[webhook] mídia sem mediaKey — download ignorado:', evolutionId)
       return
@@ -158,7 +163,7 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
     }
 
     const { data: result } = await evolutionApi.post(
-      `/chat/getBase64FromMediaMessage/${INSTANCE}`,
+      `/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
       { message: messageObj }
     )
 
@@ -199,7 +204,17 @@ async function baixarEArmazenarMidia(evolutionId, mediaData) {
 // Lógica pura do webhook do WhatsApp, sem depender de req/res — permite ser
 // chamada tanto pela rota direta (/api/whatsapp/webhook) quanto internamente
 // pelo webhook do SDR (/api/sdr/webhook), que recebe o mesmo payload da Evolution.
-export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
+export async function processWhatsappEvent(payload, {campaignLeadId=null, financialExpected=false, requirePersistence=false}={}) {
+  // FZAP's financial route must never inherit the legacy false-on-error fallback
+  // into sales. Check before any receipt, freight, lead or inbox side effect;
+  // keep the confirmed classification throughout this invocation. This throw is
+  // intentionally outside the legacy catch so the route returns a retryable 503.
+  if (financialExpected) {
+    let confirmed = false
+    try { confirmed = await ehInstanciaFinanceira(payload?.instance ?? payload?.instanceName ?? null) }
+    catch { /* unavailable is not permission to enter the commercial flow */ }
+    if (confirmed !== true) throw Object.assign(new Error('Classificação financeira não confirmada.'), { code: 'FZAP_FINANCIAL_CLASSIFICATION' })
+  }
   try {
     // Volume de "messages.update" pode chegar a dezenas por segundo (um ACK de
     // entrega/leitura por destinatário, por mensagem) — logar cada evento aqui
@@ -295,7 +310,7 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
       freteInbound = err.freteTransportadora ? { semCotacao: true } : false
     }
     if (freteInbound && !freteInbound.semCotacao) return
-    const ehFinanceiro = await ehInstanciaFinanceira(instanceName)
+    const ehFinanceiro = financialExpected || await ehInstanciaFinanceira(instanceName)
 
     const semPrefixo = telefone.replace(/^55/, '')
     let lead = null
@@ -391,6 +406,7 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
           console.log('[webhook] lead já existia para este telefone (corrida concorrente evitada):', resultado.id)
         }
       } else {
+        if (requirePersistence) throw new Error('Falha ao vincular mensagem comercial ao lead')
         console.error('[webhook] erro ao criar/obter lead (após retries)')
       }
     }
@@ -504,34 +520,50 @@ export async function processWhatsappEvent(payload, {campaignLeadId=null}={}) {
     // ausente, regrava sem ela — nunca perde a mensagem. Assim que a
     // migration for aplicada, a chamada normal (com instance_name) volta a
     // funcionar sozinha, sem precisar de outro deploy.
-    const { error: erroUpsertMensagem } = await supabase.from('whatsapp_mensagens')
+    const { data: mensagensInseridas, error: erroUpsertMensagem } = await supabase.from('whatsapp_mensagens')
       .upsert({ ...payloadMensagem, instance_name: instanceName }, { onConflict: 'evolution_id', ignoreDuplicates: true })
+      .select('id')
+    let inserted = mensagensInseridas?.length > 0
 
     if (erroUpsertMensagem?.code === 'PGRST204') {
       console.warn('[webhook] coluna instance_name ainda não existe (aplicar migration 20260101000041) — gravando mensagem sem ela')
-      const { error: erroFallback } = await supabase.from('whatsapp_mensagens')
+      const { data: fallbackInseridas, error: erroFallback } = await supabase.from('whatsapp_mensagens')
         .upsert(payloadMensagem, { onConflict: 'evolution_id', ignoreDuplicates: true })
+        .select('id')
+      if (erroFallback && requirePersistence) throw new Error('Falha ao persistir mensagem comercial')
       if (erroFallback) console.error('[webhook] erro ao gravar mensagem (fallback sem instance_name):', erroFallback.message)
+      inserted = fallbackInseridas?.length > 0
     } else if (erroUpsertMensagem) {
+      if (requirePersistence) throw new Error('Falha ao persistir mensagem comercial')
       console.error('[webhook] erro ao gravar mensagem:', erroUpsertMensagem.message)
+    }
+
+    if (ehFinanceiro && !freteInbound && evolutionId && !erroUpsertMensagem) {
+      const operation = fromMe
+        ? observeFinancialOutbound({phone:telefone,instance:instanceName,providerId:evolutionId,text:texto})
+        : processFinancialInbound({id:evolutionId,timestamp:msg.messageTimestamp})
+      operation.catch(() => console.error('[financial-ai] inbound_processing_unavailable'))
     }
 
     // Fire-and-forget: baixa mídia e salva no Supabase Storage.
     // Inclui fromMe=true (mensagens da Ana enviadas do celular) — a função já verifica
     // internamente se há mediaKey; se não houver (mensagens enviadas pela API do CRM),
     // ela retorna sem fazer nada.
-    if (mediaTipo && evolutionId) {
-      baixarEArmazenarMidia(evolutionId, mediaData).catch(() => {})
+    if (mediaTipo && evolutionId && (!requirePersistence || inserted)) {
+      const mediaInstance = payload.instance === undefined && payload.instanceName === undefined ? undefined : instanceName
+      baixarEArmazenarMidia(evolutionId, mediaData, mediaInstance).catch(() => {})
     }
 
     // Resposta do cliente a um follow-up automático de reativação — verifica em
     // background, não atrasa o resto do processamento desse webhook.
-    if (lead && !fromMe) {
+    if (lead && !fromMe && (!requirePersistence || inserted)) {
       detectarRespostaReativacao(lead.id, texto).catch((err) =>
         console.error('[reativacao] erro ao processar resposta:', err.message)
       )
     }
+    if (requirePersistence) return { inserted }
   } catch (err) {
+    if (requirePersistence) throw err
     // 2026-09-13 — AJUSTE DE SEGURANÇA: a versão anterior deste log incluía
     // `JSON.stringify(payload).slice(0, 200)` — o payload bruto da Evolution
     // sempre traz telefone completo (key.remoteJid) e, na maioria dos

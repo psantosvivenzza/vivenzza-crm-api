@@ -40,7 +40,9 @@
     "test:fretes:db": "node --test scripts/tests/fretes-api-db.test.mjs",
     "test:fretes:webhook": "node --test scripts/tests/fretes-webhook.test.mjs",
     "test:fretes:sync": "node --test scripts/tests/fretes-sync.test.mjs",
-    "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs"
+    "test:pedidos:logistica": "node --test scripts/tests/pedidos-logistica.test.mjs",
+    "test:whatsapp-conexoes": "node --experimental-vm-modules --test scripts/tests/fzap-conexoes-router.test.mjs scripts/tests/fzap-conexoes-service.test.mjs scripts/tests/fzap-inbound-ownership.test.mjs scripts/tests/fzap-native-media.test.mjs scripts/tests/fzap-provider-ownership.test.mjs scripts/tests/fzap-provider-reativacao.test.mjs scripts/tests/fzap-provider-wiring.test.mjs scripts/tests/fzap-provider.test.mjs scripts/tests/fzap-webhook-wrappers.test.mjs scripts/tests/whatsapp-conexoes-restored.test.mjs src/lib/qualificacaoLead.test.js scripts/tests/financial-ai-handler-vm.test.mjs scripts/tests/financial-ai-runtime.test.mjs",
+    "test:api-imports": "node scripts/tests/api-module-graph-smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

@@ -1,5 +1,6 @@
 import { Router } from 'express'
-import axios from 'axios'
+import { BLACK_CAMPAIGN_ID, loadReactivationCampaign } from '../lib/blackReactivationCampaign.js'
+import { createWhatsappProviderClient, whatsappTransportFor } from '../lib/whatsappProviderClient.js'
 import cron from 'node-cron'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase-admin.server.js'
@@ -11,7 +12,7 @@ const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-pr
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'vivenzza'
 
-const evolutionApi = axios.create({
+const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
@@ -49,10 +50,8 @@ const TAXA_ENTREGA_MINIMA = 0.5
 // forçado manualmente pelo botão "Executar agora".
 function dentroDaJanelaReativacao() {
   const agora = new Date()
-  const diaSemana = agora.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long' })
-  const diaUtil = ['segunda', 'terça', 'quarta', 'quinta', 'sexta'].some((d) => diaSemana.includes(d))
   const hora = agora.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
-  return diaUtil && hora >= '09:00' && hora <= '17:30'
+  return hora >= '09:00' && hora <= '17:30'
 }
 
 async function reativacaoEstaAtiva() {
@@ -172,24 +171,43 @@ function resumirHistorico(mensagens) {
   return mensagens.map((m) => `${m.direcao === 'entrada' ? 'Cliente' : 'Vivenzza'}: ${m.mensagem}`).join('\n') || '(sem histórico)'
 }
 
-export async function enviarMensagemReativacao(lead) {
-  if (!dentroDaJanelaReativacao()) return null // não envia fora do horário/dia útil
+export async function enviarMensagemReativacao(lead, { campaign = null } = {}) {
+  if (!dentroDaJanelaReativacao()) return null // não envia fora do horário
 
   const tentativa = (lead.qtd_followups_automaticos ?? 0) + 1
   const diasParado = Math.floor((Date.now() - new Date(lead.ultima_mensagem_em).getTime()) / 86400000)
-  const contexto = resumirHistorico(await ultimasMensagens(lead.id, 3))
+  const contexto = campaign ? '' : resumirHistorico(await ultimasMensagens(lead.id, 3))
 
   let numeroLimpo = lead.telefone.replace(/\D/g, '')
   if (!numeroLimpo.startsWith('55')) numeroLimpo = `55${numeroLimpo}`
+  let fzapFenceWritten = false
+  let fzapFenceId = null
 
   try {
-    const mensagem = await gerarMensagemReativacao(lead, tentativa, diasParado, contexto)
+    const mensagem = campaign ? campaign.text : await gerarMensagemReativacao(lead, tentativa, diasParado, contexto)
     if (!mensagem) throw new Error('Claude retornou mensagem vazia')
 
-    const { data: envio } = await evolutionApi.post(`/message/sendText/${EVOLUTION_INSTANCE}`, {
-      number: numeroLimpo,
-      text: mensagem,
-    })
+    const transport = await whatsappTransportFor(EVOLUTION_INSTANCE)
+    if (campaign && transport !== 'fzap') return null
+    if (transport === 'fzap') {
+      // Write the uncertainty fence before contacting WhatsApp: a timeout or a
+      // failed post-send database write must not requeue this same cadence.
+      // Existing columns/status only; no lead/business status is changed.
+      const { data: uncertain, error: uncertaintyError } = await supabase.from('reativacao_fila')
+        .select('id').eq('lead_id', lead.id).eq('tentativa', tentativa)
+        .eq('status', 'erro').eq('mensagem_enviada', 'FZAP_UNCERTAIN')
+        .limit(1).abortSignal(AbortSignal.timeout(10_000))
+      if (uncertaintyError || !Array.isArray(uncertain) || uncertain.length) return null
+      const { data: fence, error: fenceError } = await supabase.from('reativacao_fila').insert({
+        lead_id: lead.id, telefone: numeroLimpo, tentativa, status: 'erro', mensagem_enviada: 'FZAP_UNCERTAIN',
+      }).select('id').single().abortSignal(AbortSignal.timeout(10_000))
+      if (fenceError || typeof fence?.id !== 'string' || !fence.id) return null
+      fzapFenceWritten = true
+      fzapFenceId = fence.id
+    }
+    const { data: envio } = await evolutionApi.post(`/message/${campaign ? 'sendMedia' : 'sendText'}/${EVOLUTION_INSTANCE}`, campaign ? {
+      number: numeroLimpo,mediatype:'image',mimetype:'image/png',fileName:'black-vivenzza.png',caption:mensagem,media:campaign.media,
+    } : { number: numeroLimpo,text: mensagem })
 
     const novaQtd = tentativa
     const novoStatusReativacao = 'ativo'
@@ -200,14 +218,22 @@ export async function enviarMensagemReativacao(lead) {
       status_reativacao: novoStatusReativacao,
     }).eq('id', lead.id)
 
-    await supabase.from('reativacao_fila').insert({
+    const registroEnviado = {
       lead_id: lead.id,
       telefone: numeroLimpo,
       tentativa,
       status: 'enviado',
       mensagem_enviada: mensagem,
       enviado_em: new Date().toISOString(),
-    })
+    }
+    if (fzapFenceId) {
+      const { data: sentRecords, error: sentRecordError } = await supabase.from('reativacao_fila')
+        .update(registroEnviado).eq('id', fzapFenceId).eq('lead_id', lead.id)
+        .eq('status', 'erro').eq('mensagem_enviada', 'FZAP_UNCERTAIN')
+        .select('id')
+        .abortSignal(AbortSignal.timeout(10_000))
+      if (sentRecordError || !Array.isArray(sentRecords) || sentRecords.length !== 1 || sentRecords[0]?.id !== fzapFenceId) throw Object.assign(new Error('Envio confirmado; registro de entrega requer reconciliação.'), { code: 'FZAP_UNCERTAIN' })
+    } else await supabase.from('reativacao_fila').insert(registroEnviado)
 
     // instance_name = EVOLUTION_INSTANCE (mesma constante server-side usada no
     // evolutionApi.post acima, nunca o body do cliente) — é literalmente a
@@ -249,13 +275,31 @@ export async function enviarMensagemReativacao(lead) {
     console.log(`[reativacao] mensagem enviada para ${lead.nome} (tentativa ${tentativa}/${MAX_TENTATIVAS})`)
     return { lead, tentativa, mensagem, evolutionId: envio?.key?.id ?? null }
   } catch (err) {
-    await supabase.from('reativacao_fila').insert({
+    if (!fzapFenceWritten && ['FZAP_CONFIG', 'FZAP_OWNERSHIP'].includes(err?.code)) {
+      console.error('[reativacao] conexão indisponível antes do envio:', err.code)
+      return null
+    }
+    // These adapter codes prove that the send did not happen (rejection or
+    // pre-send validation/status failure). Never clear an uncertain outcome.
+    if (fzapFenceWritten && ['FZAP_REJECTED', 'FZAP_UNAVAILABLE', 'FZAP_CONFIG', 'FZAP_OWNERSHIP', 'FZAP_IDENTITY', 'FZAP_UNSUPPORTED'].includes(err?.code)) {
+      try {
+        const { error: clearError } = await supabase.from('reativacao_fila')
+          .update({ mensagem_enviada: 'FZAP_REJECTED' }).eq('id', fzapFenceId).eq('lead_id', lead.id).eq('tentativa', tentativa)
+          .eq('status', 'erro').eq('mensagem_enviada', 'FZAP_UNCERTAIN')
+          .abortSignal(AbortSignal.timeout(10_000))
+        if (clearError) console.error('[reativacao] bloqueio de envio preservado: reconciliação indisponível')
+      } catch { console.error('[reativacao] bloqueio de envio preservado: reconciliação indisponível') }
+    }
+    if (!fzapFenceWritten) await supabase.from('reativacao_fila').insert({
       lead_id: lead.id,
       telefone: numeroLimpo,
       tentativa,
       status: 'erro',
     })
-    console.error(`[reativacao] erro ao enviar para ${lead.nome}:`, err.response?.data ? JSON.stringify(err.response.data) : err.message)
+    const providerCode = ['FZAP_REJECTED', 'FZAP_UNAVAILABLE', 'FZAP_CONFIG', 'FZAP_OWNERSHIP', 'FZAP_IDENTITY', 'FZAP_UNSUPPORTED', 'FZAP_UNCERTAIN'].includes(err?.code)
+      ? err.code : 'UNCLASSIFIED'
+    const httpStatus = Number.isInteger(err?.response?.status) ? err.response.status : null
+    console.error('[reativacao] falha de envio', { providerCode, httpStatus })
     return null
   }
 }
@@ -282,7 +326,7 @@ export function finalizarExecucao() {
   execucaoEmAndamento = false
 }
 
-export async function verificarElegiveis() {
+export async function verificarElegiveis({ campaign = null } = {}) {
   if (!(await reativacaoEstaAtiva())) {
     console.log('[reativacao] automação desativada em /automacoes — pulando job de hoje')
     return { elegiveis: 0, enviados: 0 }
@@ -374,7 +418,7 @@ export async function verificarElegiveis() {
       }
     }
 
-    const resultado = await enviarMensagemReativacao(lead)
+    const resultado = await enviarMensagemReativacao(lead, { campaign })
     if (resultado) {
       enviados++
       enviosDesteLote.push({ evolutionId: resultado.evolutionId, enviadoEm: Date.now() })
@@ -486,17 +530,32 @@ Retorne JSON com:
 
 Retorne APENAS o JSON, sem markdown, sem explicação.`
 
-    const resposta = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 400,
-      messages: [{ role: 'user', content: prompt }],
-    })
-
-    let resumo
+    // O resumo é opcional: indisponibilidade da IA não pode impedir o
+    // encaminhamento ao vendedor nem a contabilização da resposta.
+    let resumoGeradoPorIa = false
+    let resumo = {
+      resumo: 'Cliente respondeu à reativação. Resumo de IA indisponível; conferir a conversa no CRM.',
+      ultima_intencao: '', melhor_proxima_acao: 'Conferir a conversa e atender o cliente.', prioridade: null,
+    }
     try {
-      resumo = JSON.parse(extrairTextoClaude(resposta).replace(/^```json|```$/g, '').trim())
-    } catch {
-      resumo = { resumo: extrairTextoClaude(resposta), ultima_intencao: '', melhor_proxima_acao: '', prioridade: 'medio' }
+      const resposta = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6', max_tokens: 400,
+        messages: [{ role: 'user', content: prompt }],
+      }, { timeout: 8000, maxRetries: 0 })
+      const texto = extrairTextoClaude(resposta)
+      const candidato = JSON.parse(texto.replace(/^```json|```$/g, '').trim())
+      if (candidato && typeof candidato.resumo === 'string' && candidato.resumo.trim()) {
+        resumo = {
+          resumo: candidato.resumo.trim().slice(0, 1000),
+          ultima_intencao: typeof candidato.ultima_intencao === 'string' ? candidato.ultima_intencao.slice(0, 400) : '',
+          melhor_proxima_acao: typeof candidato.melhor_proxima_acao === 'string' ? candidato.melhor_proxima_acao.slice(0, 400) : '',
+          prioridade: ['baixo','medio','alto'].includes(candidato.prioridade) ? candidato.prioridade : null,
+        }
+        resumoGeradoPorIa = true
+      }
+    } catch (err) {
+      const status = Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 'indisponivel'
+      console.error('[reativacao] resumo_ia_indisponivel_encaminhamento_preservado status=' + status)
     }
 
     const diasParado = lead.ultima_mensagem_em
@@ -517,14 +576,14 @@ Retorne APENAS o JSON, sem markdown, sem explicação.`
       status: 'pendente',
       responsavel_id: lead.responsavel_id,
       origem: 'reativacao',
-      resumo_ia: resumo.resumo || null,
-      intencao_ia: resumo.ultima_intencao || null,
-      proxima_acao_ia: resumo.melhor_proxima_acao || null,
-      prioridade_ia: resumo.prioridade || null,
+      resumo_ia: resumoGeradoPorIa ? resumo.resumo || null : null,
+      intencao_ia: resumoGeradoPorIa ? resumo.ultima_intencao || null : null,
+      proxima_acao_ia: resumoGeradoPorIa ? resumo.melhor_proxima_acao || null : null,
+      prioridade_ia: resumoGeradoPorIa ? resumo.prioridade || null : null,
     })
 
-    await marcarVendedorAssumiu(lead.telefone)
-
+    // A task is a notification, not a human taking control of the chat.
+    // Lara continues qualifying until the seller actually assumes it.
     await incrementarMetrica('responderam')
     await incrementarMetrica('reativados')
     await incrementarMetrica('passados_vendedor')
@@ -582,25 +641,31 @@ router.post('/toggle', async (req, res) => {
 // e responde na hora; acompanhar o andamento pela tela de Automações (GET /status).
 // 409 quando já há uma execução em andamento — ver tentarIniciarExecucao acima.
 router.post('/executar-agora', async (req, res) => {
+  let campaign
+  try { campaign = await loadReactivationCampaign(req.body?.campaign) }
+  catch (error) { return res.status(error?.code === 'INVALID_REACTIVATION_CAMPAIGN' ? 400 : 503).json({erro:'Campanha de reativação indisponível.'}) }
+  if (campaign && !dentroDaJanelaReativacao()) return res.status(409).json({erro:'Fora da janela de reativação.'})
   if (!tentarIniciarExecucao()) {
     return res.status(409).json({ erro: 'Já existe uma execução de reativação em andamento.' })
   }
-  verificarElegiveis()
+  verificarElegiveis({ campaign })
     .catch((err) => console.error('[reativacao] erro na execução manual:', err.message))
     .finally(finalizarExecucao)
   res.json({ sucesso: true, iniciado: true })
 })
 
-// Todo dia útil às 09:00 horário de Brasília — não agenda em teste (achado
+// Todos os dias, inclusive fins de semana, às 09:00 horário de Brasília — não agenda em teste (achado
 // real: node-cron mantém um timer vivo que nunca deixa o processo de teste
 // sair sozinho, homologação 2026-08-12).
 if (process.env.NODE_ENV !== 'test') {
-  cron.schedule('0 9 * * 1-5', () => {
+  cron.schedule('0 9 * * *', () => {
     if (!tentarIniciarExecucao()) {
       console.log('[reativacao] execução agendada pulada — já existe uma em andamento (provavelmente disparo manual)')
       return
     }
-    verificarElegiveis()
+    Promise.resolve()
+      .then(() => loadReactivationCampaign(BLACK_CAMPAIGN_ID))
+      .then((campaign) => verificarElegiveis({ campaign }))
       .catch((err) => console.error('[reativacao] erro no job agendado:', err.message))
       .finally(finalizarExecucao)
   }, { timezone: 'America/Sao_Paulo' })

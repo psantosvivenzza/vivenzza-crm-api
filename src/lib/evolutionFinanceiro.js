@@ -2,7 +2,7 @@
 // Não reaproveita o client de whatsapp.js de propósito: aquele tem efeitos
 // colaterais (marcarVendedorAssumiu, flip de atendimento_humano) que fazem
 // sentido pra conversa de venda mas não pra mensagem de cobrança.
-import axios from 'axios'
+import { createWhatsappProviderClient } from './whatsappProviderClient.js'
 import {supabase} from './supabase-admin.server.js'
 import { paraJidWhatsapp } from './telefone.js'
 
@@ -10,7 +10,7 @@ const EVOLUTION_URL = process.env.EVOLUTION_API_URL || 'https://evolution-api-pr
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY
 const INSTANCE = process.env.FINANCEIRO_WHATSAPP_INSTANCE || 'vivenzza-financeiro'
 
-const evolutionFinanceiroApi = axios.create({
+const evolutionFinanceiroApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
   headers: { apikey: EVOLUTION_KEY },
   timeout: 20000,
