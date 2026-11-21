@@ -56,7 +56,8 @@ export async function runDisparoDirecao({ agora = new Date() } = {}) {
   const sig = () => AbortSignal.timeout(TIMEOUT)
   const { data: cfg } = await supabase.from('disparo_direcao_config').select('*').eq('id', 1).abortSignal(sig()).maybeSingle()
   if (!cfg?.ativo) return { status: 'desligado' }
-  if (!dentroDaJanela(agora)) return { status: 'fora_da_janela' }
+  const janelaLiberada = cfg.ignorar_janela_ate && new Date(cfg.ignorar_janela_ate) > agora
+  if (!dentroDaJanela(agora) && !janelaLiberada) return { status: 'fora_da_janela' }
   if (cfg.proximo_envio_apos && new Date(cfg.proximo_envio_apos) > agora) return { status: 'aguardando_intervalo' }
 
   const { count: enviadosHoje } = await supabase.from('disparo_direcao_fila')
