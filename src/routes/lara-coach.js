@@ -128,6 +128,99 @@ Responda APENAS com JSON válido:
   }
 })
 
+// POST /api/lara/avaliar-conversa { lead_id } - avalia como a vendedora conduziu ESTE atendimento (admin)
+router.post('/avaliar-conversa', adminOnly, limiteSugestao, async (req, res) => {
+  const leadId = req.body?.lead_id
+  if (!leadId || typeof leadId !== 'string') return res.status(400).json({ erro: 'lead_id é obrigatório' })
+  try {
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .select('id,nome,empresa,tipo,etapa,cidade,estado,observacoes,responsavel_id,qual_tipo,qual_cnpj,qual_regiao,qual_volume_mensal,qual_nota,qual_faixa')
+      .eq('id', leadId).maybeSingle()
+    if (error || !lead) return res.status(404).json({ erro: 'Lead não encontrado' })
+
+    let vendedora = null
+    if (lead.responsavel_id) {
+      const { data: p } = await supabase.from('usuarios').select('nome').eq('id', lead.responsavel_id).maybeSingle()
+      vendedora = p?.nome ?? null
+    }
+
+    const { data: msgsDesc } = await supabase
+      .from('whatsapp_mensagens').select('direcao,mensagem,created_at')
+      .eq('lead_id', leadId).order('created_at', { ascending: false }).limit(60)
+    const msgs = (msgsDesc ?? []).reverse().filter((m) => m.mensagem)
+    const doCliente = msgs.filter((m) => m.direcao === 'entrada').length
+    const nossas = msgs.filter((m) => m.direcao === 'saida').length
+    if (doCliente < 1 || nossas < 1) {
+      return res.status(422).json({ erro: 'Ainda não há conversa suficiente (precisa de mensagens do cliente e da equipe) para avaliar.' })
+    }
+
+    // Métricas objetivas: tempo até a equipe responder cada mensagem do cliente.
+    const esperas = []
+    let aberta = null
+    for (const m of msgs) {
+      const t = new Date(m.created_at).getTime()
+      if (m.direcao === 'entrada') { if (aberta === null) aberta = t }
+      else if (aberta !== null) { esperas.push((t - aberta) / 60000); aberta = null }
+    }
+    const pendenteMin = aberta !== null ? Math.round((Date.now() - aberta) / 60000) : null
+    const mediana = esperas.length ? [...esperas].sort((a, b) => a - b)[Math.floor(esperas.length / 2)] : null
+    const maior = esperas.length ? Math.max(...esperas) : null
+    const fmt = (min) => (min == null ? 'n/d' : min < 60 ? `${Math.round(min)} min` : `${(min / 60).toFixed(1)} h`)
+
+    const linhas = msgs.map((m) => {
+      const hora = new Date(m.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      return `[${hora}] ${m.direcao === 'saida' ? 'EQUIPE' : 'CLIENTE'}: ${mascarar(m.mensagem)}`
+    }).join('\n')
+
+    const contexto = `LEAD: etapa no funil ${lead.etapa} · tipo ${lead.qual_tipo ?? lead.tipo ?? 'indefinido'} · nota de qualificação ${lead.qual_nota ?? 'sem nota'} (${lead.qual_faixa ?? 'sem faixa'}) · volume mensal ${lead.qual_volume_mensal ?? 'não informado'}
+Vendedora responsável: ${vendedora ?? 'não definida'}
+MÉTRICAS DESTA CONVERSA: ${msgs.length} mensagens (${doCliente} do cliente, ${nossas} da equipe); tempo mediano para a equipe responder ${fmt(mediana)}; maior espera do cliente ${fmt(maior)}; ${pendenteMin !== null ? `cliente aguardando resposta há ${fmt(pendenteMin)}` : 'sem mensagem do cliente pendente'}
+
+CONVERSA (mais antiga → mais recente, horário de Brasília):
+${linhas}`
+
+    const resp = await anthropic.messages.create({
+      model: MODELO,
+      max_tokens: 1400,
+      system: `Você é a Lara, diretora comercial da Vivenzza Professional avaliando UM atendimento por WhatsApp para o gestor. Seja justa, específica e construtiva: sem humilhar e sem elogio vazio.
+${BASE_TECNICAS}
+${REGRAS_VIVENZZA}
+
+REGRAS DA AVALIAÇÃO:
+- Mensagens da EQUIPE longas, cheias de emoji, com cupom, PDF de promoção ou texto padrão são disparo/automação/Lara: não conte como esforço personalizado da vendedora, apenas como contexto.
+- Mensagens de saída durante a noite ou fim de semana podem ser da Lara (IA), não da vendedora.
+- Avalie: rapidez, diagnóstico das necessidades, condução para o próximo passo, tratamento de objeções, clareza da condição comercial (pedido mínimo, entrada de 40%), tom e profissionalismo, follow-up.
+- Cite trechos curtos reais. Se a conversa for curta demais para julgar algum ponto, diga isso em vez de inventar.
+- Nunca exponha telefones ou nomes de clientes.
+
+Responda APENAS com JSON válido:
+{
+  "nota": 0-100,
+  "classificacao": "excelente | boa | regular | fraca",
+  "resumo": "2-3 frases diretas sobre como a vendedora se portou",
+  "pontos_fortes": ["..."],
+  "pontos_de_melhoria": ["..."],
+  "momento_critico": {"trecho": "mensagem curta real ou null", "o_que_deveria_ter_feito": "..."},
+  "proximo_passo": "o que fazer agora com este lead"
+}`,
+      messages: [{ role: 'user', content: contexto }],
+    }, { timeout: 45000 })
+
+    const a = extrairJson(resp.content?.[0]?.text ?? '')
+    if (!a || typeof a.nota !== 'number') return res.status(502).json({ erro: 'A Lara não conseguiu concluir a avaliação. Tente de novo.' })
+    console.log(`[lara-coach] avaliar-conversa user=${req.user.id} lead=${leadId} msgs=${msgs.length}`)
+    return res.json({
+      avaliacao: a,
+      vendedora,
+      metricas: { mensagens: msgs.length, mediana_resposta_min: mediana == null ? null : Math.round(mediana), maior_espera_min: maior == null ? null : Math.round(maior), aguardando_min: pendenteMin },
+    })
+  } catch (err) {
+    console.error('[lara-coach] erro avaliar-conversa:', err?.message)
+    return res.status(500).json({ erro: 'Não foi possível avaliar agora.' })
+  }
+})
+
 // GET /api/lara/avaliacao-vendedores?dias=30 — métricas + última análise salva (admin)
 router.get('/avaliacao-vendedores', adminOnly, async (req, res) => {
   const dias = Math.min(90, Math.max(7, Number(req.query.dias) || 30))
