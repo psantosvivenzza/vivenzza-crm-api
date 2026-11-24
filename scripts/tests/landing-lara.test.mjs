@@ -108,3 +108,9 @@ test('legacy form without opt-in still saves CRM but cannot send',async()=>{
  await handler({headers:{},body:{nome:'Pessoa Teste',telefone:phone}},{status(){return this},json(){}})
  assert.equal(db.tables.leads.length,1);assert.equal(db.tables.whatsapp_mensagens.length,0)
 })
+test('international contact is preserved for seller, never sent by BR opening worker',async()=>{
+ const db=database();const handler=createPublicLandingLeadHandler({db,nextSeller:async()=>({id:'seller'}),capi:async()=>{}})
+ const res={status(n){this.code=n;return this},json(){}}
+ await handler({headers:{origin:'https://distribuidores.vivenzzaprofessional.com.br'},body:{nome:'Teste',telefone:'+59894173195',whatsapp_consent:true,event_source_url:'https://distribuidores.vivenzzaprofessional.com.br/'}},res)
+ assert.equal(res.code,201);assert.equal(db.tables.leads[0].telefone,'59894173195');assert.equal(db.tables.whatsapp_mensagens.length,0)
+})

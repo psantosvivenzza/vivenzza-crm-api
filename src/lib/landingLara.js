@@ -10,13 +10,13 @@ export function landingIdentity(phone) {
   const digits = normalizarTelefone(phone)
   if (!digits) throw Error('LANDING_INVALID_PHONE')
   const jid = paraJidWhatsapp(digits)
-  if (!/^55\d{10,11}$/.test(jid)) throw Error('LANDING_INVALID_PHONE')
-  const local = jid.slice(2)
-  if (paraJidWhatsapp(local) !== jid) throw Error('LANDING_INVALID_PHONE')
-  const canonical = [...new Set(candidatosTelefone(jid))].sort((a,b)=>a.length-b.length || a.localeCompare(b))[0]
+  if (!/^\d{10,15}$/.test(jid)) throw Error('LANDING_INVALID_PHONE')
+  const eligible=/^55\d{10,11}$/.test(jid)&&paraJidWhatsapp(jid.slice(2))===jid
+  const candidates=eligible?candidatosTelefone(jid):[digits,jid]
+  const canonical = [...new Set(candidates)].sort((a,b)=>a.length-b.length || a.localeCompare(b))[0]
   const hash = digest(LANDING_FLOW + ':' + canonical)
   const id = hash.slice(0,8)+'-'+hash.slice(8,12)+'-4'+hash.slice(13,16)+'-a'+hash.slice(17,20)+'-'+hash.slice(20,32)
-  return { phone: digits, jid, candidates: candidatosTelefone(jid), leadId:id, messageId:'VZLP'+hash.slice(0,32).toUpperCase() }
+  return { phone: digits, jid, candidates, eligible, leadId:id, messageId:'VZLP'+hash.slice(0,32).toUpperCase() }
 }
 export function landingGreeting(name,interest) {
   const first = String(name||'').trim().split(/\s+/)[0].slice(0,50)
@@ -29,7 +29,7 @@ export function landingConsent(body,origin) {
 }
 export async function enqueueLandingLara({db,lead,identity,interest,evidence={}}) {
   // Only leads created by this form implementation can start this new flow.
-  if(lead.id!==identity.leadId)return false
+  if(lead.id!==identity.leadId||!identity.eligible)return false
   if (await humanOwnsSdr({db,table:'sdr_conversas',phone:identity.jid})) return false
   const existing = await value(db.from('whatsapp_mensagens').select('id').eq('evolution_id',identity.messageId).maybeSingle())
   if (existing.data) return false
@@ -90,7 +90,7 @@ export function createLandingLaraWorker({db,api,now=()=>new Date()}) {
         .in('status',['enviado','entregue','lido','processando','incerto']).gte('created_at',new Date(stamp-60000).toISOString()))
       if(parallel.count>=15){await finish('pendente','queued');return {status:'paced'}}
       const identity=landingIdentity(row.telefone)
-      if(identity.messageId!==row.evolution_id||row.media_data?.consent!==true){await finish('bloqueado','invalid_intent');return {status:'blocked'}}
+      if(!identity.eligible||identity.messageId!==row.evolution_id||row.media_data?.consent!==true){await finish('bloqueado','invalid_intent');return {status:'blocked'}}
       const preflight=async()=>{
         if(await humanOwnsSdr({db,table:'sdr_conversas',phone:identity.jid}))return false
         const lead=await value(db.from('leads').select('id,telefone,responsavel_id').eq('id',row.lead_id).single())

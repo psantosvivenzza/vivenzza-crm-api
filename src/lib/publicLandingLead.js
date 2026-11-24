@@ -8,7 +8,7 @@ export function createPublicLandingLeadHandler({db,nextSeller,capi}){
   if(typeof b.nome!=='string'||!b.nome.trim()||b.nome.length>150)return res.status(400).json({erro:'Informe um nome válido.'})
   if(typeof b.telefone!=='string'||b.telefone.length>30)return res.status(400).json({erro:'Informe um WhatsApp com DDD válido.'})
   let identity
-  try{identity=landingIdentity(b.telefone)}catch{return res.status(400).json({erro:'Informe um WhatsApp brasileiro com DDD válido.'})}
+  try{identity=landingIdentity(b.telefone)}catch{return res.status(400).json({erro:'Informe um WhatsApp com DDD ou código de país válido.'})}
   const consent=landingConsent(b,req.headers.origin)
   if(b.website)return res.status(400).json({erro:'Não foi possível validar o formulário.'})
   const interest=['Distribuidor','Salão','Salão de Beleza','Revendedor'].includes(b.interesse)?b.interesse:null
