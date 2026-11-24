@@ -59,6 +59,7 @@ test('real webhook serializes overlapping messages and second model request sees
  const f=await fixture({modelElapsed:0}),a=f.send('in1','Sim, já tenho clientes');await f.entered.promise
  const b=f.send('in2','Atendo na minha cidade');await new Promise(r=>setImmediate(r));assert.equal(f.calls.length,1)
  f.pause.resolve();await Promise.all([a,b]);assert.equal(f.sends.length,2);assert.equal(f.calls.length,2)
+ assert.equal(f.calls[0].output_config.format.type,'json_schema')
  assert.ok(f.calls[1].messages.some(m=>m.role==='assistant'&&m.content.includes('Em qual cidade')))
  assert.match(f.calls[0].system,/CONTINUIDADE OBRIGATÓRIA/);assert.match(f.calls[1].system,/CONTINUIDADE OBRIGATÓRIA/)
  assert.equal(f.history().filter(x=>x.role==='user').length,2)
