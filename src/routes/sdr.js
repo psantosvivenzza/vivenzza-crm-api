@@ -1,3 +1,4 @@
+import { createSdrTurnQueue, sdrTurnKey, prepareSdrTurn, sdrContinuityInstructions } from '../lib/sdrContinuity.js'
 import { Router } from 'express'
 import { humanOwnsSdr, saveLaraTurn, transferSdrToHuman, HUMAN_TRANSFER_REPLY, observeSdrHumanOutbound } from '../lib/sdrOwnership.js'
 import axios from 'axios'
@@ -91,22 +92,9 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-// Rate limit por telefone: evita chamar Claude/Evolution de novo pro mesmo número em
-// menos de 3s — protege contra rajada (cliente mandando várias mensagens em sequência
-// rápida, ou um reenvio duplicado da própria Evolution API). A mensagem ainda entra no
-// histórico, só não dispara uma nova resposta nesse intervalo. Mapa em memória mesmo —
-// é um único processo Node, não precisa de Redis pra isso.
-const ultimoProcessamentoPorTelefone = new Map()
-const RATE_LIMIT_MS = 3000
-
-// Limpa entradas com mais de 1h pra esse Map não crescer pra sempre (um processo
-// Node de longa duração, vendo milhares de números novos por dia).
-setInterval(() => {
-  const limite = Date.now() - 60 * 60 * 1000
-  for (const [tel, ts] of ultimoProcessamentoPorTelefone) {
-    if (ts < limite) ultimoProcessamentoPorTelefone.delete(tel)
-  }
-}, 15 * 60 * 1000)
+// Serialize each conversation and space starts instead of dropping the last
+// message of a burst. Human ownership is rechecked inside every queued turn.
+const runSdrTurn = createSdrTurnQueue({minIntervalMs:3000, now:()=>Date.now()})
 
 const evolutionApi = createWhatsappProviderClient({
   baseURL: EVOLUTION_URL,
@@ -1127,40 +1115,7 @@ async function processarLara(event, { insertedBeforeAck = false } = {}) {
     return null
   }
 
-  // Rate limit: já processamos uma mensagem desse telefone há menos de RATE_LIMIT_MS —
-  // registra no histórico e sai, sem chamar Claude/Evolution de novo agora. A próxima
-  // mensagem (já fora da janela) processa normalmente com o histórico atualizado.
-  const ultimoProcessamento = ultimoProcessamentoPorTelefone.get(telefoneConversa)
-  if (ultimoProcessamento && Date.now() - ultimoProcessamento < RATE_LIMIT_MS) {
-    historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-    let historicoParaSalvar = historico.slice(-20)
-    if (historicoParaSalvar[0]?.role === 'assistant') historicoParaSalvar = historicoParaSalvar.slice(1)
-    await supabase.from(conversationTable()).upsert(
-      { telefone: telefoneConversa, historico: historicoParaSalvar, ultimo_contato: new Date().toISOString() },
-      { onConflict: 'telefone' }
-    ).abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
-    return null
-  }
-  ultimoProcessamentoPorTelefone.set(telefoneConversa, Date.now())
-
-  // Lara qualifies in every schedule; only ownership of this conversation pauses it.
-  historico.push({ role: 'user', content: mensagem, tipo, timestamp: new Date().toISOString() })
-  let historicoRecente = historico.slice(-20)
-  if (historicoRecente[0]?.role === 'assistant') historicoRecente = historicoRecente.slice(1)
-
-  // A API da Anthropic exige alternância estrita user/assistant. Se o rate-limit ou o
-  // bloqueio de horário salvou uma mensagem user sem resposta, o histórico pode ter
-  // duas entradas user seguidas — isso rejeita a chamada e a Lara "reinicia".
-  // Mesclar entradas consecutivas do mesmo role resolve sem perder conteúdo.
-  const messagesParaClaude = historicoRecente.reduce((acc, h) => {
-    const role = h.role === 'user' ? 'user' : 'assistant'
-    if (acc.length > 0 && acc[acc.length - 1].role === role) {
-      acc[acc.length - 1].content += '\n' + h.content
-    } else {
-      acc.push({ role, content: h.content })
-    }
-    return acc
-  }, [])
+  const {recent: historicoRecente, messages: messagesParaClaude, continuing} = prepareSdrTurn(historico, mensagem, tipo)
 
   // Sanitizado (achado não bloqueante da revisão da PR #111): nunca loga
   // telefone completo, texto do cliente ou resposta da Claude — só metadados
@@ -1181,9 +1136,9 @@ async function processarLara(event, { insertedBeforeAck = false } = {}) {
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
-      system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia) + (siteCampaign ? siteCampaignInstructions() : ''),
+      system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia) + sdrContinuityInstructions(continuing) + (siteCampaign ? siteCampaignInstructions() : ''),
       messages: messagesParaClaude,
-    })
+    }, {timeout:45000, maxRetries:1})
     claudeRawText = claudeResponse.content[0]?.text || ''
   } catch (anthropicErr) {
     console.error('[sdr] model_unavailable_transfer_required',{correlationId,status:anthropicErr.status??'unavailable'})
@@ -1195,7 +1150,7 @@ async function processarLara(event, { insertedBeforeAck = false } = {}) {
 
   // Nos dois primeiros turnos, sobrepõe o tipo_lead do Claude quando uma keyword
   // de B2B ou B2C é detectada na mensagem — cobre leads criados sem tipo definido.
-  const turnoAtual = historico.filter(h => h.role === 'user').length
+  const turnoAtual = historico.filter(h => h.role === 'user').length + 1
   if (turnoAtual <= 2) {
     const kwDetectada = detectarTipoKeyword(mensagem)
     if (kwDetectada) {
@@ -1413,6 +1368,8 @@ export async function handleSdrWebhook(req, res) {
     return
   }
 
+  const turnKey = sdrTurnKey(replyInstance(), conversationTable(), outgoing)
+  const processTurn = async () => {
   let resultadoLara = null
   try {
     resultadoLara = await processarLara(req.body, { insertedBeforeAck })
@@ -1451,10 +1408,14 @@ export async function handleSdrWebhook(req, res) {
         .update({ tipo: resultadoLara.parsed.tipo_lead })
         .in('telefone', candidatos)
         .is('tipo', null)
+        .abortSignal(AbortSignal.timeout(SDR_QUERY_TIMEOUT_MS))
     } catch (tagErr) {
       console.error('[sdr] erro ao taguear lead:', tagErr.message)
     }
   }
+  }
+  return turnKey ? runSdrTurn(turnKey, processTurn) : processTurn()
+
 }
 
 // Called only after the FZAP route resolves an authenticated allowlisted instance.
@@ -1520,3 +1481,4 @@ router.post('/site-reativacao/webhook', webhookAuth, evolutionOwnership, (req, r
 })
 
 export default router
+
