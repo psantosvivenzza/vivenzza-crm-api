@@ -6,6 +6,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { siteCampaignContext, siteCampaignInstructions, isStopRequest, enforceSiteCampaignReply } from '../lib/siteCampaignPolicy.js'
+import { stopLandingLara } from '../lib/landingLara.js'
 import { applySiteCampaignReceipts } from '../lib/siteCampaignReceipts.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { processWhatsappEvent } from './webhook-handler.js'
@@ -1059,6 +1060,9 @@ async function processarLara(event, { insertedBeforeAck = false } = {}) {
   // nesse caso e a Lara reiniciava a conversa do zero.
   const candidatosConversa = candidatosTelefone(telefone)
   const siteCampaign = sdrContext.getStore()?.siteCampaign === true
+  if(!siteCampaign && isStopRequest(mensagem)){
+    if(await stopLandingLara({db:supabase,phone:telefone}))return null
+  }
   if (siteCampaign) {
     // Only imported/known contacts can use the campaign AI; database errors stop it.
     const { data: contacts, error } = await supabase.rpc('site_campaign_leads_for_contact',

@@ -37,6 +37,7 @@ import relatoriosRouter from './routes/relatorios.js'
 import adminRouter from './routes/admin.js'
 import sdrRouter, {handleFzapSdrWebhook,handleSiteCampaignWebhook} from './routes/sdr.js'
 import { runSiteCampaignQueue } from './jobs/site-campaign.js'
+import { runLandingLara } from './jobs/landing-lara.js'
 import campanhasRouter from './routes/campanhas.js'
 import googleAdsRouter from './routes/google-ads.js'
 import ligacoesRouter from './routes/ligacoes.js'
@@ -510,4 +511,11 @@ cron.schedule('* * * * *', async () => {
 // Site campaign: one durable reservation per tick; disabled until verified.
 cron.schedule('*/2 * * * *', async () => {
  try { await runSiteCampaignQueue() } catch { console.error('[site-campaign] worker_failed') }
+}, { noOverlap:true, timezone:'America/Sao_Paulo' })
+// Only explicit new landing opt-ins; no campaign/backfill.
+cron.schedule('* * * * *', async () => {
+ try{
+  const result=await runLandingLara()
+  if(!['waiting','paced','busy'].includes(result.status))console.log('[landing-lara] worker_status='+result.status)
+ }catch{console.error('[landing-lara] worker_failed')}
 }, { noOverlap:true, timezone:'America/Sao_Paulo' })

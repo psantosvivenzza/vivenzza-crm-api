@@ -27,7 +27,7 @@ for (const uri of ['data:audio/ogg; codecs=opus,T2dnUw==', 'data:audio/ogg; code
     assert.equal(f.legacy.length, 1)
   })
 }
-function fixture({ owner = 'fzap', connected = true, loggedIn = true, flag = 'fzap', handler = () => ok({ id: 'ABC123' }), sessionError } = {}) {
+function fixture({ owner = 'fzap', connected = true, loggedIn = true, flag = 'fzap', handler = () => ok({ id: 'ABC123' }), sessionError, providerOptions = {} } = {}) {
   const calls = [], legacy = []
   const axiosImpl = { create(config) { legacy.push(config); return { get: (...args) => { legacy.push(args); return { data: 'legacy-get' } }, post: (...args) => { legacy.push(args); return { data: 'legacy-post' } } } } }
   const transport = async (request) => {
@@ -35,7 +35,7 @@ function fixture({ owner = 'fzap', connected = true, loggedIn = true, flag = 'fz
     if (request.path === '/session/status') { if (sessionError) throw sessionError; return ok({ jid: ownJid, connected, loggedIn, metadata: flag === undefined ? {} : { vivenzza_crm_expected_jid_sha256: ownHash, vivenzza_crm_transport: flag, vivenzza_crm_instance_name: request.token === 'a'.repeat(40) ? 'vivenzza' : 'vivenzza-financeiro' } }) }
     return handler(request)
   }
-  return { client: createWhatsappProviderClient({ baseURL: 'https://legacy.invalid', headers: { apikey: 'legacy-secret' } }, { env, transport, axiosImpl, ownershipStore: store(owner) }), calls, legacy, transport }
+  return { client: createWhatsappProviderClient({ baseURL: 'https://legacy.invalid', headers: { apikey: 'legacy-secret' } }, { env, transport, axiosImpl, ownershipStore: store(owner), ...providerOptions }), calls, legacy, transport }
 }
 test('unregistered instance preserves exact legacy config and arguments', async () => {
   const f = fixture(); const body = { text: 'teste', number: '5511000000000' }; const config = { timeout: 123 }
@@ -187,4 +187,17 @@ test('resultado ausente ou duplicado após consulta individual continua indispon
 
 test('financial messages keep synthetic echo while commercial API sends suppress it',async()=>{
  const f=fixture();await f.client.post('/message/sendText/vivenzza-financeiro',{number:'5511000000000',text:'fixture'});assert.equal(f.calls.find(c=>c.path==='/chat/send/text').body.noEcho,false)
+})
+
+
+test('landing first contact preserves deterministic ID only on opted-in commercial text client', async () => {
+ const id='VZLP'+'A'.repeat(32)
+ const f=fixture({providerOptions:{landingInstance:'vivenzza'},handler:request=>ok({id:request.body.id})})
+ const result=await f.client.post('/message/sendText/vivenzza',{number:'5511000000000',text:'fixture',clientMessageId:id})
+ assert.equal(result.data.key.id,id)
+ assert.equal(f.calls.at(-1).body.id,id)
+ assert.equal(f.calls.at(-1).body.noEcho,true)
+ await assert.rejects(f.client.post('/message/sendText/vivenzza-financeiro',{number:'5511000000000',text:'fixture',clientMessageId:id}),{code:'FZAP_UNSUPPORTED'})
+ const ordinary=fixture()
+ await assert.rejects(ordinary.client.post('/message/sendText/vivenzza',{number:'5511000000000',text:'fixture',clientMessageId:id}),{code:'FZAP_UNSUPPORTED'})
 })

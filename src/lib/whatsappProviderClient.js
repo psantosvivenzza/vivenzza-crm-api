@@ -165,7 +165,10 @@ export function createWhatsappProviderClient(evolutionAxiosConfig, options = {})
     // keep their inbound webhook and can therefore signal a human takeover.
     const payload = { phone: body.number, check: true, noEcho: connection.finalidade === 'comercial' }
     if (body.clientMessageId !== undefined) {
-      if (instanceName !== options.siteCampaignInstance || operation !== 'message/sendMedia' || !validId(body.clientMessageId)) return unsupported()
+      const siteIntent=instanceName===options.siteCampaignInstance && operation==='message/sendMedia'
+      const landingIntent=options.landingInstance==='vivenzza' && instanceName==='vivenzza' && connection.finalidade==='comercial'
+        && operation==='message/sendText' && /^VZLP[A-F0-9]{32}$/.test(body.clientMessageId)
+      if ((!siteIntent&&!landingIntent) || !validId(body.clientMessageId)) return unsupported()
       payload.id = body.clientMessageId
     }
     let kind
