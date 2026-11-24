@@ -1,4 +1,4 @@
-import { createSdrTurnQueue, sdrTurnKey, prepareSdrTurn, sdrContinuityInstructions } from '../lib/sdrContinuity.js'
+import { createSdrTurnQueue, sdrTurnKey, prepareSdrTurn, sdrContinuityInstructions, SDR_RESPONSE_FORMAT } from '../lib/sdrContinuity.js'
 import { Router } from 'express'
 import { humanOwnsSdr, saveLaraTurn, transferSdrToHuman, HUMAN_TRANSFER_REPLY, observeSdrHumanOutbound } from '../lib/sdrOwnership.js'
 import axios from 'axios'
@@ -1135,10 +1135,15 @@ async function processarLara(event, { insertedBeforeAck = false } = {}) {
   try {
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: siteCampaign ? 1024 : 2048,
       system: SYSTEM_PROMPT(estado, tipo_lead, tipo, temperatura, etapaCadencia) + sdrContinuityInstructions(continuing) + (siteCampaign ? siteCampaignInstructions() : ''),
       messages: messagesParaClaude,
+      ...(!siteCampaign ? {output_config:{format:SDR_RESPONSE_FORMAT}} : {}),
     }, {timeout:45000, maxRetries:1})
+    if (claudeResponse.stop_reason && claudeResponse.stop_reason !== 'end_turn') {
+      const reason=['max_tokens','refusal','stop_sequence','tool_use','pause_turn'].includes(claudeResponse.stop_reason)?claudeResponse.stop_reason:'other'
+      console.warn('[sdr] model_completion_incomplete', {correlationId,reason})
+    }
     claudeRawText = claudeResponse.content[0]?.text || ''
   } catch (anthropicErr) {
     console.error('[sdr] model_unavailable_transfer_required',{correlationId,status:anthropicErr.status??'unavailable'})
