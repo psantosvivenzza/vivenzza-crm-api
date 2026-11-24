@@ -1,3 +1,4 @@
+import {sdrTurnKey,createSdrTurnQueue} from '../../src/lib/sdrContinuity.js'
 import test from 'node:test'
 import { fzapWebhookSecret } from '../../src/lib/fzapWebhookSecret.js'
 import assert from 'node:assert/strict'
@@ -174,7 +175,7 @@ test('Real SDR handler runs Lara before inbox persistence; receipts bypass Lara'
   assert.ok(start >= 0 && end > start)
   const calls = []
   const context = { processarLara: async () => { calls.push('lara'); return null }, processWhatsappEvent: async () => calls.push('inbox'),
-    sdrContext: { getStore: () => null }, console: { error: () => assert.fail() } }
+    sdrTurnKey,runSdrTurn:createSdrTurnQueue(),replyInstance:()=> 'vivenzza',conversationTable:()=> 'sdr_conversas',sdrContext: { getStore: () => null }, console: { error: () => assert.fail() } }
   const handle = runInNewContext(source.slice(start, end).replace('export ', '') + '\nhandleSdrWebhook', context)
   await handle({ body: { event: 'messages.upsert' } }, { json: () => calls.push('ack') })
   assert.deepEqual(calls, ['ack', 'lara', 'inbox'])
@@ -236,3 +237,4 @@ test('real financial processor rejects false/error outside legacy catch before a
     assert.equal(sideEffects, 0)
   }
 })
+
