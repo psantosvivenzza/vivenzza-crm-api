@@ -1,3 +1,4 @@
+import {aplicarFiltrosPedidos} from '../lib/pedidosFiltros.js'
 import {calcularLogisticaPedido,carregarCadastroFisicoDoPedido} from '../lib/fretes/logistica.js'
 import { Router } from 'express'
 import { supabase } from '../lib/supabase-admin.server.js'
@@ -75,27 +76,14 @@ router.get('/', async (req, res) => {
     const ordenacao = ORDENACOES[ordenar] || ORDENACOES.recentes
     query = query.order(ordenacao.coluna, { ascending: ordenacao.ascending }).range(offset, offset + Number(limit) - 1)
 
-    if (status) query = query.eq('status', status)
-    if (lead_id) query = query.eq('lead_id', lead_id)
-    if (cliente_erp_id) query = query.eq('cliente_erp_id', cliente_erp_id)
-    if (sistema_origem) query = query.eq('sistema_origem', sistema_origem)
-    if (periodo_de) query = query.gte('criado_em', periodo_de)
-    if (periodo_ate) query = query.lte('criado_em', periodo_ate)
-    if (sem_vinculo === 'true') query = query.eq('precisa_vinculo_cliente', true)
-    if (com_erro === 'true') query = query.not('erro_sincronizacao', 'is', null)
-    if (com_conflito === 'true') query = query.eq('conflito_sincronizacao', true)
-    if (importados_hoje === 'true') query = query.gte('sincronizado_em', new Date().toISOString().split('T')[0])
-
-    // Vendedor só vê os pedidos atribuídos a ele; admin pode filtrar por qualquer vendedor.
-    if (req.user.role === 'vendedor') query = query.eq('vendedor_id', req.user.id)
-    else if (vendedor_id) query = query.eq('vendedor_id', vendedor_id)
+    query = aplicarFiltrosPedidos(query, req.query, req.user)
 
     const { data, error, count } = await query
     if (error) throw error
 
     res.json({ data, total: count, page: Number(page), limit: Number(limit) })
   } catch (err) {
-    res.status(500).json({ erro: err.message })
+    res.status(err.status === 400 ? 400 : 500).json({ erro: err.message })
   }
 })
 
@@ -106,11 +94,11 @@ router.get('/', async (req, res) => {
 // segmento e capturaria "/resumo" como se fosse um id se viesse primeiro.
 router.get('/resumo', async (req, res) => {
   try {
-    const scopoVendedor = req.user.role === 'vendedor' ? req.user.id : null
+    const filter = q => aplicarFiltrosPedidos(q, req.query, req.user)
 
     const contarStatus = async (status) => {
       let q = supabase.from('pedidos').select('id', { count: 'exact', head: true }).eq('status', status)
-      if (scopoVendedor) q = q.eq('vendedor_id', scopoVendedor)
+      q = filter(q)
       const { count, error } = await q
       if (error) throw error
       return count || 0
@@ -123,8 +111,8 @@ router.get('/resumo', async (req, res) => {
     let valorTotal = 0
     const PAGE = 1000
     for (let offset = 0; ; offset += PAGE) {
-      let q = supabase.from('pedidos').select('total').not('status', 'in', '(cancelado,rascunho)').range(offset, offset + PAGE - 1)
-      if (scopoVendedor) q = q.eq('vendedor_id', scopoVendedor)
+      let q = supabase.from('pedidos').select('total').not('status', 'in', '(cancelado,rascunho)').order('id').range(offset, offset + PAGE - 1)
+      q = filter(q)
       const { data, error } = await q
       if (error) throw error
       for (const row of data) valorTotal += Number(row.total) || 0
@@ -137,7 +125,7 @@ router.get('/resumo', async (req, res) => {
       valor_total: Math.round(valorTotal * 100) / 100,
     })
   } catch (err) {
-    res.status(500).json({ erro: err.message })
+    res.status(err.status === 400 ? 400 : 500).json({ erro: err.message })
   }
 })
 
@@ -657,3 +645,4 @@ async function gerarParcelas(pedido) {
 }
 
 export default router
+
