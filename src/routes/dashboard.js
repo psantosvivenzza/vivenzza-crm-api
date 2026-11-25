@@ -292,7 +292,7 @@ router.get('/', async (req, res) => {
     safe(
       verificarStatusSyncGerencial().then((statusSync) => {
         if (!statusSync.disponivel) {
-          return { disponivel: false, motivo: statusSync.reason, ultima_sincronizacao: statusSync.last_sync_at, quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0, por_representante: {} }
+          return { disponivel: false, motivo: statusSync.reason, ultima_sincronizacao: statusSync.last_sync_at, verificado_em: new Date().toISOString(), max_atraso_min: statusSync.max_age_minutes, idade_minutos: statusSync.age_minutes, quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0, por_representante: {} }
         }
         return supabase.from('vendas_gerenciais_netvision')
           .select('valor_documento, pagamento_a_vista, representante_codigo, representante_nome')
@@ -313,7 +313,7 @@ router.get('/', async (req, res) => {
               if (n.pagamento_a_vista) { porRepresentante[chave].a_vista += valor; aVista += valor }
               else { porRepresentante[chave].a_prazo += valor; aPrazo += valor }
             }
-            return { disponivel: true, ultima_sincronizacao: statusSync.last_sync_at, quantidade: (data ?? []).length, valor: valorTotal, a_vista: aVista, a_prazo: aPrazo, por_representante: porRepresentante }
+            return { disponivel: true, ultima_sincronizacao: statusSync.last_sync_at, verificado_em: new Date().toISOString(), max_atraso_min: statusSync.max_age_minutes, idade_minutos: statusSync.age_minutes, quantidade: (data ?? []).length, valor: valorTotal, a_vista: aVista, a_prazo: aPrazo, por_representante: porRepresentante }
           })
       }),
       { disponivel: false, motivo: 'erro_inesperado', quantidade: 0, valor: 0, a_vista: 0, a_prazo: 0, por_representante: {} }
@@ -552,3 +552,4 @@ router.get('/atendimento', async (req, res) => {
 })
 
 export default router
+
