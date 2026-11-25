@@ -48,7 +48,7 @@ test('2. nunca sincronizou (tabela vazia) -> indisponivel', async () => {
   assert.equal(r.reason, 'nunca_sincronizou')
 })
 
-test('3. sync velho (>1440min default) -> indisponivel (desatualizado)', async () => {
+test('3. sync velho (>30min default) -> indisponivel (desatualizado)', async () => {
   await inserirSync({ minutosAtras: 1500 })
   const r = await verificarStatusSyncGerencial()
   assert.equal(r.disponivel, false)
@@ -82,14 +82,14 @@ test('5. consulta ao banco falha -> indisponivel (client injetado)', async () =>
   assert.equal(r.reason, 'erro_consulta_banco')
 })
 
-test('6. VENDAS_GERENCIAIS_SYNC_MAX_ATRASO_MIN inválido/ausente -> default seguro (1440)', async () => {
+test('6. VENDAS_GERENCIAIS_SYNC_MAX_ATRASO_MIN inválido/ausente -> default seguro (30)', async () => {
   await inserirSync({ minutosAtras: 1450 })
   for (const valorInvalido of [undefined, '0', '-10', 'abc', '']) {
     if (valorInvalido === undefined) delete process.env.VENDAS_GERENCIAIS_SYNC_MAX_ATRASO_MIN
     else process.env.VENDAS_GERENCIAIS_SYNC_MAX_ATRASO_MIN = valorInvalido
     const r = await verificarStatusSyncGerencial()
-    assert.equal(r.max_age_minutes, 1440, `valor "${valorInvalido}" deveria cair no default 1440`)
-    assert.equal(r.disponivel, false, `1450min > 1440 default deveria marcar indisponível com max_atraso="${valorInvalido}"`)
+    assert.equal(r.max_age_minutes, 30, `valor "${valorInvalido}" deveria cair no default 30`)
+    assert.equal(r.disponivel, false, `1450min > 30 default deveria marcar indisponível com max_atraso="${valorInvalido}"`)
   }
 })
 
@@ -103,3 +103,4 @@ test('7. dry_run nunca conta -> mesmo com registro dry_run fresco, segue nunca_s
   assert.equal(r.disponivel, false)
   assert.equal(r.reason, 'nunca_sincronizou')
 })
+

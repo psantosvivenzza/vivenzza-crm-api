@@ -55,19 +55,15 @@ $def.Settings.ExecutionTimeLimit = "PT15M"  # execucao curta por natureza - 15mi
 $def.Settings.Enabled = $true
 $def.Settings.Hidden = $false
 
-# Trigger unico: diario as 08:05 (5min de defasagem do sync fiscal, so pra
-# nao competir por I/O no mesmo instante exato - sem necessidade tecnica
-# real, MultipleInstances e por tarefa, nao global), repetindo a cada 30min
-# por 9h (08:05-17:05) - cobre o expediente pedido. StartWhenAvailable cobre
-# o caso "maquina estava desligada as 08:05".
+# Trigger unico de tempo, repetindo indefinidamente a cada 10 minutos.
+# Sem Duration/EndBoundary: acompanha apuracao noturna, fins de semana e feriados.
+# StartWhenAvailable cobre retorno da maquina; IgnoreNew impede sobreposicao.
 $triggers = $def.Triggers
-$dailyTrigger = $triggers.Create(2)  # TASK_TRIGGER_DAILY
-$oitoHoras = Get-Date -Hour 8 -Minute 5 -Second 0
-$dailyTrigger.StartBoundary = $oitoHoras.ToString("yyyy-MM-ddTHH:mm:ss")
-$dailyTrigger.DaysInterval = 1
-$dailyTrigger.Repetition.Interval = "PT30M"
-$dailyTrigger.Repetition.Duration = "PT9H"
-$dailyTrigger.Enabled = $true
+$trigger = $triggers.Create(1)  # TASK_TRIGGER_TIME
+$inicio = (Get-Date).AddMinutes(1)
+$trigger.StartBoundary = $inicio.ToString("yyyy-MM-ddTHH:mm:ss")
+$trigger.Repetition.Interval = "PT10M"
+$trigger.Enabled = $true
 
 # Action - cmd.exe direto (sem supervisor, ver racional no topo do arquivo).
 # Log proprio (sync-vendas-gerenciais.log), nunca no mesmo arquivo de outro
@@ -87,8 +83,8 @@ Write-Output "=== XML final que sera registrado ==="
 Write-Output $xmlFinal
 Write-Output "======================================"
 
-if ($xmlFinal -notmatch '<CalendarTrigger>') {
-  throw "XML final nao contem o CalendarTrigger esperado - abortando sem registrar."
+if ($xmlFinal -notmatch '<TimeTrigger>') {
+  throw "XML final nao contem o TimeTrigger esperado - abortando sem registrar."
 }
 if ($xmlFinal -match '<RestartOnFailure>') {
   throw "XML final contem RestartOnFailure, que nao deveria existir - abortando sem registrar."
@@ -105,9 +101,10 @@ if ($xmlFinal -notmatch [regex]::Escape('sync-vendas-gerenciais-legado.mjs')) {
 if ($xmlFinal -match 'NFE_CERT_SENHA|E01_PASSWORD') {
   throw "XML final contem referencia a segredo - abortando sem registrar (nao deveria acontecer nunca, guarda de seguranca extra)."
 }
+if ($trigger.Repetition.Interval -ne 'PT10M' -or $trigger.Repetition.Duration -or $trigger.EndBoundary) { throw 'A agenda deve repetir a cada 10 minutos sem janela final.' }
 Write-Output "[instalar-tarefa-vendas-gerenciais] validacoes basicas do XML passaram"
 
-Stop-ScheduledTask -TaskName $nomeTarefa -ErrorAction SilentlyContinue
+# Nao interromper um ciclo em andamento ao atualizar a agenda.
 
 Register-ScheduledTask -TaskName $nomeTarefa -Xml $xmlFinal -Force | Out-Null
 Write-Output "[instalar-tarefa-vendas-gerenciais] tarefa $nomeTarefa registrada via XML validado"
@@ -120,4 +117,5 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $info = Get-ScheduledTaskInfo -TaskName $nomeTarefa
 $estado = (Get-ScheduledTask -TaskName $nomeTarefa).State
 Write-Output "[instalar-tarefa-vendas-gerenciais] tarefa registrada - estado: $estado, proxima execucao: $($info.NextRunTime)"
-Write-Output "[instalar-tarefa-vendas-gerenciais] concluido - primeiro disparo automatico no proximo horario da janela 08h05-17h05"
+Write-Output "[instalar-tarefa-vendas-gerenciais] concluido - agenda continua 24h, a cada 10 minutos"
+

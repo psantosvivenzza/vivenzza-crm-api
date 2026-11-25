@@ -17,11 +17,11 @@
 // disponivel=false.
 import { supabase } from './supabase-admin.server.js'
 
-const DEFAULT_MAX_ATRASO_MIN = 1440 // 24h — indicador de dashboard, não guard de envio
+const DEFAULT_MAX_ATRASO_MIN = 30 // 10-minute schedule; never present older data as current
 
 function lerMaxAtrasoMin() {
   const env = Number(process.env.VENDAS_GERENCIAIS_SYNC_MAX_ATRASO_MIN)
-  return Number.isFinite(env) && env > 0 ? env : DEFAULT_MAX_ATRASO_MIN
+  return Number.isFinite(env) && env > 0 ? Math.min(env, DEFAULT_MAX_ATRASO_MIN) : DEFAULT_MAX_ATRASO_MIN
 }
 
 function resultado({ disponivel, reason, lastSyncAt = null, ageMinutes = null, maxAgeMinutes }) {
@@ -41,29 +41,42 @@ export async function verificarStatusSyncGerencial({ clienteSupabase = supabase 
       .select('status, iniciado_em, concluido_em, total_com_erro')
       .eq('dry_run', false)
       .order('iniciado_em', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+      .limit(2)
+      .abortSignal(AbortSignal.timeout(8000))
 
-    if (error) return resultado({ disponivel: false, reason: 'erro_consulta_banco', maxAgeMinutes: maxAtrasoMin })
-    if (!data) return resultado({ disponivel: false, reason: 'nunca_sincronizou', maxAgeMinutes: maxAtrasoMin })
-    if (data.status === 'falhou') return resultado({ disponivel: false, reason: 'ultimo_sync_falhou', lastSyncAt: data.concluido_em ?? data.iniciado_em, maxAgeMinutes: maxAtrasoMin })
-    if (data.status === 'executando') return resultado({ disponivel: false, reason: 'ultimo_sync_em_andamento', maxAgeMinutes: maxAtrasoMin })
-    if (Number(data.total_com_erro || 0) > 0) {
-      return resultado({ disponivel: false, reason: 'ultimo_sync_com_erros', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
-    }
-    if (!data.concluido_em) return resultado({ disponivel: false, reason: 'ultimo_sync_sem_timestamp_conclusao', maxAgeMinutes: maxAtrasoMin })
-
-    const concluidoEm = new Date(data.concluido_em)
-    if (Number.isNaN(concluidoEm.getTime())) {
-      return resultado({ disponivel: false, reason: 'timestamp_invalido', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAtrasoMin })
-    }
-
-    const ageMinutes = Math.round((Date.now() - concluidoEm.getTime()) / 60000)
-    if (ageMinutes > maxAtrasoMin) {
-      return resultado({ disponivel: false, reason: 'sync_desatualizado', lastSyncAt: data.concluido_em, ageMinutes, maxAgeMinutes: maxAtrasoMin })
-    }
-    return resultado({ disponivel: true, reason: null, lastSyncAt: data.concluido_em, ageMinutes, maxAgeMinutes: maxAtrasoMin })
+    if (error) return resultado({disponivel:false,reason:'erro_consulta_banco',maxAgeMinutes:maxAtrasoMin})
+    // A running cycle does not invalidate the preceding completed snapshot.
+    // Failed cycles still fail closed; the preceding snapshot must remain fresh.
+    const latest = data?.[0]
+    const snapshot = latest?.status === 'executando' ? data?.[1] : latest
+    return avaliarStatusSyncGerencial(snapshot, { maxAgeMinutes: maxAtrasoMin })
   } catch (err) {
     return resultado({ disponivel: false, reason: 'erro_consulta_banco', maxAgeMinutes: maxAtrasoMin })
   }
 }
+
+export function avaliarStatusSyncGerencial(data,{now=Date.now(),maxAgeMinutes=DEFAULT_MAX_ATRASO_MIN}={}) {
+    if (!data) return resultado({ disponivel: false, reason: 'nunca_sincronizou', maxAgeMinutes: maxAgeMinutes })
+    if (data.status === 'falhou') return resultado({ disponivel: false, reason: 'ultimo_sync_falhou', lastSyncAt: data.concluido_em ?? data.iniciado_em, maxAgeMinutes: maxAgeMinutes })
+    if (data.status === 'executando') return resultado({ disponivel: false, reason: 'ultimo_sync_em_andamento', maxAgeMinutes: maxAgeMinutes })
+    if (!Number.isFinite(Number(data.total_com_erro ?? 0)) || Number(data.total_com_erro ?? 0) !== 0) {
+      return resultado({ disponivel: false, reason: 'ultimo_sync_com_erros', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAgeMinutes })
+    }
+    if (data.status !== 'concluido') return resultado({disponivel:false,reason:'ultimo_sync_status_invalido',maxAgeMinutes})
+    if (!data.concluido_em) return resultado({ disponivel: false, reason: 'ultimo_sync_sem_timestamp_conclusao', maxAgeMinutes: maxAgeMinutes })
+
+    const concluidoEm = new Date(data.concluido_em)
+    if (Number.isNaN(concluidoEm.getTime())) {
+      return resultado({ disponivel: false, reason: 'timestamp_invalido', lastSyncAt: data.concluido_em, maxAgeMinutes: maxAgeMinutes })
+    }
+
+    const elapsed = now - concluidoEm.getTime()
+    if (elapsed < 0) return resultado({disponivel:false,reason:'timestamp_futuro',lastSyncAt:data.concluido_em,maxAgeMinutes})
+    const ageMinutes = Math.floor(elapsed / 60000)
+    if (elapsed > maxAgeMinutes * 60000) {
+      return resultado({ disponivel: false, reason: 'sync_desatualizado', lastSyncAt: data.concluido_em, ageMinutes, maxAgeMinutes: maxAgeMinutes })
+    }
+    return resultado({ disponivel: true, reason: null, lastSyncAt: data.concluido_em, ageMinutes, maxAgeMinutes: maxAgeMinutes })
+}
+
+
