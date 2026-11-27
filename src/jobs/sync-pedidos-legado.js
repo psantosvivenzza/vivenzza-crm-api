@@ -21,6 +21,7 @@ import pg from 'pg'
 import { lerLogisticaNetvision } from '../lib/fretes/netvision.js'
 import { supabase } from '../lib/supabase-admin.server.js'
 import { configE01 } from '../lib/e01Host.js'
+import { validarConexaoPedidos } from '../lib/pedidos-conexao.js'
 
 const PAGE_E01 = 200
 const PAGE_SUPABASE = 1000
@@ -48,17 +49,7 @@ async function conectarE01() {
   const pool = new pg.Pool({
     ...(await configE01({ max: CONCORRENCIA })),
   })
-  try {
-    await pool.query('SELECT 1') // valida a conexão antes de seguir, mesmo padrão de client.connect()
-  } catch (err) {
-    // O e01 só é alcançável a partir da rede local do DESKTOP-Q6O54R1 — quando
-    // essa API roda no Railway, a conexão sempre vai cair aqui. Mensagem clara
-    // em vez do erro cru do driver pg, pra não confundir o admin no botão
-    // "Sincronizar agora".
-    await pool.end().catch(() => {})
-    throw new Error('Não foi possível conectar ao banco legado (e01). Isso só funciona rodando localmente, na mesma rede do servidor NetVision — use "node scripts/sync-pedidos-legado.mjs" na máquina com acesso a ele.')
-  }
-  return pool
+  return validarConexaoPedidos(pool)
 }
 
 export async function buscarMapaClientes() {
