@@ -50,6 +50,7 @@ import dns from 'dns'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { resolverIpv4Windows } from './e01WindowsResolver.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ARQUIVO_CACHE = path.join(__dirname, '..', '..', '.localdev', 'e01-host-cache.json')
@@ -76,7 +77,7 @@ function gravarCache(nome, ip) {
   }
 }
 
-export async function resolverHostE01() {
+export async function resolverHostE01({ plataforma = process.platform } = {}) {
   const nome = process.env.E01_HOST
   const reserva = process.env.E01_HOST_IP
 
@@ -90,6 +91,17 @@ export async function resolverHostE01() {
     gravarCache(nome, address)
     return address
   } catch (err) {
+    // Node pode falhar em DNS enquanto LLMNR/NetBIOS nativo responde. Consultar
+    // o MESMO hostname, com timeout, antes de recorrer a IPs possivelmente velhos.
+    // Falha/ambiguidade preserva o contrato anterior e o erro DNS original.
+    if (plataforma === 'win32') {
+      try {
+        const allowedIps = (process.env.E01_WINDOWS_ALLOWED_IPS || '').split(',').map(ip => ip.trim())
+        const ip = await resolverIpv4Windows(nome, { allowedIps })
+        gravarCache(nome, ip)
+        return ip
+      } catch { /* cache/reserva continuam disponíveis abaixo */ }
+    }
     // Último IP que funcionou de verdade vem antes da reserva fixa: ele é o
     // mais recente dos dois, e é o único que acompanha troca de DHCP.
     const doCache = lerCache(nome)
